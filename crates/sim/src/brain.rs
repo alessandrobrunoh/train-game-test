@@ -8,6 +8,7 @@
 
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
 use crate::item::ItemKind;
@@ -28,7 +29,7 @@ pub trait Brain {
 }
 
 /// Hand-tuned weights for [`UtilityBrain`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UtilityWeights {
     pub eat: f32,
     /// Below this hunger urgency (`1 - hunger`) eating is not considered at meal times...
@@ -92,8 +93,9 @@ impl Default for UtilityWeights {
 }
 
 /// Fast rule-based brain: scores every option from needs, time of day and job
-/// schedule, then picks the best (plus a little noise).
-#[derive(Clone, Debug)]
+/// schedule, then picks the best (plus a little noise). Serializable with its
+/// RNG state, so a saved game continues exactly as it would have.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UtilityBrain {
     pub weights: UtilityWeights,
     rng: ChaCha8Rng,

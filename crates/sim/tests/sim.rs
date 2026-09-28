@@ -62,6 +62,23 @@ fn save_load_roundtrip_continues_identically() {
 }
 
 #[test]
+fn brain_roundtrip_keeps_its_rng_state() {
+    let (mut a, mut brain_a) = world();
+    a.run(&mut brain_a, DAY + 45);
+    let mut b = a.clone();
+    let json = serde_json::to_string(&brain_a).expect("brain serializes");
+    let mut brain_b: UtilityBrain = serde_json::from_str(&json).expect("brain deserializes");
+    assert_eq!(brain_b.weights, brain_a.weights);
+    a.run(&mut brain_a, DAY);
+    b.run(&mut brain_b, DAY);
+    assert_eq!(snapshot(&a), snapshot(&b));
+    assert_eq!(
+        serde_json::to_string(&brain_a).unwrap(),
+        serde_json::to_string(&brain_b).unwrap()
+    );
+}
+
+#[test]
 fn needs_stay_in_range_and_stations_consistent() {
     let (mut w, mut brain) = world();
     for t in 0..5 * DAY {
