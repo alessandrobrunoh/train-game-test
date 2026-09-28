@@ -6,6 +6,7 @@ version.workspace = true
 [dependencies]
 bevy = "0.19.1"
 bevy_egui = "0.42.0"
+egui_plot = "0.37.0"
 sim = { path = "../sim" }
 
 [dev-dependencies]

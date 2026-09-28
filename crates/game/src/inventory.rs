@@ -11,8 +11,8 @@ use crate::ui::{MARGIN, PointerCheck, item_swatch};
 
 /// La finestra dell'inventario è aperta.
 #[derive(Resource, Default)]
-struct InventoryWindow {
-    open: bool,
+pub(crate) struct InventoryWindow {
+    pub(crate) open: bool,
 }
 
 pub struct InventoryPlugin;

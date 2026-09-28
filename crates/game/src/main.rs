@@ -6,8 +6,10 @@ mod fonts;
 mod hud;
 mod interaction;
 mod inventory;
+mod life_fx;
 mod npc_render;
 mod player;
+mod population;
 mod sim_bridge;
 mod state;
 mod stations;
@@ -50,6 +52,8 @@ fn main() {
             ui::UiPlugin,
             interaction::InteractionPlugin,
             inventory::InventoryPlugin,
+            life_fx::LifeFxPlugin,
+            population::PopulationPlugin,
         ))
         .run();
 }

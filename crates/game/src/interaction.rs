@@ -10,15 +10,17 @@
 //! - Vicino a un NPC sveglio: gli regala qualcosa che accetta (un vestito o un
 //!   attrezzo che gli manca, oppure cibo se ha fame).
 //!
+//! Mentre la camera segue un NPC (tasto F) non si interagisce con niente.
+//!
 //! Sopra il bersaglio compare un piccolo suggerimento ("E: prendi una
 //! razione"); dopo aver premuto E, per un attimo, l'esito.
 
 use bevy::prelude::*;
 use sim::{CarriageId, CarriageKind, ItemKind, NpcId, StationKind, World};
 
-use crate::camera::follow_player;
+use crate::camera::follow_target;
 use crate::player::Player;
-use crate::state::{NpcSprite, PlayerInventory, Sim};
+use crate::state::{FollowNpc, NpcSprite, PlayerInventory, Sim};
 use crate::stations::StationLayout;
 use crate::storage::{STORAGE_HEIGHT, has_storage, storage_range};
 use crate::train::{FLOOR_Y, TrainLayout, TrainLocation};
@@ -103,7 +105,7 @@ impl Plugin for InteractionPlugin {
                 Update,
                 (update_target, interact, update_prompt)
                     .chain()
-                    .after(follow_player),
+                    .after(follow_target),
             );
     }
 }
@@ -356,8 +358,10 @@ fn spawn_prompt(mut commands: Commands) {
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_target(
     sim: Res<Sim>,
+    follow: Res<FollowNpc>,
     layout: Res<TrainLayout>,
     stations: Res<StationLayout>,
     inventory: Res<PlayerInventory>,
@@ -365,15 +369,20 @@ fn update_target(
     npcs: Query<(&NpcSprite, &Transform), Without<Player>>,
     mut state: ResMut<InteractionState>,
 ) {
-    let target = find_target(
-        &sim.world,
-        &layout,
-        &stations,
-        &inventory,
-        player.translation.truncate(),
-        npcs.iter()
-            .map(|(npc, transform)| (npc.0, transform.translation.truncate())),
-    );
+    // Mentre la camera segue un NPC il giocatore non interagisce.
+    let target = (!follow.0)
+        .then(|| {
+            find_target(
+                &sim.world,
+                &layout,
+                &stations,
+                &inventory,
+                player.translation.truncate(),
+                npcs.iter()
+                    .map(|(npc, transform)| (npc.0, transform.translation.truncate())),
+            )
+        })
+        .flatten();
     if state.target != target {
         state.target = target;
     }

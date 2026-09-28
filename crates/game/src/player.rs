@@ -6,6 +6,7 @@
 
 use bevy::prelude::*;
 
+use crate::state::FollowNpc;
 use crate::train::{FLOOR_Y, TrainLayout};
 
 /// Dimensioni del rettangolo del giocatore.
@@ -84,7 +85,17 @@ fn spawn_player(mut commands: Commands) {
     ));
 }
 
-fn gather_input(keys: Res<ButtonInput<KeyCode>>, mut input: Single<&mut PlayerInput>) {
+fn gather_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    follow: Res<FollowNpc>,
+    mut input: Single<&mut PlayerInput>,
+) {
+    // Mentre la camera segue un NPC il giocatore resta fermo.
+    if follow.0 {
+        input.axis = 0.0;
+        input.jump_held = false;
+        return;
+    }
     let left = keys.any_pressed([KeyCode::KeyA, KeyCode::ArrowLeft]);
     let right = keys.any_pressed([KeyCode::KeyD, KeyCode::ArrowRight]);
     let jump_keys = [KeyCode::Space, KeyCode::KeyW, KeyCode::ArrowUp];

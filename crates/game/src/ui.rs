@@ -1,18 +1,25 @@
 //! Interfaccia egui: controlli del tempo, ispettore NPC, registro eventi e carrozze.
 //!
+//! L'ispettore mostra anche età, sesso, origine e legami dell'NPC (ogni
+//! parente o amico è un link che lo seleziona) e il comando "Segui" (tasto F)
+//! per far seguire l'NPC alla camera. Il registro eventi si filtra per
+//! categoria; gli stessi filtri valgono per le notifiche di `life_fx.rs`.
+//!
 //! Tutte le finestre sono piccole e ancorate ai bordi dello schermo, così il
 //! centro (dove la camera mostra il treno) resta libero.
 
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Align2, Color32, RichText};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
-use sim::{Action, ActionKind, Carriage, EventKind, ItemKind, Npc, NpcId, Stats, World};
+use sim::{
+    Action, ActionKind, Carriage, Event, EventKind, GameTime, ItemKind, Npc, NpcId, RelationKind,
+    Stats, World,
+};
 
-use crate::state::{PointerOverUi, SelectedNpc, Sim, SimClock};
+use crate::population::PopulationWindow;
+use crate::sim_bridge::{SPEEDS, seconds_per_year};
+use crate::state::{FollowNpc, PointerOverUi, SelectedNpc, Sim, SimClock, SimPerf};
 use crate::storage::{item_color, plural_title, storable_items};
-
-/// Velocità selezionabili, in minuti di gioco per secondo reale.
-const SPEEDS: [f32; 4] = [1.0, 10.0, 60.0, 600.0];
 /// Quanti eventi mostrare nel registro (i più recenti).
 const EVENT_LOG_LEN: usize = 50;
 /// Ogni quanti secondi reali ricalcolare statistiche e presenze.
@@ -34,6 +41,7 @@ impl Plugin for UiPlugin {
             app.add_plugins(EguiPlugin::default());
         }
         app.init_resource::<UiCache>()
+            .init_resource::<EventFilter>()
             .add_systems(Update, refresh_cache)
             .add_systems(
                 EguiPrimaryContextPass,
@@ -106,6 +114,8 @@ fn time_panel(
     mut contexts: EguiContexts,
     sim: Option<Res<Sim>>,
     mut clock: ResMut<SimClock>,
+    perf: Res<SimPerf>,
+    mut population: ResMut<PopulationWindow>,
     cache: Res<UiCache>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -117,8 +127,12 @@ fn time_panel(
         .anchor(Align2::CENTER_TOP, [0.0, MARGIN])
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
+                let days_per_year = sim.as_ref().map_or(12, |s| s.world.params.days_per_year);
                 match &sim {
-                    Some(sim) => ui.strong(sim.world.clock.to_string()),
+                    Some(sim) => {
+                        let now = sim.world.clock;
+                        ui.strong(format!("Anno {} · {now}", year_of(now, days_per_year)))
+                    }
                     None => ui.weak(NOT_STARTED),
                 };
                 ui.separator();
@@ -131,16 +145,33 @@ fn time_panel(
                     clock.paused = !clock.paused;
                 }
                 ui.separator();
-                for speed in SPEEDS {
+                for (key, speed) in SPEEDS.into_iter().enumerate() {
                     let active = clock.minutes_per_second == speed;
                     let response = ui
                         .selectable_label(active, format!("{speed}x"))
-                        .on_hover_text(format!("{speed} minuti di gioco al secondo"));
+                        .on_hover_text(format!(
+                            "Tasto {}: {speed} minuti di gioco al secondo\nUn anno ({days_per_year} giorni) ≈ {}",
+                            key + 1,
+                            format_seconds(seconds_per_year(speed, days_per_year))
+                        ));
                     if response.clicked() && !active {
                         clock.minutes_per_second = speed;
                     }
                 }
+                ui.separator();
+                ui.toggle_value(&mut population.open, "Popolazione (G)");
             });
+            if perf.behind && !clock.paused {
+                let days_per_year = sim.as_ref().map_or(12, |s| s.world.params.days_per_year);
+                ui.colored_label(
+                    WARNING,
+                    format!(
+                        "⚠ La simulazione non tiene il passo: {:.0} minuti al secondo (un anno ≈ {})",
+                        perf.effective,
+                        format_seconds(seconds_per_year(perf.effective, days_per_year))
+                    ),
+                );
+            }
             if let Some(stats) = &cache.stats {
                 ui.horizontal(|ui| stats_row(ui, stats));
             }
@@ -178,7 +209,12 @@ fn stats_row(ui: &mut egui::Ui, stats: &Stats) {
 // Ispettore dell'NPC selezionato (a destra)
 // ----------------------------------------------------------------------
 
-fn inspector(mut contexts: EguiContexts, sim: Option<Res<Sim>>, mut selected: ResMut<SelectedNpc>) {
+fn inspector(
+    mut contexts: EguiContexts,
+    sim: Option<Res<Sim>>,
+    mut selected: ResMut<SelectedNpc>,
+    mut follow: ResMut<FollowNpc>,
+) {
     let Some(id) = selected.0 else {
         return;
     };
@@ -186,6 +222,10 @@ fn inspector(mut contexts: EguiContexts, sim: Option<Res<Sim>>, mut selected: Re
         return;
     };
     let mut open = true;
+    let mut clicked = None;
+    let mut following = follow.0;
+    // Non più alto dello schermo: il resto scorre.
+    let max_height = (ctx.content_rect().height() - 4.0 * MARGIN - 40.0).max(120.0);
     egui::Window::new("Ispettore")
         .anchor(Align2::RIGHT_TOP, [-MARGIN, MARGIN])
         .resizable(false)
@@ -197,19 +237,50 @@ fn inspector(mut contexts: EguiContexts, sim: Option<Res<Sim>>, mut selected: Re
                 ui.weak(NOT_STARTED);
             }
             Some(sim) => match sim.world.npc(id) {
-                Some(npc) => npc_details(ui, &sim.world, npc),
+                Some(npc) => {
+                    egui::ScrollArea::vertical()
+                        .max_height(max_height)
+                        .show(ui, |ui| {
+                            clicked = npc_details(ui, &sim.world, npc, &mut following);
+                        });
+                }
                 None => missing_npc(ui, &sim.world, id),
             },
         });
+    if follow.0 != following {
+        follow.0 = following;
+    }
     if !open {
         selected.0 = None;
+    } else if let Some(other) = clicked {
+        selected.0 = Some(other);
     }
 }
 
-fn npc_details(ui: &mut egui::Ui, world: &World, npc: &Npc) {
+/// Dettagli dell'NPC; restituisce il parente o amico cliccato, se c'è.
+fn npc_details(ui: &mut egui::Ui, world: &World, npc: &Npc, following: &mut bool) -> Option<NpcId> {
     let now = world.clock;
+    let mut clicked = None;
     ui.heading(&npc.name);
-    ui.label(format!("{} anni · {}", npc.age, npc.id));
+    let sex = npc.sex;
+    ui.label(format!(
+        "{} anni · {} · {}",
+        npc.age,
+        npc.stage().name(sex),
+        sex.name()
+    ));
+    ui.horizontal(|ui| {
+        let origin = if world.is_founder(npc.id) {
+            sex.pick("fondatrice", "fondatore").to_string()
+        } else {
+            format!("{} sul treno", sex.pick("nata", "nato"))
+        };
+        ui.weak(format!("{origin} · {}", npc.id));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.toggle_value(following, "Segui (F)")
+                .on_hover_text("La camera segue questo NPC invece del giocatore");
+        });
+    });
     ui.separator();
 
     let job = match (npc.job, npc.workplace) {
@@ -235,6 +306,11 @@ fn npc_details(ui: &mut egui::Ui, world: &World, npc: &Npc) {
             format_minutes(until.since(now))
         )),
     );
+
+    ui.separator();
+    if let Some(id) = relations(ui, world, npc) {
+        clicked = Some(id);
+    }
 
     ui.separator();
     ui.strong("Bisogni");
@@ -300,6 +376,101 @@ fn npc_details(ui: &mut egui::Ui, world: &World, npc: &Npc) {
             .default_open(false)
             .show(ui, |ui| ui.label(context));
     }
+    clicked
+}
+
+/// Famiglia e amici, ognuno cliccabile; restituisce chi è stato cliccato.
+fn relations(ui: &mut egui::Ui, world: &World, npc: &Npc) -> Option<NpcId> {
+    let mut clicked = None;
+    ui.strong("Famiglia");
+    let family = [
+        ("Partner", RelationKind::Partner),
+        ("Genitori", RelationKind::Parent),
+        ("Figli", RelationKind::Child),
+        ("Fratelli", RelationKind::Sibling),
+    ];
+    let mut any = false;
+    for (label, kind) in family {
+        let ids: Vec<NpcId> = npc.relations_of(kind).map(|r| r.other).collect();
+        if ids.is_empty() {
+            continue;
+        }
+        any = true;
+        ui.horizontal_wrapped(|ui| {
+            // Il partner ha l'etichetta in base al suo sesso, non a quello dell'NPC.
+            let label = match (kind, ids.first().and_then(|&id| world.npc(id))) {
+                (RelationKind::Partner, Some(p)) => p.sex.pick("Moglie", "Marito"),
+                _ => label,
+            };
+            ui.weak(format!("{label}:"));
+            for id in ids {
+                if relative_link(ui, world, id) {
+                    clicked = Some(id);
+                }
+            }
+        });
+    }
+    if !any {
+        ui.weak("Nessun parente in vita.");
+    }
+
+    let mut friends: Vec<(NpcId, f32)> = npc
+        .relations_of(RelationKind::Friend)
+        .map(|r| (r.other, r.affinity))
+        .collect();
+    friends.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    egui::CollapsingHeader::new(format!("Amici e conoscenti ({})", friends.len()))
+        .id_salt("inspector_friends")
+        .default_open(true)
+        .show(ui, |ui| {
+            if friends.is_empty() {
+                ui.weak("Nessuno.");
+                return;
+            }
+            egui::Grid::new("friends_grid")
+                .num_columns(2)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    for (id, affinity) in friends {
+                        if relative_link(ui, world, id) {
+                            clicked = Some(id);
+                        }
+                        affinity_bar(ui, affinity);
+                        ui.end_row();
+                    }
+                });
+        });
+    clicked
+}
+
+/// Nome (ed età) di un altro NPC come link; vero se è stato cliccato.
+fn relative_link(ui: &mut egui::Ui, world: &World, id: NpcId) -> bool {
+    match world.npc(id) {
+        Some(other) => ui
+            .link(format!("{} ({})", other.name, other.age))
+            .on_hover_text(format!(
+                "{} · {}\nClick: seleziona",
+                other.stage().name(other.sex),
+                world.carriage_label(other.carriage)
+            ))
+            .clicked(),
+        None => {
+            ui.weak(id.to_string());
+            false
+        }
+    }
+}
+
+/// Barretta dell'affinità in `-1..=1`: verde se positiva, rossa se negativa.
+fn affinity_bar(ui: &mut egui::Ui, affinity: f32) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(90.0, 10.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, Color32::from_gray(50));
+    let fraction = affinity.abs().clamp(0.0, 1.0);
+    let fill =
+        egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * fraction, rect.height()));
+    painter.rect_filled(fill, 2.0, if affinity >= 0.0 { GOOD } else { DANGER });
+    response.on_hover_text(format!("Affinità {affinity:+.2}"));
 }
 
 /// L'NPC selezionato non esiste più: cerca nel registro come è morto.
@@ -355,7 +526,96 @@ fn action_text(world: &World, npc: &Npc) -> String {
 // Registro eventi (in basso a sinistra)
 // ----------------------------------------------------------------------
 
-fn event_log(mut contexts: EguiContexts, sim: Option<Res<Sim>>, mut hide_purchases: Local<bool>) {
+/// Categoria di un evento, per i filtri del registro e delle notifiche.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EventCategory {
+    Nascite,
+    Morti,
+    Coppie,
+    /// Maggiore età e pensione.
+    Eta,
+    /// Acquisti degli NPC e oggetti consumati.
+    Acquisti,
+    Scarsita,
+    Giocatore,
+}
+
+impl EventCategory {
+    const ALL: [EventCategory; 7] = [
+        EventCategory::Nascite,
+        EventCategory::Morti,
+        EventCategory::Coppie,
+        EventCategory::Eta,
+        EventCategory::Acquisti,
+        EventCategory::Scarsita,
+        EventCategory::Giocatore,
+    ];
+
+    pub(crate) fn of(kind: &EventKind) -> EventCategory {
+        match kind {
+            EventKind::Born { .. } | EventKind::BirthDenied { .. } => EventCategory::Nascite,
+            EventKind::NpcDied { .. } | EventKind::NpcStarving { .. } => EventCategory::Morti,
+            EventKind::Coupled { .. } | EventKind::Widowed { .. } => EventCategory::Coppie,
+            EventKind::CameOfAge { .. } | EventKind::Retired { .. } => EventCategory::Eta,
+            EventKind::ItemBought { .. } | EventKind::ItemBroke { .. } => EventCategory::Acquisti,
+            EventKind::Shortage { .. } | EventKind::Restocked { .. } => EventCategory::Scarsita,
+            EventKind::PlayerTook { .. }
+            | EventKind::PlayerBought { .. }
+            | EventKind::PlayerGave { .. } => EventCategory::Giocatore,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            EventCategory::Nascite => "nascite",
+            EventCategory::Morti => "morti",
+            EventCategory::Coppie => "coppie",
+            EventCategory::Eta => "età",
+            EventCategory::Acquisti => "acquisti",
+            EventCategory::Scarsita => "scarsità",
+            EventCategory::Giocatore => "giocatore",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            EventCategory::Nascite => "Nascite e nascite negate dall'amministrazione",
+            EventCategory::Morti => "Morti e NPC che muoiono di fame",
+            EventCategory::Coppie => "Nuove coppie e vedovanze",
+            EventCategory::Eta => "Maggiore età e pensione",
+            EventCategory::Acquisti => "Acquisti degli NPC e oggetti consumati",
+            EventCategory::Scarsita => "Scarsità e nuove scorte",
+            EventCategory::Giocatore => "Quello che fai tu",
+        }
+    }
+}
+
+/// Categorie di eventi mostrate nel registro e nelle notifiche.
+#[derive(Resource, Debug)]
+pub(crate) struct EventFilter {
+    /// Indicizzato come `EventCategory::ALL`.
+    shown: [bool; EventCategory::ALL.len()],
+}
+
+impl Default for EventFilter {
+    fn default() -> Self {
+        Self {
+            shown: [true; EventCategory::ALL.len()],
+        }
+    }
+}
+
+impl EventFilter {
+    pub(crate) fn allows(&self, kind: &EventKind) -> bool {
+        self.shown[EventCategory::of(kind) as usize]
+    }
+
+    fn shown_mut(&mut self, category: EventCategory) -> &mut bool {
+        &mut self.shown[category as usize]
+    }
+}
+
+fn event_log(mut contexts: EguiContexts, sim: Option<Res<Sim>>, mut filter: ResMut<EventFilter>) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -373,14 +633,31 @@ fn event_log(mut contexts: EguiContexts, sim: Option<Res<Sim>>, mut hide_purchas
                 ui.weak(NOT_STARTED);
                 return;
             };
-            ui.checkbox(&mut hide_purchases, "Nascondi gli acquisti degli NPC");
-            let hide = *hide_purchases;
+            let mut checkbox = |ui: &mut egui::Ui, category: EventCategory| {
+                ui.checkbox(filter.shown_mut(category), category.label())
+                    .on_hover_text(category.hint());
+            };
+            ui.horizontal(|ui| {
+                ui.weak("Vita:");
+                for category in &EventCategory::ALL[..4] {
+                    checkbox(ui, *category);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.weak("Economia:");
+                for category in &EventCategory::ALL[4..6] {
+                    checkbox(ui, *category);
+                }
+                ui.separator();
+                checkbox(ui, EventCategory::Giocatore);
+            });
+            let filter = &*filter;
             let mut shown = sim
                 .world
                 .events
                 .iter()
                 .rev()
-                .filter(|e| !(hide && matches!(e.kind, EventKind::ItemBought { .. })))
+                .filter(|e| filter.allows(&e.kind))
                 .take(EVENT_LOG_LEN)
                 .peekable();
             if shown.peek().is_none() {
@@ -398,7 +675,7 @@ fn event_log(mut contexts: EguiContexts, sim: Option<Res<Sim>>, mut hide_purchas
         });
 }
 
-fn event_color(kind: &EventKind) -> Color32 {
+pub(crate) fn event_color(kind: &EventKind) -> Color32 {
     match kind {
         EventKind::NpcDied { .. } => DANGER,
         EventKind::NpcStarving { .. } => WARNING,
@@ -406,6 +683,9 @@ fn event_color(kind: &EventKind) -> Color32 {
         EventKind::Restocked { .. } => GOOD,
         EventKind::ItemBroke { .. } => WARNING,
         EventKind::ItemBought { .. } => Color32::GRAY,
+        EventKind::Born { .. } | EventKind::Coupled { .. } | EventKind::CameOfAge { .. } => GOOD,
+        EventKind::Widowed { .. } | EventKind::BirthDenied { .. } => WARNING,
+        EventKind::Retired { .. } => Color32::GRAY,
         EventKind::PlayerTook { .. }
         | EventKind::PlayerBought { .. }
         | EventKind::PlayerGave { .. } => PLAYER,
@@ -564,6 +844,32 @@ fn need_color(value: f32) -> Color32 {
     }
 }
 
+/// Testo di un evento senza l'orario tra parentesi quadre.
+pub(crate) fn event_message(event: &Event) -> String {
+    let text = event.to_string();
+    match text.split_once("] ") {
+        Some((_, message)) => message.to_string(),
+        None => text,
+    }
+}
+
+/// Anno di gioco (da 1) in cui cade `time`, con anni di `days_per_year` giorni.
+pub(crate) fn year_of(time: GameTime, days_per_year: u32) -> u64 {
+    (time.day() - 1) / u64::from(days_per_year.max(1)) + 1
+}
+
+/// Secondi reali in forma leggibile, es. "5.8 s", "4 min 48 s", "4 h 48 min".
+fn format_seconds(seconds: f32) -> String {
+    let s = seconds.max(0.0).round() as u64;
+    if seconds < 60.0 {
+        format!("{seconds:.1} s")
+    } else if s < 3600 {
+        format!("{} min {} s", s / 60, s % 60)
+    } else {
+        format!("{} h {} min", s / 3600, s % 3600 / 60)
+    }
+}
+
 /// Minuti di gioco in forma leggibile, es. "2h 05m" o "45m".
 fn format_minutes(minutes: u64) -> String {
     let (hours, minutes) = (minutes / 60, minutes % 60);
@@ -571,5 +877,51 @@ fn format_minutes(minutes: u64) -> String {
         format!("{hours}h {minutes:02}m")
     } else {
         format!("{minutes}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_events_by_category() {
+        let mut filter = EventFilter::default();
+        let bought = EventKind::ItemBought {
+            npc: NpcId(1),
+            name: "Ada".into(),
+            item: ItemKind::Vestito,
+            price: 3,
+            carriage: sim::CarriageId(0),
+        };
+        let shortage = EventKind::Shortage {
+            item: ItemKind::Razione,
+        };
+        assert_eq!(EventCategory::of(&bought), EventCategory::Acquisti);
+        assert_eq!(EventCategory::of(&shortage), EventCategory::Scarsita);
+        assert!(filter.allows(&bought) && filter.allows(&shortage));
+        *filter.shown_mut(EventCategory::Acquisti) = false;
+        assert!(!filter.allows(&bought));
+        assert!(filter.allows(&shortage));
+    }
+
+    #[test]
+    fn years_and_messages() {
+        assert_eq!(year_of(GameTime::from_dhm(1, 6, 0), 12), 1);
+        assert_eq!(year_of(GameTime::from_dhm(12, 23, 59), 12), 1);
+        assert_eq!(year_of(GameTime::from_dhm(13, 0, 0), 12), 2);
+        let event = Event {
+            time: GameTime::from_dhm(3, 8, 0),
+            kind: EventKind::Shortage {
+                item: ItemKind::Razione,
+            },
+        };
+        assert_eq!(
+            event_message(&event),
+            "Carestia: nessuna Mensa ha più razioni"
+        );
+        assert_eq!(format_seconds(5.76), "5.8 s");
+        assert_eq!(format_seconds(288.0), "4 min 48 s");
+        assert_eq!(format_seconds(17280.0), "4 h 48 min");
     }
 }

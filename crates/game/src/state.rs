@@ -16,6 +16,8 @@ impl Plugin for StatePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SimClock>()
             .init_resource::<SelectedNpc>()
+            .init_resource::<FollowNpc>()
+            .init_resource::<SimPerf>()
             .init_resource::<PlayerInventory>()
             .init_resource::<PointerOverUi>();
     }
@@ -51,6 +53,22 @@ impl Default for SimClock {
 /// NPC selezionato con un click, mostrato nell'ispettore.
 #[derive(Resource, Default)]
 pub struct SelectedNpc(pub Option<NpcId>);
+
+/// Vero quando la camera segue l'NPC selezionato invece del giocatore (tasto F).
+/// Torna falso da solo quando non c'è più una selezione (vedi `camera.rs`).
+/// Mentre è attivo il giocatore resta fermo e non interagisce.
+#[derive(Resource, Default)]
+pub struct FollowNpc(pub bool);
+
+/// Quanto va veloce davvero la simulazione (vedi `sim_bridge.rs`).
+#[derive(Resource, Debug, Default)]
+pub struct SimPerf {
+    /// Minuti di gioco simulati per secondo reale (media mobile).
+    pub effective: f32,
+    /// Vero se nell'ultimo periodo il tempo per frame non è bastato e parte
+    /// dell'arretrato è stata scartata.
+    pub behind: bool,
+}
 
 /// Vero quando il puntatore è sopra un pannello egui: i click non vanno al mondo.
 #[derive(Resource, Default)]

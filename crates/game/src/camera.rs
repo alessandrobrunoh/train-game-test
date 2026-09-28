@@ -1,5 +1,10 @@
 //! Camera 2D che segue il giocatore con uno smorzamento morbido.
 //!
+//! Con "Segui" attivo (tasto F o bottone nell'ispettore) la camera segue invece
+//! l'NPC selezionato: il giocatore resta dov'è e non può interagire finché
+//! non si torna a lui (di nuovo F, o chiudendo l'ispettore). Se l'NPC seguito
+//! muore, l'inquadratura resta sull'ultimo punto in cui era.
+//!
 //! In orizzontale l'inquadratura resta dentro il treno: non mostra mai oltre le
 //! pareti di testata estreme (più un piccolo margine). Quando la camera è ferma
 //! la sua posizione viene allineata alla griglia dei pixel dello schermo, così
@@ -11,8 +16,14 @@ use bevy::{
     window::PrimaryWindow,
 };
 
+use sim::NpcId;
+
+use crate::npc_render::{NpcSpriteIndex, npc_position};
 use crate::player::Player;
-use crate::train::{TrainLayout, WALL};
+use crate::sim_bridge::SimTickSet;
+use crate::state::{FollowNpc, NpcSprite, SelectedNpc, Sim};
+use crate::stations::StationLayout;
+use crate::train::{FLOOR_Y, TrainLayout, WALL};
 
 /// Altezza visibile in unità mondo: con una finestra alta 720 px ogni unità
 /// diventa esattamente 3 pixel, adatto alla pixel art.
@@ -25,6 +36,10 @@ const DECAY_X: f32 = 6.0;
 const DECAY_Y: f32 = 2.5;
 /// Quanto cielo si vede oltre le pareti di testata alle estremità del treno.
 const EDGE_MARGIN: f32 = 16.0;
+/// Quota (sopra il pavimento) su cui si centra la camera che segue un NPC:
+/// come per il giocatore in piedi, così seguire chi sale su un letto a
+/// castello non fa muovere l'inquadratura in verticale.
+const NPC_EYE_HEIGHT: f32 = 12.0;
 
 pub struct CameraPlugin;
 
@@ -32,8 +47,10 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         // `Update` gira dopo `RunFixedMainLoop`, quindi il Transform del
         // giocatore è già interpolato per questo frame.
-        app.add_systems(Startup, spawn_camera)
-            .add_systems(Update, follow_player);
+        app.add_systems(Startup, spawn_camera).add_systems(
+            Update,
+            (update_follow, follow_target).chain().after(SimTickSet),
+        );
     }
 }
 
@@ -79,13 +96,70 @@ fn clamp_to_train(x: f32, half_width: f32, left: f32, right: f32) -> f32 {
     }
 }
 
-pub(crate) fn follow_player(
+/// Chi inquadra la camera.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CameraTarget {
+    Player,
+    Npc(NpcId),
+}
+
+/// La camera segue l'NPC selezionato solo con "Segui" attivo.
+pub(crate) fn camera_target(follow: bool, selected: Option<NpcId>) -> CameraTarget {
+    match selected {
+        Some(id) if follow => CameraTarget::Npc(id),
+        _ => CameraTarget::Player,
+    }
+}
+
+/// Nuovo stato di "Segui": senza selezione è sempre spento; `toggle` (tasto F)
+/// lo spegne, o lo accende se l'NPC selezionato è vivo.
+pub(crate) fn next_follow(
+    follow: bool,
+    toggle: bool,
+    selected: Option<NpcId>,
+    alive: bool,
+) -> bool {
+    match selected {
+        None => false,
+        Some(_) if toggle => !follow && alive,
+        Some(_) => follow,
+    }
+}
+
+/// F: segue l'NPC selezionato o torna al giocatore.
+fn update_follow(
+    keys: Res<ButtonInput<KeyCode>>,
+    sim: Res<Sim>,
+    selected: Res<SelectedNpc>,
+    mut follow: ResMut<FollowNpc>,
+) {
+    let alive = selected.0.is_some_and(|id| sim.world.npc(id).is_some());
+    let next = next_follow(
+        follow.0,
+        keys.just_pressed(KeyCode::KeyF),
+        selected.0,
+        alive,
+    );
+    if follow.0 != next {
+        follow.0 = next;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn follow_target(
     time: Res<Time>,
     layout: Res<TrainLayout>,
+    sim: Res<Sim>,
+    stations: Res<StationLayout>,
+    follow: Res<FollowNpc>,
+    selected: Res<SelectedNpc>,
+    index: Res<NpcSpriteIndex>,
     window: Single<&Window, With<PrimaryWindow>>,
     player: Single<&Transform, (With<Player>, Without<Camera2d>)>,
+    sprites: Query<&Transform, (With<NpcSprite>, Without<Camera2d>)>,
     camera: Single<(&mut Transform, &Projection), With<Camera2d>>,
     mut snapped: Local<bool>,
+    mut last_npc: Local<Option<(NpcId, Vec2)>>,
 ) {
     let (mut camera, projection) = camera.into_inner();
     let Projection::Orthographic(ortho) = projection else {
@@ -95,21 +169,48 @@ pub(crate) fn follow_player(
         return;
     };
 
+    let focus = match camera_target(follow.0, selected.0) {
+        CameraTarget::Player => {
+            *last_npc = None;
+            Vec2::new(player.translation.x, player.translation.y + LOOK_UP)
+        }
+        CameraTarget::Npc(id) => {
+            // Lo sprite se è disegnato (si muove in modo fluido), altrimenti
+            // la posa calcolata dalla sim; se è morto, l'ultimo punto noto.
+            let position = index
+                .entity(id)
+                .and_then(|e| sprites.get(e).ok())
+                .map(|t| t.translation.truncate())
+                .or_else(|| {
+                    let npc = sim.world.npc(id)?;
+                    Some(npc_position(&sim.world, &stations, npc))
+                })
+                .or_else(|| last_npc.filter(|&(last, _)| last == id).map(|(_, p)| p));
+            match position {
+                Some(p) => {
+                    *last_npc = Some((id, p));
+                    Vec2::new(p.x, FLOOR_Y + NPC_EYE_HEIGHT + LOOK_UP)
+                }
+                None => Vec2::new(player.translation.x, player.translation.y + LOOK_UP),
+            }
+        }
+    };
+
     // Estremi esterni del treno (facce esterne delle testate).
     let (inner_left, inner_right) = layout.inner_bounds();
     let target = Vec2::new(
         clamp_to_train(
-            player.translation.x,
+            focus.x,
             view.half_size().x,
             inner_left - WALL,
             inner_right + WALL,
         ),
-        player.translation.y + LOOK_UP,
+        focus.y,
     );
     let current = camera.translation.truncate();
 
     let next = if !*snapped {
-        // Al primo frame la camera salta direttamente sul giocatore.
+        // Al primo frame la camera salta direttamente sull'obiettivo.
         *snapped = true;
         target
     } else if (target - current).abs().max_element() < pixel {
@@ -151,6 +252,31 @@ mod tests {
     fn centers_a_train_narrower_than_the_view() {
         assert_eq!(clamp_to_train(-50.0, 400.0, 0.0, 320.0), 160.0);
         assert_eq!(clamp_to_train(900.0, 400.0, 0.0, 320.0), 160.0);
+    }
+
+    #[test]
+    fn follows_the_selected_npc_only_when_asked() {
+        let anna = NpcId(7);
+        assert_eq!(camera_target(false, Some(anna)), CameraTarget::Player);
+        assert_eq!(camera_target(true, Some(anna)), CameraTarget::Npc(anna));
+        assert_eq!(camera_target(true, None), CameraTarget::Player);
+    }
+
+    #[test]
+    fn follow_toggles_and_turns_off_without_selection() {
+        let anna = Some(NpcId(7));
+        // F accende (se è viva) e spegne.
+        assert!(next_follow(false, true, anna, true));
+        assert!(!next_follow(true, true, anna, true));
+        // Non si comincia a seguire un morto, ma si può smettere.
+        assert!(!next_follow(false, true, anna, false));
+        assert!(!next_follow(true, true, anna, false));
+        // Senza F non cambia (anche se l'NPC seguito è morto)...
+        assert!(next_follow(true, false, anna, false));
+        assert!(!next_follow(false, false, anna, true));
+        // ...ma senza selezione si torna sempre al giocatore.
+        assert!(!next_follow(true, false, None, false));
+        assert!(!next_follow(false, true, None, false));
     }
 
     #[test]
