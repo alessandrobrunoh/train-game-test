@@ -3,13 +3,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{CarriageId, NpcId, StationId};
+use crate::item::ItemKind;
 
 /// What an NPC is doing. Station ids are local to the NPC's current carriage.
 ///
 /// Effects:
-/// - `Eat`: takes one portion from the Mensa stock at start, restores hunger while running.
+/// - `Eat`: takes one Razione from the Mensa stock at start (free), restores hunger while running.
 /// - `Sleep`: restores energy while running (no energy decay).
-/// - `Work`: produces resources and pays a wage when it completes.
+/// - `Work`: produces/moves items and pays a wage when it completes.
+/// - `Buy`: at a Mercato, pays the price and takes one unit at start (no station).
 /// - `Travel`: moves the NPC to `to` when it completes.
 /// - `Socialize`: restores social while running; the partner gets a bonus at the end.
 /// - `Idle`: nothing, short filler.
@@ -20,6 +22,7 @@ pub enum Action {
     Work(StationId),
     Travel { to: CarriageId },
     Socialize(NpcId),
+    Buy(ItemKind),
     Idle,
 }
 
@@ -31,16 +34,18 @@ pub enum ActionKind {
     Work,
     Travel,
     Socialize,
+    Buy,
     Idle,
 }
 
 impl ActionKind {
-    pub const ALL: [ActionKind; 6] = [
+    pub const ALL: [ActionKind; 7] = [
         ActionKind::Eat,
         ActionKind::Sleep,
         ActionKind::Work,
         ActionKind::Travel,
         ActionKind::Socialize,
+        ActionKind::Buy,
         ActionKind::Idle,
     ];
 
@@ -51,6 +56,7 @@ impl ActionKind {
             ActionKind::Work => "lavora",
             ActionKind::Travel => "viaggia",
             ActionKind::Socialize => "socializza",
+            ActionKind::Buy => "compra",
             ActionKind::Idle => "ozia",
         }
     }
@@ -64,6 +70,7 @@ impl Action {
             Action::Work(_) => ActionKind::Work,
             Action::Travel { .. } => ActionKind::Travel,
             Action::Socialize(_) => ActionKind::Socialize,
+            Action::Buy(_) => ActionKind::Buy,
             Action::Idle => ActionKind::Idle,
         }
     }

@@ -1,10 +1,11 @@
-//! Carrozze, postazioni e risorse.
+//! Carrozze e postazioni.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{CarriageId, StationId};
+use crate::item::Stock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CarriageKind {
@@ -12,14 +13,18 @@ pub enum CarriageKind {
     Mensa,
     Serra,
     Officina,
+    /// Market: Mercanti bring Attrezzi and Vestiti from the Officine and
+    /// people buy them with tokens.
+    Mercato,
 }
 
 impl CarriageKind {
-    pub const ALL: [CarriageKind; 4] = [
+    pub const ALL: [CarriageKind; 5] = [
         CarriageKind::Dormitorio,
         CarriageKind::Mensa,
         CarriageKind::Serra,
         CarriageKind::Officina,
+        CarriageKind::Mercato,
     ];
 
     pub fn name(self) -> &'static str {
@@ -28,6 +33,7 @@ impl CarriageKind {
             CarriageKind::Mensa => "Mensa",
             CarriageKind::Serra => "Serra",
             CarriageKind::Officina => "Officina",
+            CarriageKind::Mercato => "Mercato",
         }
     }
 }
@@ -51,6 +57,8 @@ pub enum StationKind {
     GrowBed,
     /// Banco da lavoro (Officina): Operaio works here.
     Workbench,
+    /// Bancone (Mercato): Mercante works here. Customers buy standing nearby.
+    Counter,
 }
 
 impl StationKind {
@@ -61,6 +69,7 @@ impl StationKind {
             StationKind::Stove => "cucina",
             StationKind::GrowBed => "aiuola",
             StationKind::Workbench => "banco da lavoro",
+            StationKind::Counter => "bancone",
         }
     }
 }
@@ -81,21 +90,16 @@ impl Station {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Resources {
-    /// Food portions (1 meal = `SimParams::food_per_meal`).
-    pub food: f32,
-    /// Building materials produced by Officine (no consumer yet).
-    pub materials: f32,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Carriage {
     pub id: CarriageId,
     pub name: String,
     pub kind: CarriageKind,
     pub stations: Vec<Station>,
-    pub stock: Resources,
+    /// Carriage storage. Each kind only stores some items, bounded by
+    /// [`crate::SimParams::storage_cap`]: Serra verdura; Mensa razioni;
+    /// Officina rottame, attrezzi, vestiti; Mercato attrezzi, vestiti.
+    pub stock: Stock,
 }
 
 impl Carriage {

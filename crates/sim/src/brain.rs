@@ -10,6 +10,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
+use crate::item::ItemKind;
 use crate::npc::Npc;
 use crate::world::World;
 
@@ -44,6 +45,12 @@ pub struct UtilityWeights {
     pub socialize: f32,
     pub evening_social_bonus: f32,
     pub home_bonus: f32,
+    /// Desire to buy a missing Attrezzo (for jobs that use one)...
+    pub buy_tool: f32,
+    /// ...and a missing Vestito. Both are scaled by wealth, from half (just
+    /// affordable) to full (`comfortable_savings` times the base price or more).
+    pub buy_clothes: f32,
+    pub comfortable_savings: f32,
     pub idle: f32,
     /// Score lost per minute of travel.
     pub travel_cost_per_minute: f32,
@@ -66,6 +73,9 @@ impl Default for UtilityWeights {
             socialize: 0.9,
             evening_social_bonus: 0.1,
             home_bonus: 0.1,
+            buy_tool: 0.8,
+            buy_clothes: 0.5,
+            comfortable_savings: 3.0,
             idle: 0.15,
             travel_cost_per_minute: 0.01,
             noise: 0.08,
@@ -105,8 +115,29 @@ impl UtilityBrain {
                 };
                 goal + home - minutes * self.weights.travel_cost_per_minute
             }
+            Action::Buy(item) => self.buy_score(npc, item),
             action => self.goal_score(world, npc, action.kind()),
         }
+    }
+
+    /// Need-driven desire to buy `item`, weighted by how many tokens the NPC has.
+    fn buy_score(&self, npc: &Npc, item: ItemKind) -> f32 {
+        let w = &self.weights;
+        if !npc.wants(item) {
+            return -1.0;
+        }
+        let base = match item {
+            ItemKind::Attrezzo => w.buy_tool,
+            ItemKind::Vestito => w.buy_clothes,
+            _ => return -1.0,
+        };
+        let comfortable = w.comfortable_savings * item.base_value() as f32;
+        let wealth = if comfortable > 0.0 {
+            (npc.inventory.tokens as f32 / comfortable).min(1.0)
+        } else {
+            1.0
+        };
+        base * (0.5 + 0.5 * wealth)
     }
 
     fn goal_score(&self, world: &World, npc: &Npc, kind: ActionKind) -> f32 {
@@ -152,6 +183,11 @@ impl UtilityBrain {
                 let evening = (17..22).contains(&hour);
                 w.socialize * u + if evening { w.evening_social_bonus } else { 0.0 }
             }
+            // Travelling to shop: the best thing the NPC could buy there.
+            ActionKind::Buy => [ItemKind::Attrezzo, ItemKind::Vestito]
+                .into_iter()
+                .map(|item| self.buy_score(npc, item))
+                .fold(-1.0, f32::max),
             ActionKind::Idle | ActionKind::Travel => w.idle,
         }
     }

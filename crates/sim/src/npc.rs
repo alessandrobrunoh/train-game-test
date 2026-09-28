@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::action::Action;
 use crate::carriage::{CarriageKind, StationKind};
 use crate::ids::{CarriageId, NpcId};
+use crate::item::ItemKind;
 use crate::time::GameTime;
 
 /// Needs in `0..=1`, where 1 means fully satisfied.
@@ -37,22 +38,26 @@ impl Default for Needs {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Job {
-    /// Works the grow beds of a Serra: produces food.
+    /// Works the grow beds of a Serra: grows Verdura.
     Contadino,
-    /// Works the kitchen of a Mensa: brings food from the Serre into the Mensa.
+    /// Works the kitchen of a Mensa: cooks Verdura from the Serre into Razioni.
     Cuoco,
-    /// Works a bench in an Officina: produces materials.
+    /// Works a bench in an Officina: turns Rottame into Attrezzi and Vestiti.
     Operaio,
+    /// Works the counter of a Mercato: brings Attrezzi and Vestiti from the
+    /// Officine to the Mercato.
+    Mercante,
 }
 
 impl Job {
-    pub const ALL: [Job; 3] = [Job::Contadino, Job::Cuoco, Job::Operaio];
+    pub const ALL: [Job; 4] = [Job::Contadino, Job::Cuoco, Job::Operaio, Job::Mercante];
 
     pub fn name(self) -> &'static str {
         match self {
             Job::Contadino => "contadino",
             Job::Cuoco => "cuoco",
             Job::Operaio => "operaio",
+            Job::Mercante => "mercante",
         }
     }
 
@@ -61,6 +66,7 @@ impl Job {
             Job::Contadino => CarriageKind::Serra,
             Job::Cuoco => CarriageKind::Mensa,
             Job::Operaio => CarriageKind::Officina,
+            Job::Mercante => CarriageKind::Mercato,
         }
     }
 
@@ -69,7 +75,13 @@ impl Job {
             Job::Contadino => StationKind::GrowBed,
             Job::Cuoco => StationKind::Stove,
             Job::Operaio => StationKind::Workbench,
+            Job::Mercante => StationKind::Counter,
         }
+    }
+
+    /// Whether an Attrezzo boosts (and wears with) this job's work.
+    pub fn uses_tool(self) -> bool {
+        matches!(self, Job::Contadino | Job::Operaio)
     }
 
     /// Work shift as `[start, end)` hours, interrupted by [`Job::LUNCH_BREAK`].
@@ -78,6 +90,7 @@ impl Job {
             Job::Contadino => (7, 16),
             Job::Cuoco => (6, 15),
             Job::Operaio => (8, 17),
+            Job::Mercante => (9, 18),
         }
     }
 
@@ -114,10 +127,40 @@ impl fmt::Display for Job {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// What an NPC owns. Meals are free (eaten at a Mensa), so bulk items never
+/// sit in personal inventories: only tokens and at most one Attrezzo and one
+/// Vestito, each with a durability in `(0, 1]` (removed when it reaches 0).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Inventory {
-    /// Wage tokens earned by working (no use yet).
+    /// Wage tokens earned by working, spent at the Mercati.
     pub tokens: u32,
+    /// Durability of the owned Attrezzo, if any.
+    pub tool: Option<f32>,
+    /// Durability of the owned Vestito, if any.
+    pub clothes: Option<f32>,
+}
+
+impl Inventory {
+    /// Durability of the owned unit of `item` (only Attrezzo and Vestito can be owned).
+    pub fn durability(&self, item: ItemKind) -> Option<f32> {
+        match item {
+            ItemKind::Attrezzo => self.tool,
+            ItemKind::Vestito => self.clothes,
+            _ => None,
+        }
+    }
+
+    pub fn has(&self, item: ItemKind) -> bool {
+        self.durability(item).is_some()
+    }
+
+    pub(crate) fn slot_mut(&mut self, item: ItemKind) -> Option<&mut Option<f32>> {
+        match item {
+            ItemKind::Attrezzo => Some(&mut self.tool),
+            ItemKind::Vestito => Some(&mut self.clothes),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -155,4 +198,29 @@ impl Npc {
     pub fn is_awake(&self) -> bool {
         !matches!(self.action, Action::Sleep(_))
     }
+
+    /// Whether the NPC would buy `item` at a Mercato (tokens aside): a worker
+    /// whose job uses tools without an Attrezzo, anyone without a Vestito.
+    pub fn wants(&self, item: ItemKind) -> bool {
+        match item {
+            ItemKind::Attrezzo => {
+                self.job.is_some_and(Job::uses_tool) && self.inventory.tool.is_none()
+            }
+            ItemKind::Vestito => self.inventory.clothes.is_none(),
+            _ => false,
+        }
+    }
+
+    /// Whether the NPC accepts `item` from the player ([`crate::World::player_give`]):
+    /// food unless nearly full, an Attrezzo or Vestito only if it [`Npc::wants`] it.
+    pub fn accepts_gift(&self, item: ItemKind) -> bool {
+        match item {
+            ItemKind::Razione | ItemKind::Verdura => self.needs.hunger < GIFT_FULL_HUNGER,
+            ItemKind::Rottame => false,
+            ItemKind::Attrezzo | ItemKind::Vestito => self.wants(item),
+        }
+    }
 }
+
+/// NPCs at least this full refuse food from the player.
+pub const GIFT_FULL_HUNGER: f32 = 0.9;

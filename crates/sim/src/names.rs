@@ -101,3 +101,4 @@ pub(crate) const DORM_NAMES: &[&str] = &["Alveare", "Cuccette Nord", "Le Brande"
 pub(crate) const MENSA_NAMES: &[&str] = &["Il Refettorio", "Pentola Comune", "La Brace"];
 pub(crate) const SERRA_NAMES: &[&str] = &["Giardino d'Inverno", "Orto Pensile", "La Vigna"];
 pub(crate) const OFFICINA_NAMES: &[&str] = &["La Fucina", "Bullone", "Officina Grande"];
+pub(crate) const MERCATO_NAMES: &[&str] = &["Il Bazar", "La Bottega", "Il Baratto"];
