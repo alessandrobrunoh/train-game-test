@@ -4,7 +4,9 @@
 //! StationId)`. Qui ogni postazione riceve in modo deterministico un posto sul
 //! pavimento della sua carrozza. Le postazioni dello stesso tipo formano un
 //! gruppo (nell'ordine della sim: es. in Mensa prima i tavoli, poi le cucine);
-//! i gruppi si affiancano da sinistra a destra. Se lo spazio non basta, le
+//! i gruppi si affiancano da sinistra a destra, lasciando libera la zona
+//! magazzino vicino alla testata destra (vedi `storage.rs`) nelle carrozze
+//! che hanno scorte. Se lo spazio non basta, le
 //! cuccette si impilano a castello (finché c'è spazio sotto il soffitto) e poi
 //! tutte le larghezze si riducono in proporzione, così niente si sovrappone
 //! ed esce dalle pareti.
@@ -13,6 +15,7 @@ use bevy::prelude::*;
 use sim::{CarriageId, Station, StationId, StationKind, World};
 
 use crate::state::Sim;
+use crate::storage::{has_storage, storage_range};
 use crate::train::{CARRIAGE_LENGTH, FLOOR_Y, INTERIOR_HEIGHT, TrainLayout, WALL};
 
 /// Distanza verticale tra i piani di un letto a castello.
@@ -118,6 +121,11 @@ fn style(kind: StationKind) -> Style {
             height: 14.0,
             stackable: false,
         },
+        StationKind::Counter => Style {
+            width: 30.0,
+            height: 14.0,
+            stackable: false,
+        },
     }
 }
 
@@ -126,8 +134,20 @@ pub fn interior_range() -> (f32, f32) {
     (WALL + EDGE_MARGIN, CARRIAGE_LENGTH - WALL - EDGE_MARGIN)
 }
 
-/// Posti delle postazioni di una carrozza; l'indice è lo `StationId`.
-pub fn layout_carriage(stations: &[Station]) -> Vec<StationSpot> {
+/// Intervallo x (locale) dove stanno le postazioni: tutto l'interno, meno la
+/// zona magazzino (e uno spazio) se la carrozza ha scorte.
+pub fn station_range(with_storage: bool) -> (f32, f32) {
+    let (left, right) = interior_range();
+    if with_storage {
+        (left, storage_range().0 - GROUP_GAP)
+    } else {
+        (left, right)
+    }
+}
+
+/// Posti delle postazioni di una carrozza dentro `range` (vedi
+/// [`station_range`]); l'indice è lo `StationId`.
+pub fn layout_carriage(stations: &[Station], range: (f32, f32)) -> Vec<StationSpot> {
     struct Group {
         kind: StationKind,
         members: Vec<usize>,
@@ -154,7 +174,7 @@ pub fn layout_carriage(stations: &[Station]) -> Vec<StationSpot> {
         g.cols = g.members.len();
     }
 
-    let (left, right) = interior_range();
+    let (left, right) = range;
     let usable = right - left;
     let gaps = GROUP_GAP * groups.len().saturating_sub(1) as f32;
     let wanted = |groups: &[Group]| groups.iter().map(|g| g.cols as f32 * g.pref).sum::<f32>();
@@ -225,7 +245,10 @@ impl StationLayout {
             carriages: world
                 .carriages
                 .iter()
-                .map(|c| layout_carriage(&c.stations))
+                .map(|c| {
+                    let range = station_range(has_storage(&world.params, c.kind));
+                    layout_carriage(&c.stations, range)
+                })
                 .collect(),
         }
     }
@@ -285,6 +308,10 @@ fn station_rects(spot: &StationSpot) -> Vec<(Vec2, Vec2, Color)> {
             rect(w / 2.0 - 3.0, 0.0, 2.0, 11.0, METAL),
             rect(-w / 2.0, 11.0, w, 3.0, BENCH),
         ],
+        StationKind::Counter => vec![
+            rect(-w / 2.0, 0.0, w, 11.0, WOOD),
+            rect(-w / 2.0, 11.0, w, 3.0, TABLE_TOP),
+        ],
     }
 }
 
@@ -324,8 +351,13 @@ mod tests {
 
     fn check(world: &World) {
         let layout = StationLayout::from_world(world);
-        let (left, right) = interior_range();
         for (c, spots) in world.carriages.iter().zip(&layout.carriages) {
+            let with_storage = has_storage(&world.params, c.kind);
+            let (left, right) = station_range(with_storage);
+            // Le postazioni non invadono il magazzino.
+            if with_storage {
+                assert!(right < storage_range().0);
+            }
             assert_eq!(spots.len(), c.stations.len());
             for (spot, station) in spots.iter().zip(&c.stations) {
                 assert_eq!(spot.kind, station.kind);

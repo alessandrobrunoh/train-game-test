@@ -4,7 +4,7 @@ use bevy::prelude::*;
 
 use crate::player::Player;
 use crate::state::Sim;
-use crate::train::{TrainLayout, TrainLocation, carriage_display_label};
+use crate::train::{TrainLayout, TrainLocation};
 
 #[derive(Component)]
 struct LocationText;
@@ -41,7 +41,7 @@ fn spawn_hud(mut commands: Commands) {
         ));
     commands.spawn((
         Text::new(
-            "A/D o frecce: muovi   Spazio/W/Su: salta   P: pausa   1-4: velocita'   Click: seleziona NPC",
+            "A/D o frecce: muovi   Spazio/W/Su: salta   E: interagisci   Q: cambia oggetto   I: inventario   P: pausa   1-4: velocità   Click: seleziona NPC",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),
@@ -65,7 +65,7 @@ fn update_location_text(
 ) {
     let label = match layout.location_at(player.translation.x) {
         TrainLocation::Carriage(i) => match sim.world.carriages.get(i) {
-            Some(c) => carriage_display_label(c),
+            Some(c) => c.label().to_string(),
             None => format!("Carrozza {}", i + 1),
         },
         TrainLocation::Gangway(i) => format!("Passaggio {} -> {}", i + 1, i + 2),

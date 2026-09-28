@@ -49,13 +49,8 @@ pub fn carriage_tint(kind: CarriageKind) -> Color {
         CarriageKind::Mensa => Color::srgb(0.62, 0.44, 0.30),
         CarriageKind::Serra => Color::srgb(0.32, 0.54, 0.34),
         CarriageKind::Officina => Color::srgb(0.50, 0.47, 0.44),
+        CarriageKind::Mercato => Color::srgb(0.60, 0.52, 0.28),
     }
-}
-
-/// Etichetta della carrozza come `Carriage::label` della sim, ma con virgolette
-/// ASCII: il font di default di Bevy non ha i caratteri « ».
-pub fn carriage_display_label(carriage: &sim::Carriage) -> String {
-    carriage.label().to_string().replace(['«', '»'], "\"")
 }
 
 // --- Layout -----------------------------------------------------------------
@@ -308,7 +303,7 @@ fn spawn_carriages(mut commands: Commands, layout: Res<TrainLayout>, sim: Res<Si
     for (index, &kind) in layout.carriages.iter().enumerate() {
         let origin = Vec2::new(TrainLayout::carriage_left(index), FLOOR_Y);
         let title = match sim.world.carriages.get(index) {
-            Some(c) => format!("{} \"{}\"", c.kind, c.name),
+            Some(c) => format!("{} «{}»", c.kind, c.name),
             None => kind.name().to_string(),
         };
         commands

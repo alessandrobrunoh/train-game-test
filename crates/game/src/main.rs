@@ -2,12 +2,16 @@
 //! M0: grafica placeholder, giocatore controllabile, camera che lo segue.
 
 mod camera;
+mod fonts;
 mod hud;
+mod interaction;
+mod inventory;
 mod npc_render;
 mod player;
 mod sim_bridge;
 mod state;
 mod stations;
+mod storage;
 mod train;
 mod ui;
 
@@ -33,15 +37,19 @@ fn main() {
                 .set(ImagePlugin::default_nearest()),
         )
         .add_plugins((
+            fonts::FontsPlugin,
             state::StatePlugin,
             sim_bridge::SimBridgePlugin,
             train::TrainPlugin,
             stations::StationsPlugin,
+            storage::StoragePlugin,
             npc_render::NpcRenderPlugin,
             player::PlayerPlugin,
             camera::CameraPlugin,
             hud::HudPlugin,
             ui::UiPlugin,
+            interaction::InteractionPlugin,
+            inventory::InventoryPlugin,
         ))
         .run();
 }

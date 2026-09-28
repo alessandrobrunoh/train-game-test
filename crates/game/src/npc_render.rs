@@ -7,17 +7,21 @@
 //! - mangia/dorme/lavora: alla sua postazione (vedi `stations.rs`), con un
 //!   posto diverso per ognuno di chi la condivide;
 //! - socializza: accanto al compagno;
+//! - compra: al bancone del Mercato, davanti a un mercante al lavoro;
 //! - ozia: in un punto deterministico della carrozza, diverso a ogni pausa;
 //! - viaggia: interpolato tra il centro della carrozza di partenza e quello
 //!   di arrivo in base all'avanzamento dell'azione.
 //!
 //! Gli sprite camminano verso la posizione obiettivo e si teletrasportano se
 //! è troppo lontana (es. a velocità di gioco alte).
+//!
+//! Indicatori economici: chi lavora con un attrezzo lo tiene in mano (un
+//! rettangolino accanto al corpo); chi non ha vestiti è disegnato più pallido.
 
 use std::collections::HashMap;
 
 use bevy::{prelude::*, window::PrimaryWindow};
-use sim::{Action, CarriageId, Job, Npc, NpcId, World};
+use sim::{Action, CarriageId, Job, Npc, NpcId, StationKind, World};
 
 use crate::sim_bridge::SimTickSet;
 use crate::state::{NpcSprite, PointerOverUi, SelectedNpc, Sim};
@@ -32,6 +36,10 @@ const ADULT_AGE: u32 = 18;
 const ELDER_AGE: u32 = 65;
 /// Chi è sdraiato è disegnato più sottile, per leggersi come "a letto".
 const LYING_THICKNESS: f32 = 0.75;
+/// Entro questa distanza dal letto l'NPC è "arrivato" e si sdraia.
+const ARRIVE_DISTANCE: f32 = 0.5;
+/// Durata della rotazione quando si sdraia o si alza (secondi).
+const LIE_DOWN_TIME: f32 = 0.15;
 /// Spessore del bordo scuro attorno a ogni NPC.
 const OUTLINE: f32 = 1.0;
 
@@ -56,11 +64,25 @@ const SELECTED_COLOR: Color = Color::srgb(0.30, 1.00, 1.00);
 const CONTADINO_COLOR: Color = Color::srgb(0.55, 0.90, 0.35);
 const CUOCO_COLOR: Color = Color::srgb(0.96, 0.96, 0.96);
 const OPERAIO_COLOR: Color = Color::srgb(0.30, 0.55, 1.00);
+const MERCANTE_COLOR: Color = Color::srgb(0.95, 0.75, 0.25);
 const JOBLESS_COLOR: Color = Color::srgb(0.75, 0.45, 0.85);
 const CHILD_COLOR: Color = Color::srgb(1.00, 0.60, 0.75);
 const ELDER_COLOR: Color = Color::srgb(0.72, 0.72, 0.70);
 /// Chi dorme è disegnato più scuro.
 const SLEEP_DARKEN: f32 = 0.6;
+/// Chi non ha vestiti è disegnato più pallido: quanto il colore va verso il
+/// suo grigio e quanto si schiarisce.
+const NO_CLOTHES_DESATURATE: f32 = 0.55;
+const NO_CLOTHES_LIGHTEN: f32 = 0.12;
+
+/// Attrezzo in mano: dimensioni, colore e inclinazione.
+const TOOL_SIZE: Vec2 = Vec2::new(1.5, 7.0);
+const TOOL_COLOR: Color = Color::srgb(0.80, 0.82, 0.86);
+const TOOL_TILT: f32 = -0.5;
+/// Distanza tra il bordo del bancone e il cliente.
+const COUNTER_CLEARANCE: f32 = 1.0;
+/// Scarto massimo tra clienti dello stesso bancone, per non sovrapporsi del tutto.
+const CUSTOMER_SPREAD: f32 = 6.0;
 
 pub struct NpcRenderPlugin;
 
@@ -86,14 +108,52 @@ impl Plugin for NpcRenderPlugin {
 #[derive(Component)]
 struct NpcOutline;
 
+/// Attrezzo in mano (figlio dell'entità `NpcSprite`), visibile mentre lavora.
+#[derive(Component)]
+struct NpcTool;
+
 /// Stato grafico di uno sprite NPC.
 #[derive(Component)]
 struct NpcVisual {
     outline: Entity,
+    tool: Entity,
+    /// L'attrezzo in mano è visibile.
+    tool_shown: bool,
     /// Dove lo sprite vuole andare (coordinate mondo).
     target: Vec2,
+    /// Corpo in piedi (larghezza, altezza).
+    standing: Vec2,
+    /// Corpo sdraiato, prima della rotazione di 90°: (spessore, lunghezza).
+    /// Resta quello dell'ultimo letto anche dopo essersi alzato, per animare
+    /// la transizione.
+    lying: Vec2,
+    /// La posa chiede di stare sdraiato (dorme in un letto).
+    wants_lying: bool,
+    /// Avanzamento della transizione: 0 = in piedi, 1 = sdraiato.
+    lie: f32,
     /// Semiampiezze del rettangolo in coordinate mondo (per il click).
     half_extents: Vec2,
+}
+
+impl NpcVisual {
+    /// Dimensione dello sprite (prima della rotazione) con la transizione attuale.
+    fn body(&self) -> Vec2 {
+        self.standing.lerp(self.lying, self.lie)
+    }
+
+    fn rotation(&self) -> Quat {
+        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2 * self.lie)
+    }
+
+    /// Semiampiezze del rettangolo ruotato (bounding box allineata agli assi).
+    fn rotated_half_extents(&self) -> Vec2 {
+        let half = self.body() / 2.0;
+        let (sin, cos) = (std::f32::consts::FRAC_PI_2 * self.lie).sin_cos();
+        Vec2::new(
+            cos.abs() * half.x + sin.abs() * half.y,
+            sin.abs() * half.x + cos.abs() * half.y,
+        )
+    }
 }
 
 /// Marcatore sopra la testa dell'NPC selezionato.
@@ -172,8 +232,40 @@ fn anchor_x(world: &World, stations: &StationLayout, npc: &Npc) -> f32 {
         }
         Action::Socialize(other) => chat_spot(npc.carriage, npc.id, other),
         Action::Travel { to } => travel_x(world, npc, to),
+        Action::Buy(_) => counter_x(world, stations, npc).unwrap_or_else(|| idle_x(npc)),
         Action::Idle => idle_x(npc),
     }
+}
+
+/// Dove sta chi compra: accanto a un bancone del Mercato, di preferenza uno
+/// con un mercante al lavoro (scelto in modo deterministico per NPC).
+fn counter_x(world: &World, stations: &StationLayout, npc: &Npc) -> Option<f32> {
+    let c = npc.carriage;
+    let carriage = world.carriage(c)?;
+    let counters = || {
+        carriage
+            .stations
+            .iter()
+            .filter(|s| s.kind == StationKind::Counter)
+    };
+    // Solo i mercanti lavorano ai banconi: occupato = c'è un mercante.
+    let staffed = counters().filter(|s| s.occupancy > 0).count();
+    let pick = hash01(u64::from(npc.id.0) ^ 0xC0FFEE);
+    let station = if staffed > 0 {
+        let n = ((pick * staffed as f32) as usize).min(staffed - 1);
+        counters().filter(|s| s.occupancy > 0).nth(n)?
+    } else {
+        let total = counters().count();
+        let n = ((pick * total as f32) as usize).min(total.checked_sub(1)?);
+        counters().nth(n)?
+    };
+    let spot = stations.spot(c, station.id)?;
+    // Il cliente sta sul lato destro del bancone; il mercante al centro.
+    let size = body_size(npc);
+    let jitter = hash01(u64::from(npc.id.0) ^ npc.action_since.minutes()) * CUSTOMER_SPREAD;
+    let x = spot.x + spot.width / 2.0 + COUNTER_CLEARANCE + size.x / 2.0 + jitter;
+    let (_, right) = interior_range();
+    Some(carriage_x(c, x.min(right - size.x / 2.0)))
 }
 
 fn idle_x(npc: &Npc) -> f32 {
@@ -242,8 +334,14 @@ fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Po
             standing(x.clamp(carriage_x(c, left), carriage_x(c, right)))
         }
         Action::Travel { to } => standing(travel_x(world, npc, to)),
+        Action::Buy(_) => standing(anchor_x(world, stations, npc)),
         Action::Idle => standing(idle_x(npc)),
     }
+}
+
+/// Vero se l'NPC va disegnato con l'attrezzo in mano.
+fn holds_tool(npc: &Npc) -> bool {
+    matches!(npc.action, Action::Work(_)) && npc.inventory.tool.is_some()
 }
 
 fn npc_color(npc: &Npc) -> Color {
@@ -251,24 +349,30 @@ fn npc_color(npc: &Npc) -> Color {
         Some(Job::Contadino) => CONTADINO_COLOR,
         Some(Job::Cuoco) => CUOCO_COLOR,
         Some(Job::Operaio) => OPERAIO_COLOR,
+        Some(Job::Mercante) => MERCANTE_COLOR,
         None if npc.age < ADULT_AGE => CHILD_COLOR,
         None if npc.age >= ELDER_AGE => ELDER_COLOR,
         None => JOBLESS_COLOR,
     };
-    if npc.is_awake() {
-        base
-    } else {
-        let c = base.to_srgba();
-        Color::srgb(
+    let mut c = base.to_srgba();
+    if npc.inventory.clothes.is_none() {
+        // Senza vestiti: più pallido (desaturato e un po' più chiaro).
+        let gray = 0.3 * c.red + 0.59 * c.green + 0.11 * c.blue;
+        let pale = |v: f32| (v + (gray - v) * NO_CLOTHES_DESATURATE + NO_CLOTHES_LIGHTEN).min(1.0);
+        c = Srgba::rgb(pale(c.red), pale(c.green), pale(c.blue));
+    }
+    if !npc.is_awake() {
+        c = Srgba::rgb(
             c.red * SLEEP_DARKEN,
             c.green * SLEEP_DARKEN,
             c.blue * SLEEP_DARKEN,
-        )
+        );
     }
+    c.into()
 }
 
 /// Carrozze della finestra visibile: quelle inquadrate più una per lato.
-fn visible_window(camera_x: f32, view: Rect, carriages: usize) -> (usize, usize) {
+pub(crate) fn visible_window(camera_x: f32, view: Rect, carriages: usize) -> (usize, usize) {
     let last = carriages.saturating_sub(1) as i64;
     let index = |x: f32| (x / CARRIAGE_PITCH).floor() as i64;
     let lo = (index(camera_x + view.min.x) - 1).clamp(0, last);
@@ -313,6 +417,7 @@ fn sync_npc_sprites(
     mut index: ResMut<NpcSpriteIndex>,
     mut sprites: Query<(&mut Sprite, &mut NpcVisual), With<NpcSprite>>,
     mut outlines: Query<&mut Sprite, (With<NpcOutline>, Without<NpcSprite>)>,
+    mut tools: Query<&mut Visibility, With<NpcTool>>,
     mut seats: Local<HashMap<(CarriageId, u16), u16>>,
 ) {
     let world = &sim.world;
@@ -350,43 +455,54 @@ fn sync_npc_sprites(
         } else {
             OUTLINE_COLOR
         };
-        let length = size.y * pose.length_scale;
-        let width = if pose.lying {
-            size.x * LYING_THICKNESS
-        } else {
-            size.x
-        };
-        let half_extents = if pose.lying {
-            Vec2::new(length, width) / 2.0
-        } else {
-            size / 2.0
-        };
+        let lying = Vec2::new(size.x * LYING_THICKNESS, size.y * pose.length_scale);
+        let tool_shown = holds_tool(npc);
 
-        let body = Vec2::new(width, length);
-        let framed = body + Vec2::splat(2.0 * OUTLINE);
         let existing = index.entities.get(&npc.id).map(|&(e, _)| e);
         if let Some(entity) = existing
             && let Ok((mut sprite, mut visual)) = sprites.get_mut(entity)
         {
+            // Dimensioni e rotazione le aggiorna `move_npc_sprites`, in base
+            // a dove si trova davvero lo sprite.
             visual.target = pose.position;
-            visual.half_extents = half_extents;
+            visual.standing = size;
+            visual.wants_lying = pose.lying;
+            if pose.lying {
+                visual.lying = lying;
+            }
             if sprite.color != color {
                 sprite.color = color;
             }
-            if sprite.custom_size != Some(body) {
-                sprite.custom_size = Some(body);
+            if let Ok(mut outline) = outlines.get_mut(visual.outline)
+                && outline.color != outline_color
+            {
+                outline.color = outline_color;
             }
-            if let Ok(mut outline) = outlines.get_mut(visual.outline) {
-                if outline.color != outline_color {
-                    outline.color = outline_color;
-                }
-                if outline.custom_size != Some(framed) {
-                    outline.custom_size = Some(framed);
+            if visual.tool_shown != tool_shown {
+                visual.tool_shown = tool_shown;
+                if let Ok(mut visibility) = tools.get_mut(visual.tool) {
+                    *visibility = tool_visibility(tool_shown);
                 }
             }
             index.entities.insert(npc.id, (entity, frame));
             continue;
         }
+
+        // Nasce già nella posa finale (anche sdraiato, se è già a letto).
+        let mut visual = NpcVisual {
+            outline: Entity::PLACEHOLDER,
+            tool: Entity::PLACEHOLDER,
+            tool_shown,
+            target: pose.position,
+            standing: size,
+            lying,
+            wants_lying: pose.lying,
+            lie: if pose.lying { 1.0 } else { 0.0 },
+            half_extents: Vec2::ZERO,
+        };
+        visual.half_extents = visual.rotated_half_extents();
+        let body = visual.body();
+        let framed = body + Vec2::splat(2.0 * OUTLINE);
 
         if let Some(stale) = existing {
             commands.entity(stale).despawn();
@@ -398,22 +514,30 @@ fn sync_npc_sprites(
                 Transform::from_xyz(0.0, 0.0, -Z_STEP / 2.0),
             ))
             .id();
+        visual.outline = outline;
+        // Attrezzo tenuto accanto al fianco destro, inclinato.
+        let tool = commands
+            .spawn((
+                NpcTool,
+                Sprite::from_color(TOOL_COLOR, TOOL_SIZE),
+                Transform::from_xyz(size.x / 2.0 + TOOL_SIZE.x / 2.0, -1.0, Z_STEP / 2.0)
+                    .with_rotation(Quat::from_rotation_z(TOOL_TILT)),
+                tool_visibility(tool_shown),
+            ))
+            .id();
+        visual.tool = tool;
         // Ogni NPC ha una profondità propria: niente sfarfallio tra sprite sovrapposti.
         let z = NPC_Z + (npc.id.0 % 1000) as f32 * Z_STEP;
+        let rotation = visual.rotation();
         let entity = commands
             .spawn((
                 Name::new(npc.name.clone()),
                 NpcSprite(npc.id),
-                NpcVisual {
-                    outline,
-                    target: pose.position,
-                    half_extents,
-                },
+                visual,
                 Sprite::from_color(color, body),
-                Transform::from_translation(pose.position.extend(z))
-                    .with_rotation(lying_rotation(pose.lying)),
+                Transform::from_translation(pose.position.extend(z)).with_rotation(rotation),
             ))
-            .add_child(outline)
+            .add_children(&[outline, tool])
             .id();
         index.entities.insert(npc.id, (entity, frame));
     }
@@ -427,21 +551,23 @@ fn sync_npc_sprites(
     });
 }
 
-fn lying_rotation(lying: bool) -> Quat {
-    if lying {
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)
+fn tool_visibility(shown: bool) -> Visibility {
+    if shown {
+        Visibility::Inherited
     } else {
-        Quat::IDENTITY
+        Visibility::Hidden
     }
 }
 
-/// Muove gli sprite verso la loro posizione obiettivo.
+/// Muove gli sprite verso la loro posizione obiettivo e li fa sdraiare solo
+/// una volta arrivati al letto (mentre ci vanno camminano in piedi).
 fn move_npc_sprites(
     time: Res<Time>,
-    mut sprites: Query<(&mut Transform, &NpcVisual), With<NpcSprite>>,
+    mut sprites: Query<(&mut Transform, &mut Sprite, &mut NpcVisual), With<NpcSprite>>,
+    mut outlines: Query<&mut Sprite, (With<NpcOutline>, Without<NpcSprite>)>,
 ) {
     let dt = time.delta_secs();
-    for (mut transform, visual) in &mut sprites {
+    for (mut transform, mut sprite, mut visual) in &mut sprites {
         let current = transform.translation.truncate();
         let delta = visual.target - current;
         let distance = delta.length();
@@ -455,11 +581,40 @@ fn move_npc_sprites(
             transform.translation.x = next.x;
             transform.translation.y = next.y;
         }
-        // Sdraiato solo quando è arrivato al letto.
-        let lying = visual.half_extents.x > visual.half_extents.y;
-        let rotation = lying_rotation(lying && next == visual.target);
+
+        let arrived = next.distance(visual.target) <= ARRIVE_DISTANCE;
+        let goal = if visual.wants_lying && arrived {
+            1.0
+        } else {
+            0.0
+        };
+        let lie = if distance > TELEPORT_DISTANCE {
+            // Teletrasportato: niente animazione.
+            goal
+        } else {
+            visual.lie + (goal - visual.lie).clamp(-dt / LIE_DOWN_TIME, dt / LIE_DOWN_TIME)
+        };
+        if lie != visual.lie {
+            visual.lie = lie;
+        }
+        let half_extents = visual.rotated_half_extents();
+        if visual.half_extents != half_extents {
+            visual.half_extents = half_extents;
+        }
+
+        let rotation = visual.rotation();
         if transform.rotation != rotation {
             transform.rotation = rotation;
+        }
+        let body = visual.body();
+        if sprite.custom_size != Some(body) {
+            sprite.custom_size = Some(body);
+        }
+        let framed = body + Vec2::splat(2.0 * OUTLINE);
+        if let Ok(mut outline) = outlines.get_mut(visual.outline)
+            && outline.custom_size != Some(framed)
+        {
+            outline.custom_size = Some(framed);
         }
     }
 }
@@ -541,6 +696,57 @@ mod tests {
         assert_eq!(visible_window(x, view, 20), (3, 7));
         assert_eq!(visible_window(0.0, view, 20), (0, 1));
         assert_eq!(visible_window(1e6, view, 20), (19, 19));
+    }
+
+    #[test]
+    fn buyers_stand_next_to_a_staffed_counter() {
+        let mut world = World::generate(42, 20, 400);
+        let stations = StationLayout::from_world(&world);
+        let market = world
+            .carriages
+            .iter()
+            .find(|c| c.kind == sim::CarriageKind::Mercato)
+            .unwrap()
+            .id;
+        let counters: Vec<_> = world.carriages[market.index()]
+            .stations
+            .iter()
+            .filter(|s| s.kind == StationKind::Counter)
+            .map(|s| s.id)
+            .collect();
+        assert!(counters.len() >= 2);
+        // Solo il secondo bancone ha un mercante: tutti i clienti vanno lì.
+        let staffed = counters[1];
+        world.carriages[market.index()].stations[staffed.index()].occupancy = 1;
+        let spot = *stations.spot(market, staffed).unwrap();
+        let edge = carriage_x(market, spot.x + spot.width / 2.0);
+        for i in 0..20 {
+            world.npcs[i].carriage = market;
+            world.npcs[i].action = Action::Buy(sim::ItemKind::Vestito);
+            let npc = &world.npcs[i];
+            let pose = npc_pose(&world, &stations, npc, 0);
+            let x = pose.position.x;
+            let reach = COUNTER_CLEARANCE + body_size(npc).x + CUSTOMER_SPREAD;
+            assert!(x > edge && x <= edge + reach, "{x} vs bancone {edge}");
+            assert!(!pose.lying);
+        }
+    }
+
+    #[test]
+    fn npcs_without_clothes_are_paler() {
+        let world = World::generate(42, 20, 400);
+        let mut npc = world.npcs[0].clone();
+        npc.action = Action::Idle;
+        npc.inventory.clothes = Some(1.0);
+        let dressed = npc_color(&npc).to_srgba();
+        npc.inventory.clothes = None;
+        let bare = npc_color(&npc).to_srgba();
+        assert_ne!(dressed, bare);
+        let spread = |c: Srgba| {
+            let v = [c.red, c.green, c.blue];
+            v.iter().copied().fold(f32::MIN, f32::max) - v.iter().copied().fold(f32::MAX, f32::min)
+        };
+        assert!(spread(bare) <= spread(dressed) + 1e-6);
     }
 
     #[test]

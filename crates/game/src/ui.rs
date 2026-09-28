@@ -6,9 +6,10 @@
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Align2, Color32, RichText};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
-use sim::{Action, ActionKind, CarriageKind, EventKind, Npc, NpcId, Stats, World};
+use sim::{Action, ActionKind, Carriage, EventKind, ItemKind, Npc, NpcId, Stats, World};
 
 use crate::state::{PointerOverUi, SelectedNpc, Sim, SimClock};
+use crate::storage::{item_color, plural_title, storable_items};
 
 /// Velocità selezionabili, in minuti di gioco per secondo reale.
 const SPEEDS: [f32; 4] = [1.0, 10.0, 60.0, 600.0];
@@ -17,7 +18,7 @@ const EVENT_LOG_LEN: usize = 50;
 /// Ogni quanti secondi reali ricalcolare statistiche e presenze.
 const CACHE_REFRESH_SECS: f32 = 0.25;
 /// Distanza delle finestre dai bordi dello schermo.
-const MARGIN: f32 = 8.0;
+pub(crate) const MARGIN: f32 = 8.0;
 /// Larghezza fissa dell'ispettore.
 const INSPECTOR_WIDTH: f32 = 300.0;
 /// Larghezza del registro eventi.
@@ -42,12 +43,17 @@ impl Plugin for UiPlugin {
                     event_log,
                     carriage_overview,
                     // Per ultimo, dopo che tutte le finestre sono state disegnate.
-                    update_pointer_over_ui,
+                    update_pointer_over_ui.in_set(PointerCheck),
                 )
                     .chain(),
             );
     }
 }
+
+/// Il controllo "puntatore sopra egui": le finestre di altri moduli vanno
+/// disegnate prima (`.before(PointerCheck)`).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PointerCheck;
 
 /// Dati aggregati ricalcolati poche volte al secondo invece che a ogni frame.
 #[derive(Resource)]
@@ -116,7 +122,11 @@ fn time_panel(
                     None => ui.weak(NOT_STARTED),
                 };
                 ui.separator();
-                let label = if clock.paused { "▶ Riprendi" } else { "⏸ Pausa" };
+                let label = if clock.paused {
+                    "▶ Riprendi"
+                } else {
+                    "⏸ Pausa"
+                };
                 if ui.button(label).clicked() {
                     clock.paused = !clock.paused;
                 }
@@ -156,8 +166,11 @@ fn stats_row(ui: &mut egui::Ui, stats: &Stats) {
     }
     ui.separator();
     ui.label(format!(
-        "Cibo {:.0} (mense {:.0})",
-        stats.food_total, stats.food_in_mense
+        "Razioni {:.0} · Attrezzi in vendita {} · Vestiti in vendita {} · Gettoni {}",
+        stats.stored.get(ItemKind::Razione),
+        stats.on_sale.count(ItemKind::Attrezzo),
+        stats.on_sale.count(ItemKind::Vestito),
+        stats.tokens
     ));
 }
 
@@ -165,11 +178,7 @@ fn stats_row(ui: &mut egui::Ui, stats: &Stats) {
 // Ispettore dell'NPC selezionato (a destra)
 // ----------------------------------------------------------------------
 
-fn inspector(
-    mut contexts: EguiContexts,
-    sim: Option<Res<Sim>>,
-    mut selected: ResMut<SelectedNpc>,
-) {
+fn inspector(mut contexts: EguiContexts, sim: Option<Res<Sim>>, mut selected: ResMut<SelectedNpc>) {
     let Some(id) = selected.0 else {
         return;
     };
@@ -220,10 +229,12 @@ fn npc_details(ui: &mut egui::Ui, world: &World, npc: &Npc) {
     } else {
         until.to_string()
     };
-    ui.add(egui::ProgressBar::new(npc.action_progress(now)).text(format!(
-        "{} rimasti, fino alle {until_text}",
-        format_minutes(until.since(now))
-    )));
+    ui.add(
+        egui::ProgressBar::new(npc.action_progress(now)).text(format!(
+            "{} rimasti, fino alle {until_text}",
+            format_minutes(until.since(now))
+        )),
+    );
 
     ui.separator();
     ui.strong("Bisogni");
@@ -249,7 +260,40 @@ fn npc_details(ui: &mut egui::Ui, world: &World, npc: &Npc) {
     }
 
     ui.separator();
+    ui.strong("Inventario");
     field(ui, "Gettoni", &npc.inventory.tokens.to_string());
+    for (name, item) in [
+        ("Attrezzo", ItemKind::Attrezzo),
+        ("Vestito", ItemKind::Vestito),
+    ] {
+        ui.horizontal(|ui| {
+            item_swatch(ui, item);
+            ui.weak(format!("{name}:"));
+            match npc.inventory.durability(item) {
+                Some(d) => {
+                    ui.add(
+                        egui::ProgressBar::new(d)
+                            .fill(need_color(d))
+                            .text(format!("integrità {:.0}%", d * 100.0)),
+                    );
+                }
+                None => {
+                    ui.label("nessuno");
+                }
+            }
+        });
+    }
+    let wanted: Vec<&str> = [ItemKind::Attrezzo, ItemKind::Vestito]
+        .into_iter()
+        .filter(|&item| npc.wants(item))
+        .map(ItemKind::name)
+        .collect();
+    let wants = if wanted.is_empty() {
+        "niente".to_string()
+    } else {
+        wanted.join(", ")
+    };
+    field(ui, "Vuole comprare", &wants);
 
     if let Some(context) = world.npc_context(npc.id) {
         egui::CollapsingHeader::new("Contesto per il cervello")
@@ -260,9 +304,11 @@ fn npc_details(ui: &mut egui::Ui, world: &World, npc: &Npc) {
 
 /// L'NPC selezionato non esiste più: cerca nel registro come è morto.
 fn missing_npc(ui: &mut egui::Ui, world: &World, id: NpcId) {
-    let death = world.events.iter().rev().find(|event| {
-        matches!(&event.kind, EventKind::NpcDied { npc, .. } if *npc == id)
-    });
+    let death = world
+        .events
+        .iter()
+        .rev()
+        .find(|event| matches!(&event.kind, EventKind::NpcDied { npc, .. } if *npc == id));
     match death {
         Some(event) => {
             ui.colored_label(DANGER, event.to_string());
@@ -300,6 +346,7 @@ fn action_text(world: &World, npc: &Npc) -> String {
             Some(partner) => format!("{verb} con {}", partner.name),
             None => verb.to_string(),
         },
+        Action::Buy(item) => format!("{verb} {}", item.with_article()),
         Action::Idle => verb.to_string(),
     }
 }
@@ -308,11 +355,11 @@ fn action_text(world: &World, npc: &Npc) -> String {
 // Registro eventi (in basso a sinistra)
 // ----------------------------------------------------------------------
 
-fn event_log(mut contexts: EguiContexts, sim: Option<Res<Sim>>) {
+fn event_log(mut contexts: EguiContexts, sim: Option<Res<Sim>>, mut hide_purchases: Local<bool>) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let total = sim.as_ref().map_or(0, |sim| sim.world.events.len());
+    let total = sim.as_ref().map_or(0, |sim| sim.world.events_total());
     // L'id resta fisso anche se il titolo cambia col numero di eventi.
     egui::Window::new(format!("Eventi ({total})"))
         .id(egui::Id::new("event_log"))
@@ -326,8 +373,17 @@ fn event_log(mut contexts: EguiContexts, sim: Option<Res<Sim>>) {
                 ui.weak(NOT_STARTED);
                 return;
             };
-            let events = &sim.world.events;
-            if events.is_empty() {
+            ui.checkbox(&mut hide_purchases, "Nascondi gli acquisti degli NPC");
+            let hide = *hide_purchases;
+            let mut shown = sim
+                .world
+                .events
+                .iter()
+                .rev()
+                .filter(|e| !(hide && matches!(e.kind, EventKind::ItemBought { .. })))
+                .take(EVENT_LOG_LEN)
+                .peekable();
+            if shown.peek().is_none() {
                 ui.weak("Nessun evento.");
                 return;
             }
@@ -335,7 +391,7 @@ fn event_log(mut contexts: EguiContexts, sim: Option<Res<Sim>>) {
                 .max_height(160.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    for event in events.iter().rev().take(EVENT_LOG_LEN) {
+                    for event in shown {
                         ui.colored_label(event_color(&event.kind), event.to_string());
                     }
                 });
@@ -346,8 +402,13 @@ fn event_color(kind: &EventKind) -> Color32 {
     match kind {
         EventKind::NpcDied { .. } => DANGER,
         EventKind::NpcStarving { .. } => WARNING,
-        EventKind::FoodShortage => Color32::from_rgb(230, 200, 80),
-        EventKind::FoodRestocked => GOOD,
+        EventKind::Shortage { .. } => Color32::from_rgb(230, 200, 80),
+        EventKind::Restocked { .. } => GOOD,
+        EventKind::ItemBroke { .. } => WARNING,
+        EventKind::ItemBought { .. } => Color32::GRAY,
+        EventKind::PlayerTook { .. }
+        | EventKind::PlayerBought { .. }
+        | EventKind::PlayerGave { .. } => PLAYER,
     }
 }
 
@@ -383,13 +444,20 @@ fn carriage_overview(
                 .max_height(260.0)
                 .show(ui, |ui| {
                     egui::Grid::new("carriage_grid")
-                        .num_columns(5)
+                        .num_columns(5 + ItemKind::COUNT)
                         .striped(true)
-                        .spacing([12.0, 2.0])
+                        .spacing([10.0, 2.0])
                         .show(ui, |ui| {
-                            for header in ["N.", "Nome", "Tipo", "Presenti", "Scorte"] {
+                            for header in ["N.", "Nome", "Tipo", "Presenti"] {
                                 ui.strong(header);
                             }
+                            for item in ItemKind::ALL {
+                                ui.horizontal(|ui| {
+                                    item_swatch(ui, item);
+                                    ui.strong(plural_title(item));
+                                });
+                            }
+                            ui.strong("Prezzi");
                             ui.end_row();
                             for carriage in &world.carriages {
                                 let text = |s: String| {
@@ -405,25 +473,44 @@ fn carriage_overview(
                                     .get(carriage.id.index())
                                     .copied()
                                     .unwrap_or(0);
-                                let stock = match carriage.kind {
-                                    CarriageKind::Mensa | CarriageKind::Serra => {
-                                        format!("{:.0} cibo", carriage.stock.food)
-                                    }
-                                    CarriageKind::Officina => {
-                                        format!("{:.0} mat.", carriage.stock.materials)
-                                    }
-                                    CarriageKind::Dormitorio => "-".to_string(),
-                                };
                                 ui.label(text(carriage.id.to_string()));
                                 ui.label(text(carriage.name.clone()));
                                 ui.label(text(carriage.kind.to_string()));
                                 ui.label(text(present.to_string()));
-                                ui.label(text(stock));
+                                stock_cells(ui, world, carriage);
                                 ui.end_row();
                             }
                         });
                 });
         });
+}
+
+/// Una colonna per oggetto (vuota se la carrozza non lo tiene) e i prezzi
+/// dei Mercati.
+fn stock_cells(ui: &mut egui::Ui, world: &World, carriage: &Carriage) {
+    let storable = storable_items(&world.params, carriage.kind);
+    for item in ItemKind::ALL {
+        if storable.contains(&item) {
+            let n = carriage.stock.count(item);
+            let text = RichText::new(n.to_string());
+            ui.label(if n == 0 { text.color(DANGER) } else { text });
+        } else {
+            ui.weak("·");
+        }
+    }
+    let prices: Vec<String> = ItemKind::ALL
+        .into_iter()
+        .filter_map(|item| {
+            let price = world.price(carriage.id, item)?;
+            Some(format!("{} {price}", item.name()))
+        })
+        .collect();
+    if prices.is_empty() {
+        ui.weak("·");
+    } else {
+        ui.label(prices.join(" · "))
+            .on_hover_text("Prezzo in gettoni: sale quando lo scaffale si svuota");
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -450,6 +537,21 @@ fn update_pointer_over_ui(mut contexts: EguiContexts, mut over_ui: ResMut<Pointe
 const DANGER: Color32 = Color32::from_rgb(230, 80, 80);
 const WARNING: Color32 = Color32::from_rgb(240, 160, 60);
 const GOOD: Color32 = Color32::from_rgb(110, 190, 110);
+/// Eventi causati dal giocatore.
+const PLAYER: Color32 = Color32::from_rgb(120, 200, 240);
+
+/// Colore Bevy -> egui.
+pub(crate) fn color32(color: Color) -> Color32 {
+    let [r, g, b, a] = color.to_srgba().to_u8_array();
+    Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+/// Quadratino del colore di un oggetto (lo stesso delle casse nel mondo).
+pub(crate) fn item_swatch(ui: &mut egui::Ui, item: ItemKind) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 1.0, color32(item_color(item)));
+}
 
 /// Colore di un bisogno in `0..=1` (1 = soddisfatto), con le stesse soglie
 /// di `World::npc_context` (critica / bassa / media / buona).
