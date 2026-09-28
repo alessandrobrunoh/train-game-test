@@ -43,6 +43,12 @@ pub struct UtilityWeights {
     pub min_tiredness_to_nap: f32,
     pub work: f32,
     pub socialize: f32,
+    /// Extra desire to chat with someone, times the affinity with them
+    /// (negative affinity: avoided)...
+    pub friend_bonus: f32,
+    /// ...plus this for family (partner, parents, children, siblings). Both
+    /// scale with the social need, like `socialize`.
+    pub family_bonus: f32,
     pub evening_social_bonus: f32,
     pub home_bonus: f32,
     /// Desire to buy a missing Attrezzo (for jobs that use one)...
@@ -71,6 +77,8 @@ impl Default for UtilityWeights {
             min_tiredness_to_nap: 0.75,
             work: 0.75,
             socialize: 0.9,
+            friend_bonus: 0.4,
+            family_bonus: 0.2,
             evening_social_bonus: 0.1,
             home_bonus: 0.1,
             buy_tool: 0.8,
@@ -116,6 +124,18 @@ impl UtilityBrain {
                 goal + home - minutes * self.weights.travel_cost_per_minute
             }
             Action::Buy(item) => self.buy_score(npc, item),
+            Action::Socialize(other) => {
+                let w = &self.weights;
+                let tie = npc.relation(other).map_or(0.0, |r| {
+                    let family = if r.kind.is_family() {
+                        w.family_bonus
+                    } else {
+                        0.0
+                    };
+                    w.friend_bonus * r.affinity + family
+                });
+                self.goal_score(world, npc, ActionKind::Socialize) + (1.0 - npc.needs.social) * tie
+            }
             action => self.goal_score(world, npc, action.kind()),
         }
     }

@@ -84,13 +84,9 @@ fn economy_is_sustainable_for_30_days() {
     // Counts events over the whole run: keep them all.
     w.params.max_events = usize::MAX;
     w.run(&mut brain, 30 * DAY);
-    let deaths = w
-        .events
-        .iter()
-        .filter(|e| matches!(e.kind, EventKind::NpcDied { .. }))
-        .count();
-    assert_eq!(deaths, 0);
-    assert_eq!(w.npcs.len(), 100);
+    // 30 days are 2.5 years: people die of old age, but nobody starves.
+    assert_eq!(starved(&w), 0);
+    assert!((90..=120).contains(&w.npcs.len()), "{}", w.npcs.len());
     let razioni = w.available(ItemKind::Razione);
     assert!(razioni > 50.0, "mense almost empty: {razioni}");
     let stats = sim::Stats::of(&w);
@@ -535,13 +531,8 @@ fn full_train_lives_30_days_and_economy_circulates() {
             market_stocked_hours += 1;
         }
     }
-    let deaths = w
-        .events
-        .iter()
-        .filter(|e| matches!(e.kind, EventKind::NpcDied { .. }))
-        .count();
-    assert_eq!(deaths, 0);
-    assert_eq!(w.npcs.len(), 400);
+    assert_eq!(starved(&w), 0);
+    assert!((380..=w.max_population()).contains(&w.npcs.len()));
     let count =
         |pred: &dyn Fn(&EventKind) -> bool| w.events.iter().filter(|e| pred(&e.kind)).count();
     let bought = count(&|k| matches!(k, EventKind::ItemBought { .. }));
@@ -562,6 +553,21 @@ fn full_train_lives_30_days_and_economy_circulates() {
 }
 
 const SOLD: [ItemKind; 2] = [ItemKind::Attrezzo, ItemKind::Vestito];
+
+fn starved(w: &World) -> usize {
+    w.events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                EventKind::NpcDied {
+                    cause: sim::DeathCause::Starvation,
+                    ..
+                }
+            )
+        })
+        .count()
+}
 
 #[test]
 fn event_log_is_capped_without_changing_the_simulation() {

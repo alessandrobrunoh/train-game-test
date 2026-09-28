@@ -5,7 +5,7 @@ use std::fmt;
 use crate::action::ActionKind;
 use crate::carriage::CarriageKind;
 use crate::item::{ItemKind, Stock};
-use crate::npc::Needs;
+use crate::npc::{LifeStage, Needs};
 use crate::time::GameTime;
 use crate::world::World;
 
@@ -26,6 +26,22 @@ pub struct Stats {
     pub tokens: u64,
     /// NPC count per action, indexed like [`ActionKind::ALL`].
     pub actions: [usize; ActionKind::ALL.len()],
+    /// Population per life stage, indexed by [`LifeStage::index`].
+    pub stages: [usize; LifeStage::ALL.len()],
+    /// Couples (both partners alive).
+    pub couples: usize,
+    /// Average age in years (0 when the population is 0).
+    pub avg_age: f32,
+    /// Founders still alive (see [`World::is_founder`]); the rest were born on the train.
+    pub founders: usize,
+    /// Beds on the train and the population above which births are denied.
+    pub beds: usize,
+    pub max_population: usize,
+    /// Since the last midnight / since the world was generated.
+    pub births_today: u32,
+    pub deaths_today: u32,
+    pub births_total: u64,
+    pub deaths_total: u64,
 }
 
 impl Stats {
@@ -39,7 +55,15 @@ impl Stats {
         let mut actions = [0; ActionKind::ALL.len()];
         let mut owned = [0; ItemKind::COUNT];
         let mut tokens = 0;
+        let mut stages = [0; LifeStage::ALL.len()];
+        let mut partnered = 0;
+        let mut ages = 0u64;
+        let mut founders = 0;
         for npc in &world.npcs {
+            stages[npc.stage().index()] += 1;
+            partnered += usize::from(npc.partner().is_some());
+            ages += u64::from(npc.age);
+            founders += usize::from(world.is_founder(npc.id));
             sum.hunger += npc.needs.hunger;
             sum.energy += npc.needs.energy;
             sum.social += npc.needs.social;
@@ -65,11 +89,26 @@ impl Stats {
             owned,
             tokens,
             actions,
+            stages,
+            couples: partnered / 2,
+            avg_age: ages as f32 / n,
+            founders,
+            beds: world.total_beds(),
+            max_population: world.max_population(),
+            births_today: world.life.births_today,
+            deaths_today: world.life.deaths_today,
+            births_total: world.life.births_total,
+            deaths_total: world.life.deaths_total,
         }
     }
 
     pub fn count(&self, kind: ActionKind) -> usize {
         self.actions[kind as usize]
+    }
+
+    /// Population at a life stage.
+    pub fn stage(&self, stage: LifeStage) -> usize {
+        self.stages[stage.index()]
     }
 
     /// Owned units of `item` in personal inventories.
@@ -99,6 +138,18 @@ impl fmt::Display for Stats {
             self.on_sale.get(ItemKind::Vestito),
             self.owned(ItemKind::Vestito),
             self.tokens,
+        )?;
+        write!(
+            f,
+            " bambini {} giovani {} adulti {} anziani {} coppie {} età media {:.1} | nati {} morti {} |",
+            self.stage(LifeStage::Bambino),
+            self.stage(LifeStage::Giovane),
+            self.stage(LifeStage::Adulto),
+            self.stage(LifeStage::Anziano),
+            self.couples,
+            self.avg_age,
+            self.births_total,
+            self.deaths_total,
         )?;
         for kind in ActionKind::ALL {
             write!(f, " {} {}", kind.name(), self.count(kind))?;

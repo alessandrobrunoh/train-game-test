@@ -10,6 +10,7 @@ use crate::carriage::CarriageKind;
 use crate::item::ItemKind;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SimParams {
     // --- Needs decay (always applied) ---
     /// Hunger decay while awake (asleep it is multiplied by `sleep_hunger_factor`).
@@ -108,6 +109,46 @@ pub struct SimParams {
     /// An NPC with hunger at 0 for this long dies.
     pub starvation_minutes: u64,
 
+    // --- Life cycle (checked once per game day, at midnight) ---
+    /// Game days in a year of life. Small so generations are watchable: with
+    /// 12, a year lasts ~29 real seconds at 600 game minutes per second.
+    pub days_per_year: u32,
+    /// Gompertz mortality: yearly death hazard `base * e^(growth * age)`.
+    /// The defaults put the median age at death around 78.
+    pub mortality_base: f32,
+    pub mortality_growth: f32,
+    /// Affinity gained by both NPCs when a chat ends...
+    pub affinity_per_chat: f32,
+    /// ...unless they quarrel (this chance), losing as much instead.
+    pub quarrel_chance: f32,
+    /// Friend ties fade towards 0 by this much every day (family ties don't).
+    pub affinity_decay_per_day: f32,
+    /// Two single adults of opposite sex become a couple once their affinity
+    /// reaches this...
+    pub couple_affinity: f32,
+    /// ...if their ages differ by at most this many years.
+    pub couple_max_age_gap: u32,
+    /// Whether couples may also form between two NPCs of the same sex (they
+    /// don't have children).
+    pub same_sex_couples: bool,
+    /// Yearly chance that a couple with a fertile woman has a child (if the
+    /// administration allows it).
+    pub birth_chance_per_year: f32,
+    /// Fertile ages of the mother, inclusive.
+    pub fertile_min_age: u32,
+    pub fertile_max_age: u32,
+    /// Minimum years between two children of the same mother.
+    pub birth_spacing_years: u32,
+    /// The administration allows births only while the population is below
+    /// this fraction of all beds ([`crate::World::max_population`])...
+    pub birth_max_bed_occupancy: f32,
+    /// ...and the Mense hold at least this many Razioni per person.
+    pub birth_min_razioni_per_person: f32,
+    /// At most one `BirthDenied` event every this many days.
+    pub birth_denied_log_days: u64,
+    /// Generation: spare beds in each Dormitorio, as a fraction of its residents.
+    pub spare_beds: f32,
+
     // --- Event log ---
     /// Most events kept in [`crate::World::events`]: beyond it the oldest are
     /// dropped, a chunk at a time (see [`crate::World::events_total`]).
@@ -177,12 +218,50 @@ impl Default for SimParams {
 
             starvation_minutes: 3 * 24 * 60,
 
+            days_per_year: 12,
+            mortality_base: 3.0e-5,
+            mortality_growth: 0.1,
+            affinity_per_chat: 0.05,
+            quarrel_chance: 0.1,
+            affinity_decay_per_day: 0.01,
+            couple_affinity: 0.5,
+            couple_max_age_gap: 12,
+            same_sex_couples: false,
+            birth_chance_per_year: 0.35,
+            fertile_min_age: 18,
+            fertile_max_age: 42,
+            birth_spacing_years: 2,
+            birth_max_bed_occupancy: 0.97,
+            birth_min_razioni_per_person: 1.0,
+            birth_denied_log_days: 3,
+            spare_beds: 0.15,
+
             max_events: default_max_events(),
         }
     }
 }
 
 impl SimParams {
+    /// Game minutes in a year of life.
+    pub fn minutes_per_year(&self) -> u64 {
+        u64::from(self.days_per_year.max(1)) * crate::time::MINUTES_PER_DAY
+    }
+
+    /// Yearly death hazard (old age) at `age` years (Gompertz curve).
+    pub fn mortality_per_year(&self, age: f32) -> f32 {
+        self.mortality_base * (self.mortality_growth * age).exp()
+    }
+
+    /// Probability of surviving from birth to `age` years under
+    /// [`SimParams::mortality_per_year`].
+    pub fn survival(&self, age: f32) -> f32 {
+        let b = self.mortality_growth;
+        if b <= 0.0 {
+            return (-self.mortality_base * age).exp();
+        }
+        (-(self.mortality_base / b) * ((b * age).exp() - 1.0)).exp()
+    }
+
     pub fn is_night(&self, hour: u32) -> bool {
         hour >= self.night_start_hour || hour < self.wake_hour
     }

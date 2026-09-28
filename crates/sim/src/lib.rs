@@ -21,6 +21,14 @@
 //! Every storage is capped per carriage and item; Verdura and Razioni spoil a
 //! little every midnight.
 //!
+//! Life cycle (once per game day, at midnight; a year lasts
+//! `SimParams::days_per_year` days): people age ([`LifeStage`]: children and
+//! youths don't work, adults do, the elderly retire), make friends by chatting
+//! ([`Relation`]), form couples, have children when the train administration
+//! allows it (free beds, enough food, below [`World::max_population`]), and die
+//! of old age (or hunger). Jobs follow the population: new adults take the job
+//! most needed, food first. See [`World::life`] and [`Stats`].
+//!
 //! 1 tick = 1 game minute. All randomness comes from seeded ChaCha RNGs, so a
 //! world is fully deterministic given its seed and the brain's seed.
 
@@ -40,11 +48,11 @@ pub mod world;
 pub use action::{Action, ActionKind, ActionOption, DecisionRequest};
 pub use brain::{Brain, RandomBrain, UtilityBrain, UtilityWeights};
 pub use carriage::{Carriage, CarriageKind, Station, StationKind};
-pub use event::{DeathCause, Event, EventKind};
+pub use event::{BirthDenial, DeathCause, Event, EventKind};
 pub use ids::{CarriageId, NpcId, StationId};
 pub use item::{ItemKind, Stock};
-pub use npc::{Inventory, Job, Needs, Npc};
+pub use npc::{Inventory, Job, LifeStage, MAX_RELATIONS, Needs, Npc, Relation, RelationKind, Sex};
 pub use params::SimParams;
 pub use stats::Stats;
 pub use time::{GameTime, MINUTES_PER_DAY, MINUTES_PER_HOUR};
-pub use world::{BuyError, GiveError, World};
+pub use world::{BuyError, GiveError, LifeCounters, World};

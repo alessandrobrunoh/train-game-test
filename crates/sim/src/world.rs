@@ -14,9 +14,13 @@ use crate::event::{DeathCause, Event, EventKind};
 use crate::ids::{CarriageId, NpcId, StationId};
 use crate::item::{ItemKind, Stock};
 use crate::names;
-use crate::npc::{Inventory, Job, Needs, Npc};
+use crate::npc::{Inventory, Job, LifeStage, Needs, Npc, Relation, RelationKind, Sex};
 use crate::params::SimParams;
 use crate::time::GameTime;
+
+mod life;
+
+pub use life::LifeCounters;
 
 /// Expected minutes of actual work per worker per day, used to size the
 /// workforce at generation time.
@@ -26,6 +30,14 @@ const FOOD_SAFETY_MARGIN: f32 = 1.3;
 const MEALS_PER_DAY: f32 = 3.0;
 /// One Mercante per this many inhabitants (at least one per Mercato).
 const NPCS_PER_MERCANTE: usize = 60;
+/// Jobs with a staffing quota, by priority (food first). Everyone else is an Operaio.
+const NEEDED_JOBS: [Job; 3] = [Job::Contadino, Job::Cuoco, Job::Mercante];
+/// Generation: chance that a woman of 20+ is in a couple (if a man fits)...
+const GENERATED_COUPLE_CHANCE: f64 = 0.7;
+/// ...with at most this age difference.
+const GENERATED_COUPLE_AGE_GAP: u32 = 6;
+/// Generation: acquaintances drawn among housemates per NPC.
+const GENERATED_FRIENDS: usize = 2;
 /// Items whose shortage is reported (see [`EventKind::Shortage`]).
 const TRACKED_SHORTAGES: [ItemKind; 3] = [ItemKind::Razione, ItemKind::Attrezzo, ItemKind::Vestito];
 /// Items sold at the Mercati.
@@ -61,12 +73,21 @@ pub struct World {
     #[serde(default)]
     events_dropped: u64,
     next_npc_id: u32,
+    /// NPCs generated with the world: ids below this (see [`World::is_founder`]).
+    #[serde(default)]
+    founders: u32,
+    /// Births, deaths and other life-cycle counters.
+    #[serde(default)]
+    pub life: LifeCounters,
+    /// When the last `BirthDenied` event was logged (they are rate-limited).
+    #[serde(default)]
+    last_birth_denied_log: Option<GameTime>,
     /// Edge-trigger for Shortage / Restocked events, indexed by item.
     shortages: [bool; ItemKind::COUNT],
     rng: ChaCha8Rng,
     /// Scratch buffer reused every tick (see `presence_index`).
     #[serde(skip)]
-    presence: Vec<Vec<usize>>,
+    presence: Presence,
 }
 
 impl World {
@@ -126,54 +147,141 @@ impl World {
         };
         let dorms = of_kind(CarriageKind::Dormitorio);
         let mense = of_kind(CarriageKind::Mensa);
-        let mercati = of_kind(CarriageKind::Mercato);
 
-        // --- People ---
-        let ages: Vec<u32> = (0..n_npcs)
-            .map(|_| match rng.random_range(0..100) {
-                0..15 => rng.random_range(3..18),
-                15..85 => rng.random_range(18..65),
-                _ => rng.random_range(65..90),
+        // --- People: a stationary age pyramid, couples, families, homes ---
+        let year = params.minutes_per_year() as i64;
+        let ages: Vec<u32> = (0..n_npcs).map(|_| sample_age(&params, &mut rng)).collect();
+        let sexes: Vec<Sex> = (0..n_npcs)
+            .map(|_| {
+                if rng.random_bool(0.5) {
+                    Sex::Female
+                } else {
+                    Sex::Male
+                }
             })
             .collect();
+        let mut surnames: Vec<&str> = (0..n_npcs)
+            .map(|_| names::SURNAMES.choose(&mut rng).copied().unwrap_or("Rossi"))
+            .collect();
+        let adult = |i: usize| ages[i] >= LifeStage::ADULTO_FROM;
+
+        // Couples: single women (in random order) pair with the single man
+        // closest in age, within a few years.
+        let mut partner_of: Vec<Option<usize>> = vec![None; n_npcs];
+        let mut women: Vec<usize> = (0..n_npcs)
+            .filter(|&i| sexes[i] == Sex::Female && ages[i] >= 20)
+            .collect();
+        women.shuffle(&mut rng);
+        for &w in &women {
+            if !rng.random_bool(GENERATED_COUPLE_CHANCE) {
+                continue;
+            }
+            let man = (0..n_npcs)
+                .filter(|&m| {
+                    sexes[m] == Sex::Male
+                        && ages[m] >= 20
+                        && partner_of[m].is_none()
+                        && ages[m].abs_diff(ages[w]) <= GENERATED_COUPLE_AGE_GAP
+                })
+                .min_by_key(|&m| (ages[m].abs_diff(ages[w]), m));
+            if let Some(m) = man {
+                partner_of[w] = Some(m);
+                partner_of[m] = Some(w);
+            }
+        }
+        let couples: Vec<(usize, usize)> = (0..n_npcs)
+            .filter_map(|w| match (sexes[w], partner_of[w]) {
+                (Sex::Female, Some(m)) => Some((w, m)),
+                _ => None,
+            })
+            .collect();
+
+        // Children: most minors and some younger adults belong to a couple
+        // old enough to be their parents; they take the father's surname.
+        let mut parents_of: Vec<Option<usize>> = vec![None; n_npcs]; // index into `couples`
+        let mut kids = vec![0u32; couples.len()];
+        let mut order: Vec<usize> = (0..n_npcs).collect();
+        order.shuffle(&mut rng);
+        for &k in &order {
+            let chance = if adult(k) { 0.35 } else { 0.9 };
+            if ages[k] >= 45 || !rng.random_bool(chance) {
+                continue;
+            }
+            let candidates: Vec<usize> = couples
+                .iter()
+                .enumerate()
+                .filter(|&(c, &(w, m))| {
+                    let (mother_age, father_age) =
+                        (ages[w].checked_sub(ages[k]), ages[m].checked_sub(ages[k]));
+                    kids[c] < 4
+                        && w != k
+                        && m != k
+                        && partner_of[k] != Some(w)
+                        && partner_of[k] != Some(m)
+                        && mother_age.is_some_and(|a| {
+                            (params.fertile_min_age..=params.fertile_max_age).contains(&a)
+                        })
+                        && father_age.is_some_and(|a| a >= LifeStage::ADULTO_FROM)
+                })
+                .map(|(c, _)| c)
+                .collect();
+            if let Some(&c) = candidates.choose(&mut rng) {
+                parents_of[k] = Some(c);
+                kids[c] += 1;
+            }
+        }
+        // Fathers first (oldest first), so surnames pass down generations.
+        order.sort_by_key(|&k| (std::cmp::Reverse(ages[k]), k));
+        for &k in &order {
+            if let Some(c) = parents_of[k] {
+                surnames[k] = surnames[couples[c].1];
+            }
+        }
+
+        // Households: a couple with its minor children, everyone else alone.
+        let mut households: Vec<Vec<usize>> = couples
+            .iter()
+            .enumerate()
+            .map(|(c, &(w, m))| {
+                let mut h = vec![w, m];
+                h.extend((0..n_npcs).filter(|&k| parents_of[k] == Some(c) && !adult(k)));
+                h
+            })
+            .collect();
+        for i in 0..n_npcs {
+            let with_parents = parents_of[i].is_some() && !adult(i);
+            if partner_of[i].is_none() && !with_parents {
+                households.push(vec![i]);
+            }
+        }
+        households.shuffle(&mut rng);
+        // Largest first, each into the emptiest Dormitorio: balanced dorms.
+        households.sort_by_key(|h| std::cmp::Reverse(h.len()));
+        let mut home_of = vec![CarriageId(0); n_npcs];
+        let mut dorm_residents = vec![0usize; dorms.len()];
+        for h in &households {
+            let Some(d) = (0..dorms.len()).min_by_key(|&d| (dorm_residents[d], d)) else {
+                break;
+            };
+            dorm_residents[d] += h.len();
+            for &i in h {
+                home_of[i] = dorms[d];
+            }
+        }
 
         // Size the workforce so food production covers everyone with a margin
         // (assuming nobody has a tool), then Mercanti; everyone else is an Operaio
         // (scrap-limited: idle hands keep the train in repair).
         let workers: Vec<usize> = (0..n_npcs)
-            .filter(|&i| (18..65).contains(&ages[i]))
+            .filter(|&i| LifeStage::of_age(ages[i]).works())
             .collect();
-        let daily_razioni =
-            n_npcs as f32 * MEALS_PER_DAY * params.razioni_per_meal * FOOD_SAFETY_MARGIN;
-        let quota = |amount: f32, rate: f32| {
-            let needed = (amount / (EXPECTED_WORK_MINUTES_PER_DAY * rate)).ceil();
-            if needed.is_finite() {
-                needed.min(workers.len() as f32) as usize
-            } else {
-                0
-            }
-        };
+        let quotas = job_quotas(&params, &carriages, n_npcs);
         let mut jobs: Vec<Option<Job>> = Vec::with_capacity(workers.len());
-        let available = |job: Job| carriages.iter().any(|c| c.kind == job.workplace_kind());
-        if available(Job::Contadino) {
-            let verdura = daily_razioni / params.razioni_per_verdura;
-            jobs.extend(std::iter::repeat_n(
-                Some(Job::Contadino),
-                quota(verdura, params.verdura_per_farm_minute),
-            ));
-        }
-        if available(Job::Cuoco) {
-            jobs.extend(std::iter::repeat_n(
-                Some(Job::Cuoco),
-                quota(daily_razioni, params.razioni_per_cook_minute),
-            ));
-        }
-        if available(Job::Mercante) {
-            let mercanti = n_npcs.div_ceil(NPCS_PER_MERCANTE).max(mercati.len());
-            jobs.extend(std::iter::repeat_n(Some(Job::Mercante), mercanti));
+        for job in NEEDED_JOBS {
+            jobs.extend(std::iter::repeat_n(Some(job), quotas[job.index()]));
         }
         jobs.truncate(workers.len());
-        let operaio = available(Job::Operaio).then_some(Job::Operaio);
+        let operaio = has_kind(&carriages, Job::Operaio.workplace_kind()).then_some(Job::Operaio);
         jobs.resize(workers.len(), operaio);
         jobs.shuffle(&mut rng);
 
@@ -181,15 +289,6 @@ impl World {
         for (&w, job) in workers.iter().zip(jobs) {
             job_of[w] = job;
         }
-
-        let home_of: Vec<CarriageId> = (0..n_npcs)
-            .map(|i| {
-                dorms
-                    .get(i % dorms.len().max(1))
-                    .copied()
-                    .unwrap_or(CarriageId(0))
-            })
-            .collect();
 
         // Workplaces: split each job's workers, ordered by home position, into
         // equal contiguous groups over that job's carriages (head to tail).
@@ -205,12 +304,12 @@ impl World {
         }
 
         let mut npcs = Vec::with_capacity(n_npcs);
-        for (i, &age) in ages.iter().enumerate() {
-            let first = names::FIRST_NAMES
+        for i in 0..n_npcs {
+            let (age, sex) = (ages[i], sexes[i]);
+            let first = names::first_names(sex)
                 .choose(&mut rng)
                 .copied()
                 .unwrap_or("Anna");
-            let last = names::SURNAMES.choose(&mut rng).copied().unwrap_or("Rossi");
             let (home, job, workplace) = (home_of[i], job_of[i], workplace_of[i]);
             // Staggered durabilities so things don't all break on the same day.
             let tool = job
@@ -222,9 +321,13 @@ impl World {
             } else {
                 rng.random_range(0..10)
             };
+            // Born before day 1: some time into the year of their current age.
+            let born = clock.0 as i64 - i64::from(age) * year - rng.random_range(1..year);
             npcs.push(Npc {
                 id: NpcId(i as u32),
-                name: format!("{first} {last}"),
+                name: format!("{first} {}", surnames[i]),
+                sex,
+                born,
                 age,
                 carriage: home,
                 home,
@@ -244,29 +347,109 @@ impl World {
                 action_since: clock,
                 action_until: clock + rng.random_range(0..30),
                 starving_minutes: 0,
+                relations: Vec::new(),
             });
         }
 
-        // --- Stations and starting stock, sized on who lives/works where ---
+        // --- Relations: partners, parents and children, siblings, and a
+        // couple of acquaintances among housemates ---
+        for &(w, m) in &couples {
+            let affinity = rng.random_range(0.6..0.95);
+            link(&mut npcs, w, m, RelationKind::Partner, affinity);
+        }
+        let mut children_of: Vec<Vec<usize>> = vec![Vec::new(); couples.len()];
+        for (k, parents) in parents_of.iter().enumerate() {
+            if let &Some(c) = parents {
+                let (w, m) = couples[c];
+                link(
+                    &mut npcs,
+                    w,
+                    k,
+                    RelationKind::Child,
+                    rng.random_range(0.5..0.9),
+                );
+                link(
+                    &mut npcs,
+                    m,
+                    k,
+                    RelationKind::Child,
+                    rng.random_range(0.5..0.9),
+                );
+                for &j in &children_of[c] {
+                    link(
+                        &mut npcs,
+                        j,
+                        k,
+                        RelationKind::Sibling,
+                        rng.random_range(0.3..0.8),
+                    );
+                }
+                children_of[c].push(k);
+            }
+        }
+        for (d, &dorm) in dorms.iter().enumerate() {
+            let housemates: Vec<usize> = (0..n_npcs).filter(|&i| home_of[i] == dorm).collect();
+            if housemates.len() < 2 || dorm_residents[d] < 2 {
+                continue;
+            }
+            for &i in &housemates {
+                for _ in 0..GENERATED_FRIENDS {
+                    let Some(&j) = housemates.choose(&mut rng) else {
+                        break;
+                    };
+                    let id = npcs[j].id;
+                    if j != i && npcs[i].relation(id).is_none() {
+                        link(
+                            &mut npcs,
+                            i,
+                            j,
+                            RelationKind::Friend,
+                            rng.random_range(0.05..0.35),
+                        );
+                    }
+                }
+            }
+        }
+
+        // --- Stations and starting stock, sized on who lives/works where.
+        // Beds leave some room for newborns; kitchens and grow beds are sized
+        // for a train full to its birth limit ---
+        let beds_of = |residents: usize| {
+            (residents as f32 * (1.0 + params.spare_beds.max(0.0))).ceil() as usize + 1
+        };
+        let total_beds: usize = dorm_residents.iter().map(|&r| beds_of(r)).sum();
+        let peak_population = max_population_for(&params, total_beds).max(n_npcs);
+        let peak = job_quotas(&params, &carriages, peak_population);
+        let per_place: [usize; 4] = Job::ALL.map(|job| {
+            let places = carriages
+                .iter()
+                .filter(|c| c.kind == job.workplace_kind())
+                .count()
+                .max(1);
+            peak[job.index()].div_ceil(places)
+        });
         let mense_count = mense.len().max(1);
         for c in carriages.iter_mut() {
             let id = c.id;
-            let residents = npcs.iter().filter(|n| n.home == id).count();
             let workers_here = |job: Job| {
                 npcs.iter()
                     .filter(|n| n.job == Some(job) && n.workplace == Some(id))
                     .count()
             };
+            let staffed = |job: Job| workers_here(job).max(per_place[job.index()]);
             match c.kind {
-                CarriageKind::Dormitorio => c.push_stations(StationKind::Bed, residents + 2, 1),
+                CarriageKind::Dormitorio => {
+                    let d = dorms.iter().position(|&d| d == id).unwrap_or(0);
+                    c.push_stations(StationKind::Bed, beds_of(dorm_residents[d]), 1);
+                }
                 CarriageKind::Mensa => {
-                    let seats = (n_npcs as f32 * 0.5 / mense_count as f32).ceil() as usize;
+                    let seats = (peak_population as f32 * 0.5 / mense_count as f32).ceil() as usize;
                     c.push_stations(StationKind::Table, seats.div_ceil(6).max(1), 6);
-                    c.push_stations(StationKind::Stove, workers_here(Job::Cuoco) + 1, 1);
+                    c.push_stations(StationKind::Stove, staffed(Job::Cuoco) + 1, 1);
                     c.stock.set(ItemKind::Razione, 100.0);
                 }
                 CarriageKind::Serra => {
-                    let n = workers_here(Job::Contadino).div_ceil(2) + 1;
+                    let n = staffed(Job::Contadino).div_ceil(2) + 1;
                     c.push_stations(StationKind::GrowBed, n, 2);
                     c.stock.set(ItemKind::Verdura, 100.0);
                 }
@@ -278,7 +461,7 @@ impl World {
                     c.stock.set(ItemKind::Vestito, 5.0);
                 }
                 CarriageKind::Mercato => {
-                    c.push_stations(StationKind::Counter, workers_here(Job::Mercante) + 1, 1);
+                    c.push_stations(StationKind::Counter, staffed(Job::Mercante) + 1, 1);
                     c.stock.set(ItemKind::Attrezzo, 10.0);
                     c.stock.set(ItemKind::Vestito, 10.0);
                 }
@@ -293,9 +476,12 @@ impl World {
             events: Vec::new(),
             events_dropped: 0,
             next_npc_id: n_npcs as u32,
+            founders: n_npcs as u32,
+            life: LifeCounters::default(),
+            last_birth_denied_log: None,
             shortages: [false; ItemKind::COUNT],
             rng,
-            presence: Vec::new(),
+            presence: Presence::default(),
         }
     }
 
@@ -308,7 +494,7 @@ impl World {
     }
 
     fn npc_index(&self, id: NpcId) -> Option<usize> {
-        self.npcs.binary_search_by_key(&id, |n| n.id).ok()
+        index_of(&self.npcs, id)
     }
 
     pub fn carriage(&self, id: CarriageId) -> Option<&Carriage> {
@@ -382,13 +568,15 @@ impl World {
             Some(d) => format!("un vestito {} ({:.0}%)", wear(d), d * 100.0),
             None => "nessun vestito caldo".to_string(),
         };
+        let family = self.family_context(npc);
         Some(format!(
-            "{} ({moment}). {}, {} anni, si trova in {}. Casa: {}. {job} \
+            "{} ({moment}). {}, {} anni ({}), si trova in {}. Casa: {}. {job} {family}\
              Possiede {} gettoni, {tool} e {clothes}. \
              Sazietà {} ({:.2}), energia {} ({:.2}), socialità {} ({:.2}).",
             self.clock,
             npc.name,
             npc.age,
+            npc.stage().name(npc.sex),
             self.carriage_label(npc.carriage),
             self.carriage_label(npc.home),
             inv.tokens,
@@ -584,7 +772,8 @@ impl World {
     ///    item sold out in the meantime the NPC idles briefly and decides again);
     /// 4. updates needs, starvation and deaths;
     /// 5. hourly/daily bookkeeping (Rottame income, spoilage, clothes wear,
-    ///    stipends, shortage events).
+    ///    stipends, shortage events) and, at midnight, the life cycle (aging,
+    ///    deaths, couples, births, workforce: see [`World::life`]).
     pub fn tick(&mut self, brain: &mut dyn Brain) {
         let now = self.clock;
 
@@ -628,6 +817,7 @@ impl World {
                 self.spoil();
                 self.wear_clothes();
                 self.pay_stipends();
+                self.daily_life();
             }
             self.check_shortages();
         }
@@ -653,16 +843,17 @@ impl World {
 
     /// Indices of NPCs available for a chat, per carriage. Reuses the scratch
     /// buffer's allocations (hand it back via `self.presence` when done).
-    fn presence_index(&mut self) -> Vec<Vec<usize>> {
+    fn presence_index(&mut self) -> Presence {
         let mut presence = std::mem::take(&mut self.presence);
-        presence.resize_with(self.carriages.len(), Vec::new);
-        presence.iter_mut().for_each(Vec::clear);
+        let by_carriage = &mut presence.by_carriage;
+        by_carriage.resize_with(self.carriages.len(), Vec::new);
+        by_carriage.iter_mut().for_each(Vec::clear);
+        presence.spot.clear();
+        presence.spot.resize(self.next_npc_id as usize, 0);
         for (i, npc) in self.npcs.iter().enumerate() {
-            if matches!(
-                npc.action,
-                Action::Idle | Action::Eat(_) | Action::Socialize(_)
-            ) {
-                presence[npc.carriage.index()].push(i);
+            if available_for_chat(npc) {
+                by_carriage[npc.carriage.index()].push(i);
+                presence.spot[npc.id.0 as usize] = npc.carriage.0 + 1;
             }
         }
         presence
@@ -670,7 +861,7 @@ impl World {
 
     /// Candidate actions for NPC at index `i` (descriptions left empty).
     /// Only valid options are generated; `Idle` is always the first one.
-    fn options_for(&mut self, i: usize, presence: &[Vec<usize>]) -> Vec<ActionOption> {
+    fn options_for(&mut self, i: usize, presence: &Presence) -> Vec<ActionOption> {
         let p = &self.params;
         let now = self.clock;
         let npc = &self.npcs[i];
@@ -740,10 +931,36 @@ impl World {
             }
         }
 
-        // Chat with up to two people around.
-        for &j in presence[here.index()]
+        // Chat with up to two family members or friends around (closest ties
+        // first), then with up to two other people.
+        let mut close: [Option<(f32, NpcId)>; 2] = [None; 2];
+        for r in &npc.relations {
+            let closeness = r.affinity
+                + match r.kind {
+                    RelationKind::Partner => 1.0,
+                    RelationKind::Friend => 0.0,
+                    _ => 0.5,
+                };
+            if closeness <= 0.0 || !presence.is_available_in(r.other, here) {
+                continue;
+            }
+            // Keep the two closest, closest first.
+            let better = |slot: Option<(f32, NpcId)>| slot.is_none_or(|(c, _)| closeness > c);
+            if better(close[0]) {
+                close[1] = close[0];
+                close[0] = Some((closeness, r.other));
+            } else if better(close[1]) {
+                close[1] = Some((closeness, r.other));
+            }
+        }
+        let close = close.map(|c| c.map(|(_, id)| id));
+        for id in close.into_iter().flatten() {
+            let minutes = self.rng.random_range(p.socialize_min..=p.socialize_max);
+            push(Action::Socialize(id), minutes, None);
+        }
+        for &j in presence.by_carriage[here.index()]
             .sample(&mut self.rng, 3)
-            .filter(|&&j| j != i)
+            .filter(|&&j| j != i && !close.contains(&Some(self.npcs[j].id)))
             .take(2)
         {
             let minutes = self.rng.random_range(p.socialize_min..=p.socialize_max);
@@ -786,6 +1003,7 @@ impl World {
         }
         // Visit the liveliest other carriage.
         if let Some(to) = presence
+            .by_carriage
             .iter()
             .enumerate()
             .filter(|&(c, people)| c != here.index() && !people.is_empty())
@@ -904,6 +1122,13 @@ impl World {
                 {
                     let needs = &mut self.npcs[j].needs;
                     needs.social = (needs.social + bonus).min(1.0);
+                    let gain = self.params.affinity_per_chat;
+                    let delta = if self.rng.random::<f32>() < self.params.quarrel_chance {
+                        -gain
+                    } else {
+                        gain
+                    };
+                    self.add_affinity(i, j, delta);
                 }
             }
             Action::Eat(_) | Action::Sleep(_) | Action::Buy(_) | Action::Idle => {}
@@ -1174,18 +1399,7 @@ impl World {
             }
         }
         for &i in dead.iter().rev() {
-            let npc = self.npcs.remove(i);
-            if let Some(station) = npc.action.station() {
-                self.release(npc.carriage, station);
-            }
-            self.events.push(Event {
-                time: now,
-                kind: EventKind::NpcDied {
-                    npc: npc.id,
-                    name: npc.name,
-                    cause: DeathCause::Starvation,
-                },
-            });
+            self.kill(i, DeathCause::Starvation);
         }
     }
 
@@ -1325,4 +1539,108 @@ fn can_buy_at(p: &SimParams, now: GameTime, npc: &Npc, c: &Carriage, item: ItemK
         && npc.wants(item)
         && c.stock.count(item) >= 1
         && price_at(p, c, item).is_some_and(|price| price <= npc.inventory.tokens)
+}
+
+/// Whether the train has a carriage of `kind`.
+fn has_kind(carriages: &[Carriage], kind: CarriageKind) -> bool {
+    carriages.iter().any(|c| c.kind == kind)
+}
+
+/// Workers wanted per job (indexed by [`Job::index`]) for `population`
+/// people: food production covering everyone with a margin (assuming nobody
+/// has a tool), one Mercante per [`NPCS_PER_MERCANTE`] (at least one per
+/// Mercato). 0 for jobs whose workplace the train lacks; Operaio is not
+/// sized (it takes everyone else).
+fn job_quotas(p: &SimParams, carriages: &[Carriage], population: usize) -> [usize; 4] {
+    let mut quotas = [0; 4];
+    let daily_razioni = population as f32 * MEALS_PER_DAY * p.razioni_per_meal * FOOD_SAFETY_MARGIN;
+    let quota = |amount: f32, rate: f32| {
+        let needed = (amount / (EXPECTED_WORK_MINUTES_PER_DAY * rate)).ceil();
+        if needed.is_finite() {
+            needed.max(0.0) as usize
+        } else {
+            0
+        }
+    };
+    let available = |job: Job| has_kind(carriages, job.workplace_kind());
+    if available(Job::Contadino) {
+        let verdura = daily_razioni / p.razioni_per_verdura;
+        quotas[Job::Contadino.index()] = quota(verdura, p.verdura_per_farm_minute);
+    }
+    if available(Job::Cuoco) {
+        quotas[Job::Cuoco.index()] = quota(daily_razioni, p.razioni_per_cook_minute);
+    }
+    if available(Job::Mercante) {
+        let mercati = carriages
+            .iter()
+            .filter(|c| c.kind == CarriageKind::Mercato)
+            .count();
+        quotas[Job::Mercante.index()] = population.div_ceil(NPCS_PER_MERCANTE).max(mercati);
+    }
+    quotas
+}
+
+/// Most people the administration lets live on a train with `beds` beds.
+fn max_population_for(p: &SimParams, beds: usize) -> usize {
+    (beds as f32 * p.birth_max_bed_occupancy.clamp(0.0, 1.0)).floor() as usize
+}
+
+/// An age drawn from the stationary pyramid of the mortality curve (steady
+/// births): the density at age `x` is proportional to the survival to `x`.
+fn sample_age(p: &SimParams, rng: &mut ChaCha8Rng) -> u32 {
+    for _ in 0..1000 {
+        let age = rng.random_range(0..100u32);
+        if rng.random::<f32>() < p.survival(age as f32 + 0.5) {
+            return age;
+        }
+    }
+    30
+}
+
+/// Ties NPCs `a` and `b` (indices): `b` is `kind` to `a`, and the inverse to `b`.
+fn link(npcs: &mut [Npc], a: usize, b: usize, kind: RelationKind, affinity: f32) {
+    let (ida, idb) = (npcs[a].id, npcs[b].id);
+    for (holder, other, kind) in [(a, idb, kind), (b, ida, kind.inverse())] {
+        let relations = &mut npcs[holder].relations;
+        match relations.iter_mut().find(|r| r.other == other) {
+            Some(r) => {
+                r.kind = kind;
+                r.affinity = affinity;
+            }
+            None => relations.push(Relation {
+                other,
+                kind,
+                affinity,
+            }),
+        }
+    }
+}
+
+/// Index of NPC `id` in `npcs` (sorted by id).
+fn index_of(npcs: &[Npc], id: NpcId) -> Option<usize> {
+    npcs.binary_search_by_key(&id, |n| n.id).ok()
+}
+
+/// Whether someone can be approached for a chat (idle, eating or chatting).
+fn available_for_chat(npc: &Npc) -> bool {
+    matches!(
+        npc.action,
+        Action::Idle | Action::Eat(_) | Action::Socialize(_)
+    )
+}
+
+/// Who can be approached for a chat, rebuilt every tick that has decisions
+/// (a scratch buffer: its allocations are reused).
+#[derive(Clone, Debug, Default)]
+struct Presence {
+    /// NPC indices per carriage.
+    by_carriage: Vec<Vec<usize>>,
+    /// Per NPC id: carriage index + 1, or 0 if not available.
+    spot: Vec<u16>,
+}
+
+impl Presence {
+    fn is_available_in(&self, id: NpcId, carriage: CarriageId) -> bool {
+        self.spot.get(id.0 as usize) == Some(&(carriage.0 + 1))
+    }
 }

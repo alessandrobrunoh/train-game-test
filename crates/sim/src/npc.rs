@@ -1,4 +1,4 @@
-//! NPC: bisogni, lavoro, inventario.
+//! NPC: bisogni, lavoro, inventario, età e relazioni.
 
 use std::fmt;
 
@@ -8,7 +8,7 @@ use crate::action::Action;
 use crate::carriage::{CarriageKind, StationKind};
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
-use crate::time::GameTime;
+use crate::time::{GameTime, MINUTES_PER_DAY};
 
 /// Needs in `0..=1`, where 1 means fully satisfied.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -50,6 +50,11 @@ pub enum Job {
 }
 
 impl Job {
+    /// Position in [`Job::ALL`] (and in per-job arrays).
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
     pub const ALL: [Job; 4] = [Job::Contadino, Job::Cuoco, Job::Operaio, Job::Mercante];
 
     pub fn name(self) -> &'static str {
@@ -166,7 +171,15 @@ impl Inventory {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Npc {
     pub id: NpcId,
+    /// Full name, "Nome Cognome" (first names never contain spaces, see [`Npc::surname`]).
     pub name: String,
+    pub sex: Sex,
+    /// Birth time in game minutes since day 1 00:00; negative for people
+    /// born before the simulation started. The source of truth for the age.
+    pub born: i64,
+    /// Whole years of age, as of the last midnight (refreshed daily by the
+    /// sim, exact at birth and generation). Cheap to read for renderers and
+    /// stats; [`Npc::age_years`] gives the exact value at any time.
     pub age: u32,
     /// Carriage the NPC is in. While travelling it stays the origin until arrival.
     pub carriage: CarriageId,
@@ -182,9 +195,82 @@ pub struct Npc {
     pub action_until: GameTime,
     /// Consecutive minutes spent with hunger at 0.
     pub starving_minutes: u64,
+    /// Sparse social ties, at most [`MAX_RELATIONS`] entries of kind
+    /// [`RelationKind::Friend`] plus family (partner, parents, children,
+    /// siblings: never dropped while alive). Kept in insertion order; ties to
+    /// dead NPCs are removed.
+    #[serde(default)]
+    pub relations: Vec<Relation>,
 }
 
 impl Npc {
+    /// Exact age in whole years at `now`, with years of `days_per_year` days.
+    pub fn age_years(&self, now: GameTime, days_per_year: u32) -> u32 {
+        let year = i64::from(days_per_year.max(1)) * MINUTES_PER_DAY as i64;
+        ((now.0 as i64 - self.born).max(0) / year) as u32
+    }
+
+    /// Life stage from the cached [`Npc::age`].
+    pub fn stage(&self) -> LifeStage {
+        LifeStage::of_age(self.age)
+    }
+
+    /// The surname: everything after the first space of `name`.
+    pub fn surname(&self) -> &str {
+        self.name
+            .split_once(' ')
+            .map_or(self.name.as_str(), |(_, last)| last)
+    }
+
+    /// The first name: `name` up to the first space.
+    pub fn first_name(&self) -> &str {
+        self.name
+            .split_once(' ')
+            .map_or(self.name.as_str(), |(first, _)| first)
+    }
+
+    /// The tie with `other`, if any.
+    pub fn relation(&self, other: NpcId) -> Option<&Relation> {
+        self.relations.iter().find(|r| r.other == other)
+    }
+
+    pub(crate) fn relation_mut(&mut self, other: NpcId) -> Option<&mut Relation> {
+        self.relations.iter_mut().find(|r| r.other == other)
+    }
+
+    /// Affinity with `other` (0 without a tie).
+    pub fn affinity(&self, other: NpcId) -> f32 {
+        self.relation(other).map_or(0.0, |r| r.affinity)
+    }
+
+    /// Ties of a given kind.
+    pub fn relations_of(&self, kind: RelationKind) -> impl Iterator<Item = &Relation> {
+        self.relations.iter().filter(move |r| r.kind == kind)
+    }
+
+    pub fn partner(&self) -> Option<NpcId> {
+        self.relations_of(RelationKind::Partner)
+            .next()
+            .map(|r| r.other)
+    }
+
+    /// Living children.
+    pub fn children(&self) -> impl Iterator<Item = NpcId> + '_ {
+        self.relations_of(RelationKind::Child).map(|r| r.other)
+    }
+
+    /// Living parents.
+    pub fn parents(&self) -> impl Iterator<Item = NpcId> + '_ {
+        self.relations_of(RelationKind::Parent).map(|r| r.other)
+    }
+
+    /// The non-family tie with the highest positive affinity.
+    pub fn closest_friend(&self) -> Option<&Relation> {
+        self.relations_of(RelationKind::Friend)
+            .filter(|r| r.affinity > 0.0)
+            .max_by(|a, b| a.affinity.total_cmp(&b.affinity))
+    }
+
     /// Progress of the current action in `0..=1` (handy for animating travel).
     pub fn action_progress(&self, now: GameTime) -> f32 {
         let total = self.action_until.since(self.action_since);
@@ -224,3 +310,131 @@ impl Npc {
 
 /// NPCs at least this full refuse food from the player.
 pub const GIFT_FULL_HUNGER: f32 = 0.9;
+
+/// Most [`RelationKind::Friend`] ties an NPC keeps (family ties are extra).
+pub const MAX_RELATIONS: usize = 12;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Sex {
+    Female,
+    Male,
+}
+
+impl Sex {
+    pub const ALL: [Sex; 2] = [Sex::Female, Sex::Male];
+
+    /// Picks the Italian word form for this sex: `sex.pick("nata", "nato")`.
+    pub fn pick<'a>(self, female: &'a str, male: &'a str) -> &'a str {
+        match self {
+            Sex::Female => female,
+            Sex::Male => male,
+        }
+    }
+
+    pub fn opposite(self) -> Sex {
+        match self {
+            Sex::Female => Sex::Male,
+            Sex::Male => Sex::Female,
+        }
+    }
+
+    /// "donna" / "uomo".
+    pub fn name(self) -> &'static str {
+        self.pick("donna", "uomo")
+    }
+}
+
+/// Stage of life, from the age in years (see the `*_FROM` constants).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum LifeStage {
+    /// Under 14: no job.
+    Bambino,
+    /// 14-17: no job yet.
+    Giovane,
+    /// 18-64: works, can form a couple.
+    Adulto,
+    /// 65+: retired, gets the stipend.
+    Anziano,
+}
+
+impl LifeStage {
+    pub const ALL: [LifeStage; 4] = [
+        LifeStage::Bambino,
+        LifeStage::Giovane,
+        LifeStage::Adulto,
+        LifeStage::Anziano,
+    ];
+    pub const GIOVANE_FROM: u32 = 14;
+    /// Coming of age: a job is assigned, couples can form.
+    pub const ADULTO_FROM: u32 = 18;
+    /// Retirement.
+    pub const ANZIANO_FROM: u32 = 65;
+
+    pub fn of_age(years: u32) -> LifeStage {
+        match years {
+            y if y < Self::GIOVANE_FROM => LifeStage::Bambino,
+            y if y < Self::ADULTO_FROM => LifeStage::Giovane,
+            y if y < Self::ANZIANO_FROM => LifeStage::Adulto,
+            _ => LifeStage::Anziano,
+        }
+    }
+
+    /// Position in [`LifeStage::ALL`].
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Lowercase Italian name, gendered: "bambina", "giovane", "adulto", "anziana".
+    pub fn name(self, sex: Sex) -> &'static str {
+        match self {
+            LifeStage::Bambino => sex.pick("bambina", "bambino"),
+            LifeStage::Giovane => "giovane",
+            LifeStage::Adulto => sex.pick("adulta", "adulto"),
+            LifeStage::Anziano => sex.pick("anziana", "anziano"),
+        }
+    }
+
+    /// Whether NPCs at this stage hold a job.
+    pub fn works(self) -> bool {
+        self == LifeStage::Adulto
+    }
+}
+
+/// What `other` is to the NPC holding the [`Relation`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RelationKind {
+    /// Not family: an acquaintance or friend, depending on the affinity.
+    Friend,
+    Partner,
+    /// `other` is a parent of the holder.
+    Parent,
+    /// `other` is a child of the holder.
+    Child,
+    Sibling,
+}
+
+impl RelationKind {
+    pub fn is_family(self) -> bool {
+        self != RelationKind::Friend
+    }
+
+    /// The kind seen from `other`'s side.
+    pub fn inverse(self) -> RelationKind {
+        match self {
+            RelationKind::Parent => RelationKind::Child,
+            RelationKind::Child => RelationKind::Parent,
+            k => k,
+        }
+    }
+}
+
+/// A tie from one NPC to `other`. Ties are kept on both sides (friend ties
+/// may be dropped on one side only when its list is full).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Relation {
+    pub other: NpcId,
+    pub kind: RelationKind,
+    /// `-1..=1`: raised by chatting together, lowered by quarrels; friend ties
+    /// fade slowly towards 0 and are forgotten near it.
+    pub affinity: f32,
+}
