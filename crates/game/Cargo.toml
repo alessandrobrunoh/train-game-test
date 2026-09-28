@@ -1,0 +1,9 @@
+[package]
+name = "game"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+bevy = "0.19.1"
+bevy_egui = "0.42.0"
+sim = { path = "../sim" }
