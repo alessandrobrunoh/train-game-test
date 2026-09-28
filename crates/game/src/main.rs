@@ -1,7 +1,11 @@
 //! TrainGame: vista laterale di un lungo treno pieno di NPC.
 //! M0: grafica placeholder, giocatore controllabile, camera che lo segue.
 
+mod art;
+mod background;
 mod camera;
+mod characters;
+mod env_art;
 mod fonts;
 mod history_sync;
 mod history_ui;
@@ -12,6 +16,7 @@ mod life_fx;
 mod npc_render;
 mod player;
 mod population;
+mod prop_art;
 mod save_file;
 mod saves;
 mod sim_bridge;
@@ -65,5 +70,7 @@ fn main() {
             history_sync::HistorySyncPlugin,
             history_ui::HistoryUiPlugin,
         ))
+        // Il mondo fuori dal treno (cielo, paesaggio, neve, giorno/notte).
+        .add_plugins(background::BackgroundPlugin)
         .run();
 }

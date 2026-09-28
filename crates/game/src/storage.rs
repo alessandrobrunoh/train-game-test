@@ -3,7 +3,8 @@
 //! Ogni carrozza con scorte (`Carriage::stock`) ha una zona magazzino vicino
 //! alla testata destra: uno scaffale con una griglia di casse. Le colonne sono
 //! divise tra gli oggetti che la carrozza può tenere e le casse visibili sono
-//! proporzionali a scorta / capienza, colorate per tipo di oggetto. Sopra c'è
+//! proporzionali a scorta / capienza, disegnate per tipo di oggetto (cassette
+//! di verdura, scatole di razioni, mucchi di rottami... vedi `prop_art.rs`). Sopra c'è
 //! un'etichetta con le quantità (solo quelle non nulle) e, nei Mercati, i
 //! prezzi; sui banconi dei Mercati è esposta la merce disponibile.
 //!
@@ -16,7 +17,9 @@ use bevy::sprite::Text2dShadow;
 use bevy::text::Justify;
 use sim::{CarriageId, CarriageKind, ItemKind, SimParams, StationKind, World};
 
+use crate::env_art::{ArtCache, ArtKey, art_sprite};
 use crate::npc_render::visible_window;
+use crate::prop_art;
 use crate::saves::WorldRebuildSet;
 use crate::state::{Sim, WorldReplaced};
 use crate::stations::{StationLayout, interior_range};
@@ -29,9 +32,6 @@ pub const STORAGE_HEIGHT: f32 = 44.0;
 /// Griglia di casse dello scaffale.
 const COLUMNS: usize = 4;
 const ROWS: usize = 5;
-/// Bordo dello scaffale attorno alle casse e spazio tra una cassa e l'altra.
-const PAD: f32 = 1.5;
-const CRATE_GAP: f32 = 1.0;
 /// Ogni quanti secondi reali aggiornare casse ed etichette.
 const REFRESH_SECS: f32 = 0.25;
 
@@ -44,7 +44,6 @@ const Z_CRATE: f32 = -3.9;
 const Z_GOODS: f32 = -2.9;
 const Z_LABEL: f32 = 5.0;
 
-const SHELF_COLOR: Color = Color::srgb(0.22, 0.16, 0.11);
 const LABEL_COLOR: Color = Color::srgb(0.98, 0.95, 0.85);
 const LABEL_SHADOW: Color = Color::srgba(0.0, 0.0, 0.0, 0.85);
 
@@ -168,7 +167,8 @@ pub struct StoragePlugin;
 
 impl Plugin for StoragePlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(StorageRefresh(Timer::from_seconds(
+        app.init_resource::<ArtCache>()
+            .insert_resource(StorageRefresh(Timer::from_seconds(
             REFRESH_SECS,
             TimerMode::Repeating,
         )))
@@ -194,22 +194,72 @@ fn rebuild_storage(
     sim: Res<Sim>,
     stations: Res<StationLayout>,
     old: Query<Entity, With<StorageRoot>>,
+    mut art: ResMut<ArtCache>,
+    mut images: Option<ResMut<Assets<Image>>>,
 ) {
     for entity in &old {
         commands.entity(entity).despawn();
     }
-    spawn_storage_entities(&mut commands, &sim.world, &stations);
+    let mut ctx = StorageArt::new(&mut art, images.as_deref_mut());
+    spawn_storage_entities(&mut commands, &sim.world, &stations, &mut ctx);
 }
 
 /// Crea scaffali, casse, etichette e merce sui banconi di ogni carrozza.
-fn spawn_storage(mut commands: Commands, sim: Res<Sim>, stations: Res<StationLayout>) {
-    spawn_storage_entities(&mut commands, &sim.world, &stations);
+fn spawn_storage(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    stations: Res<StationLayout>,
+    mut art: ResMut<ArtCache>,
+    mut images: Option<ResMut<Assets<Image>>>,
+) {
+    let mut ctx = StorageArt::new(&mut art, images.as_deref_mut());
+    spawn_storage_entities(&mut commands, &sim.world, &stations, &mut ctx);
 }
 
-fn spawn_storage_entities(commands: &mut Commands, world: &World, stations: &StationLayout) {
+/// Immagini del magazzino (dalla cache, generate una volta sola).
+struct StorageArt {
+    shelf: Handle<Image>,
+    crates: Vec<Handle<Image>>,
+    goods: Vec<Handle<Image>>,
+}
+
+impl StorageArt {
+    fn new(art: &mut ArtCache, mut images: Option<&mut Assets<Image>>) -> Self {
+        let shelf = art.get(images.as_deref_mut(), ArtKey::Shelf, || {
+            prop_art::shelf(STORAGE_WIDTH as i32, STORAGE_HEIGHT as i32, ROWS as i32)
+        });
+        let crates = ItemKind::ALL
+            .into_iter()
+            .map(|item| {
+                art.get(images.as_deref_mut(), ArtKey::Crate(item), || {
+                    prop_art::crate_art(item)
+                })
+            })
+            .collect();
+        let goods = ItemKind::ALL
+            .into_iter()
+            .map(|item| {
+                art.get(images.as_deref_mut(), ArtKey::Good(item), || {
+                    prop_art::good_art(item)
+                })
+            })
+            .collect();
+        Self {
+            shelf,
+            crates,
+            goods,
+        }
+    }
+}
+
+fn spawn_storage_entities(
+    commands: &mut Commands,
+    world: &World,
+    stations: &StationLayout,
+    art: &mut StorageArt,
+) {
     let (x0, x1) = storage_range();
-    let crate_w = (STORAGE_WIDTH - 2.0 * PAD - (COLUMNS - 1) as f32 * CRATE_GAP) / COLUMNS as f32;
-    let crate_h = (STORAGE_HEIGHT - 2.0 * PAD - (ROWS - 1) as f32 * CRATE_GAP) / ROWS as f32;
+    let crate_size = Vec2::new(prop_art::CRATE_W as f32, prop_art::CRATE_H as f32);
 
     for c in &world.carriages {
         let index = c.id.index();
@@ -228,7 +278,10 @@ fn spawn_storage_entities(commands: &mut Commands, world: &World, stations: &Sta
             .with_children(|parent| {
                 // Scaffale
                 parent.spawn((
-                    Sprite::from_color(SHELF_COLOR, Vec2::new(STORAGE_WIDTH, STORAGE_HEIGHT)),
+                    art_sprite(
+                        art.shelf.clone(),
+                        Vec2::new(STORAGE_WIDTH, STORAGE_HEIGHT),
+                    ),
                     Transform::from_xyz((x0 + x1) / 2.0, STORAGE_HEIGHT / 2.0, Z_SHELF),
                 ));
 
@@ -239,15 +292,18 @@ fn spawn_storage_entities(commands: &mut Commands, world: &World, stations: &Sta
                     let slots = cols * ROWS;
                     let cap = world.params.storage_cap(c.kind, item);
                     let shown = crates_shown(c.stock.get(item), cap, slots);
-                    let base = item_color(item).to_srgba();
                     for rank in 0..slots {
                         let (row, col) = (rank / cols, first_col + rank % cols);
                         // Casse alterne un po' più scure: si distinguono meglio.
-                        let shade = if (row + col) % 2 == 0 { 1.0 } else { 0.85 };
-                        let color =
-                            Color::srgb(base.red * shade, base.green * shade, base.blue * shade);
-                        let x = x0 + PAD + col as f32 * (crate_w + CRATE_GAP) + crate_w / 2.0;
-                        let y = PAD + row as f32 * (crate_h + CRATE_GAP) + crate_h / 2.0;
+                        let tint = if (row + col) % 2 == 0 { 1.0 } else { 0.88 };
+                        let x = x0
+                            + (prop_art::SHELF_PAD_X + col as i32 * prop_art::CRATE_STEP_X) as f32
+                            + crate_size.x / 2.0;
+                        let y = (prop_art::SHELF_PAD_Y + row as i32 * prop_art::CRATE_STEP_Y)
+                            as f32
+                            + crate_size.y / 2.0;
+                        let mut sprite = art_sprite(art.crates[item.index()].clone(), crate_size);
+                        sprite.color = Color::srgb(tint, tint, tint);
                         parent.spawn((
                             Crate {
                                 carriage: index,
@@ -255,7 +311,7 @@ fn spawn_storage_entities(commands: &mut Commands, world: &World, stations: &Sta
                                 rank,
                                 slots,
                             },
-                            Sprite::from_color(color, Vec2::new(crate_w, crate_h)),
+                            sprite,
                             Transform::from_xyz(x, y, Z_CRATE),
                             if rank < shown {
                                 Visibility::Inherited
@@ -294,25 +350,15 @@ fn spawn_storage_entities(commands: &mut Commands, world: &World, stations: &Sta
                 let spots = stations.carriages.get(index).map_or(&[][..], Vec::as_slice);
                 for spot in spots.iter().filter(|s| s.kind == StationKind::Counter) {
                     let w = spot.width;
-                    for (item, dx, size) in [
-                        (
-                            ItemKind::Attrezzo,
-                            -w / 4.0,
-                            Vec2::new((w / 4.0).min(6.0), 1.5),
-                        ),
-                        (
-                            ItemKind::Vestito,
-                            w / 4.0,
-                            Vec2::new((w / 5.0).min(5.0), 3.0),
-                        ),
-                    ] {
+                    for (item, dx) in [(ItemKind::Attrezzo, -w / 4.0), (ItemKind::Vestito, w / 4.0)] {
+                        let size = Vec2::new(if item == ItemKind::Attrezzo { 6.0 } else { 5.0 }, 3.0);
                         let visible = c.stock.count(item) >= 1;
                         parent.spawn((
                             CounterGood {
                                 carriage: index,
                                 item,
                             },
-                            Sprite::from_color(item_color(item), size),
+                            art_sprite(art.goods[item.index()].clone(), size),
                             Transform::from_xyz(
                                 spot.x + dx,
                                 spot.base_y() - FLOOR_Y + COUNTER_TOP + size.y / 2.0,

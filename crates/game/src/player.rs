@@ -3,15 +3,21 @@
 //! L'input viene raccolto ogni frame, la fisica gira in `FixedUpdate` e la
 //! posizione disegnata viene interpolata tra gli ultimi due passi fissi, così il
 //! movimento resta fluido a qualunque frame rate.
+//!
+//! Aspetto: un ribelle della coda del treno, col cappuccio e una sciarpa
+//! gialla (vedi `characters.rs`), animato da fermo, di corsa, in salto e in
+//! caduta; guarda nella direzione in cui si muove.
 
-use bevy::prelude::*;
+use bevy::{prelude::*, sprite::Anchor};
 
+use crate::characters::{
+    PLAYER_CELL, PLAYER_FRAMES, PlayerFrame, player_anchor, player_frame, player_sheet,
+};
 use crate::state::FollowNpc;
 use crate::train::{FLOOR_Y, TrainLayout};
 
-/// Dimensioni del rettangolo del giocatore.
+/// Ingombro del giocatore (collisioni).
 const PLAYER_SIZE: Vec2 = Vec2::new(12.0, 24.0);
-const PLAYER_COLOR: Color = Color::srgb(0.95, 0.85, 0.30);
 const PLAYER_Z: f32 = 10.0;
 
 /// Velocità orizzontale massima (unità/s).
@@ -40,6 +46,17 @@ struct PlayerInput {
     jump_held: bool,
 }
 
+/// Stato dell'animazione del giocatore.
+#[derive(Component, Debug, Default)]
+struct PlayerAnim {
+    /// Secondi reali (per il respiro da fermo).
+    clock: f32,
+    /// Strada fatta a terra (scandisce i passi).
+    walked: f32,
+    last_x: f32,
+    facing_left: bool,
+}
+
 /// Stato fisico del giocatore; `position` è il centro del rettangolo.
 #[derive(Component, Debug, Default)]
 pub struct Body {
@@ -59,7 +76,9 @@ impl Plugin for PlayerPlugin {
                 RunFixedMainLoop,
                 (
                     gather_input.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
-                    interpolate_transform.in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+                    (interpolate_transform, animate_player)
+                        .chain()
+                        .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
                 ),
             );
     }
@@ -83,18 +102,41 @@ pub fn start_position() -> Vec2 {
     )
 }
 
-fn spawn_player(mut commands: Commands) {
+fn spawn_player(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+) {
     let start = start_position();
+    let image = images.add(player_sheet().to_image());
+    let layout = layouts.add(TextureAtlasLayout::from_grid(
+        PLAYER_CELL,
+        PLAYER_FRAMES as u32,
+        1,
+        None,
+        None,
+    ));
     commands.spawn((
         Name::new("Giocatore"),
         Player,
         PlayerInput::default(),
+        PlayerAnim {
+            last_x: start.x,
+            ..default()
+        },
         Body {
             position: start,
             previous: start,
             ..default()
         },
-        Sprite::from_color(PLAYER_COLOR, PLAYER_SIZE),
+        Sprite::from_atlas_image(
+            image,
+            TextureAtlas {
+                layout,
+                index: PlayerFrame::Idle0.index(),
+            },
+        ),
+        Anchor(player_anchor(PLAYER_SIZE)),
         Transform::from_translation(start.extend(PLAYER_Z)),
     ));
 }
@@ -209,6 +251,35 @@ fn interpolate_transform(fixed_time: Res<Time<Fixed>>, mut query: Query<(&mut Tr
         let pos = body.previous.lerp(body.position, alpha);
         transform.translation.x = pos.x;
         transform.translation.y = pos.y;
+    }
+}
+
+/// Fotogramma e verso dello sprite dalla fisica del corpo.
+fn animate_player(
+    time: Res<Time<Real>>,
+    mut player: Query<(&Body, &Transform, &mut PlayerAnim, &mut Sprite), With<Player>>,
+) {
+    for (body, transform, mut anim, mut sprite) in &mut player {
+        anim.clock += time.delta_secs();
+        let x = transform.translation.x;
+        let dx = x - anim.last_x;
+        anim.last_x = x;
+        // Un salto lungo (caricamento di una partita) non conta come passi.
+        if body.grounded && dx.abs() < PLAYER_SIZE.x {
+            anim.walked += dx.abs();
+        }
+        if body.velocity.x.abs() > 1.0 {
+            anim.facing_left = body.velocity.x < 0.0;
+        }
+        let frame = player_frame(body.grounded, body.velocity, anim.clock, anim.walked);
+        if let Some(atlas) = sprite.texture_atlas.as_mut()
+            && atlas.index != frame.index()
+        {
+            atlas.index = frame.index();
+        }
+        if sprite.flip_x != anim.facing_left {
+            sprite.flip_x = anim.facing_left;
+        }
     }
 }
 

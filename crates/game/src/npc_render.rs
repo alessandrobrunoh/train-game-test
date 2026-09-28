@@ -15,70 +15,43 @@
 //! Gli sprite camminano verso la posizione obiettivo e si teletrasportano se
 //! è troppo lontana (es. a velocità di gioco alte).
 //!
-//! Indicatori economici: chi lavora con un attrezzo lo tiene in mano (un
-//! rettangolino accanto al corpo); chi non ha vestiti è disegnato più pallido.
+//! Aspetto: ogni NPC è uno sprite in pixel art generato da `characters.rs`
+//! (fascia d'età, sesso, look, divisa del lavoro, stracci se non ha vestiti)
+//! e animato in base a cosa fa: respira da fermo, cammina con passi legati
+//! allo spostamento vero, mangia seduto portando la mano alla bocca, lavora
+//! (con l'attrezzo in mano se ne ha uno), gesticola chiacchierando, porge una
+//! moneta al bancone e dorme sdraiato sotto la coperta. Guarda dove va, o
+//! verso il compagno, la postazione o la mamma. Le animazioni seguono il
+//! tempo reale, non la velocità della simulazione (e si fermano in pausa).
 //!
-//! Età e sesso: la taglia cresce con l'età (neonati minuscoli, a 18 anni si è
-//! adulti, gli anziani si accorciano un po'); i capelli sono una calotta sulla
-//! testa, corta per gli uomini e con due ciocche ai lati per le donne, grigia
-//! per gli anziani. Il colore del corpo resta quello del lavoro. I neonati
-//! (sotto i 3 anni) che oziano stanno accanto alla mamma, se è nella stessa
-//! carrozza. Chi muore sotto gli occhi del giocatore svanisce (vedi `life_fx.rs`).
+//! I neonati (sotto i 3 anni) che oziano stanno accanto alla mamma, se è
+//! nella stessa carrozza. Chi dorme è disegnato più scuro. Chi muore sotto
+//! gli occhi del giocatore svanisce (vedi `life_fx.rs`). L'NPC selezionato ha
+//! un contorno ciano e un marcatore sopra la testa.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use bevy::{prelude::*, window::PrimaryWindow};
-use sim::{Action, CarriageId, Job, LifeStage, Npc, NpcId, Sex, StationKind, World};
+use bevy::{prelude::*, sprite::Anchor, window::PrimaryWindow};
+use sim::{Action, CarriageId, Npc, NpcId, Sex, StationKind, World};
 
 use crate::camera::follow_target;
+use crate::characters::{
+    AppearanceKey, BABY_YEARS, CharacterArt, Frame, Stage, anim_for, anim_frame, appearance,
+};
 use crate::life_fx::FadingOut;
 use crate::saves::WorldRebuildSet;
-use crate::state::{NpcSprite, PointerOverUi, SelectedNpc, Sim, WorldReplaced};
+use crate::state::{NpcSprite, PointerOverUi, SelectedNpc, Sim, SimClock, WorldReplaced};
 use crate::stations::{BED_TOP, StationLayout, interior_range};
 use crate::train::{CARRIAGE_PITCH, FLOOR_Y, TrainLayout};
 
-/// Dimensioni di un NPC adulto (larghezza, altezza).
-const ADULT_SIZE: Vec2 = Vec2::new(8.0, 16.0);
-/// Taglia per età (anni, larghezza, altezza), interpolata tra un punto e
-/// l'altro: neonati minuscoli, bambini piccoli, giovani quasi adulti, anziani
-/// un po' più bassi.
-const SIZE_BY_AGE: [(f32, f32, f32); 7] = [
-    (0.0, 4.0, 5.0),
-    (3.0, 5.0, 8.0),
-    (10.0, 6.0, 11.0),
-    (14.0, 7.0, 13.5),
-    (18.0, ADULT_SIZE.x, ADULT_SIZE.y),
-    (65.0, ADULT_SIZE.x, ADULT_SIZE.y),
-    (85.0, ADULT_SIZE.x, 14.5),
-];
-/// Sotto quest'età chi ozia sta accanto alla mamma.
-const BABY_AGE: u32 = 3;
+/// Larghezza di un NPC adulto: margine dei punti di pausa dalle pareti.
+const ADULT_WIDTH: f32 = 8.0;
 /// Distanza tra il neonato e la mamma.
 const BABY_OFFSET: f32 = 6.0;
-
-/// Capelli, davanti al corpo: calotta corta per gli uomini; per le donne un
-/// blocco più largo del corpo e più lungo, che sporge sopra la testa e ai lati.
-const HAIR_CAP: f32 = 2.0;
-const LONG_HAIR: f32 = 6.0;
-const LONG_HAIR_ABOVE: f32 = 1.0;
-const LONG_HAIR_SIDE: f32 = 1.0;
-/// Niente capelli neri: si confonderebbero con il bordo scuro.
-const HAIR_COLORS: [Color; 5] = [
-    Color::srgb(0.30, 0.19, 0.11),
-    Color::srgb(0.42, 0.26, 0.13),
-    Color::srgb(0.58, 0.36, 0.17),
-    Color::srgb(0.88, 0.74, 0.40),
-    Color::srgb(0.76, 0.34, 0.14),
-];
-const GREY_HAIR: Color = Color::srgb(0.86, 0.86, 0.84);
-/// Chi è sdraiato è disegnato più sottile, per leggersi come "a letto".
-const LYING_THICKNESS: f32 = 0.75;
 /// Entro questa distanza dal letto l'NPC è "arrivato" e si sdraia.
 const ARRIVE_DISTANCE: f32 = 0.5;
 /// Durata della rotazione quando si sdraia o si alza (secondi).
 const LIE_DOWN_TIME: f32 = 0.15;
-/// Spessore del bordo scuro attorno a ogni NPC.
-const OUTLINE: f32 = 1.0;
 
 const NPC_Z: f32 = 3.0;
 /// Scarto di profondità tra un NPC e l'altro (1000 NPC stanno in 0.5).
@@ -95,37 +68,29 @@ const TELEPORT_DISTANCE: f32 = 120.0;
 const CHAT_DISTANCE: f32 = 10.0;
 /// Tolleranza del click attorno al rettangolo di un NPC.
 const PICK_MARGIN: f32 = 3.0;
+/// Sotto questo scarto orizzontale (unità) non ci si gira verso la postazione.
+const FACE_DEADZONE: f32 = 1.0;
 
-const OUTLINE_COLOR: Color = Color::srgb(0.08, 0.08, 0.10);
 const SELECTED_COLOR: Color = Color::srgb(0.30, 1.00, 1.00);
-const CONTADINO_COLOR: Color = Color::srgb(0.55, 0.90, 0.35);
-const CUOCO_COLOR: Color = Color::srgb(0.96, 0.96, 0.96);
-const OPERAIO_COLOR: Color = Color::srgb(0.30, 0.55, 1.00);
-const MERCANTE_COLOR: Color = Color::srgb(0.95, 0.75, 0.25);
-const JOBLESS_COLOR: Color = Color::srgb(0.75, 0.45, 0.85);
-const CHILD_COLOR: Color = Color::srgb(1.00, 0.60, 0.75);
-const ELDER_COLOR: Color = Color::srgb(0.72, 0.72, 0.70);
 /// Chi dorme è disegnato più scuro.
-const SLEEP_DARKEN: f32 = 0.6;
-/// Chi non ha vestiti è disegnato più pallido: quanto il colore va verso il
-/// suo grigio e quanto si schiarisce.
-const NO_CLOTHES_DESATURATE: f32 = 0.55;
-const NO_CLOTHES_LIGHTEN: f32 = 0.12;
+const SLEEP_TINT: Color = Color::srgb(0.6, 0.6, 0.66);
 
-/// Attrezzo in mano: dimensioni, colore e inclinazione.
-const TOOL_SIZE: Vec2 = Vec2::new(1.5, 7.0);
-const TOOL_COLOR: Color = Color::srgb(0.80, 0.82, 0.86);
-const TOOL_TILT: f32 = -0.5;
 /// Distanza tra il bordo del bancone e il cliente.
 const COUNTER_CLEARANCE: f32 = 1.0;
 /// Scarto massimo tra clienti dello stesso bancone, per non sovrapporsi del tutto.
 const CUSTOMER_SPREAD: f32 = 6.0;
+
+/// Ogni quanto (secondi reali) si liberano i fogli che nessuno usa più, e
+/// da quanti fogli in cache in su.
+const EVICT_SECS: f32 = 10.0;
+const EVICT_ABOVE: usize = 160;
 
 pub struct NpcRenderPlugin;
 
 impl Plugin for NpcRenderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NpcSpriteIndex>()
+            .init_resource::<CharacterArt>()
             .add_systems(Startup, spawn_marker)
             .add_systems(
                 PreUpdate,
@@ -140,6 +105,7 @@ impl Plugin for NpcRenderPlugin {
                     sync_npc_sprites,
                     move_npc_sprites,
                     update_selection,
+                    evict_unused_sheets,
                 )
                     .chain()
                     .in_set(NpcRenderSet)
@@ -152,51 +118,65 @@ impl Plugin for NpcRenderPlugin {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct NpcRenderSet;
 
-/// Bordo scuro dietro lo sprite di un NPC (figlio dell'entità `NpcSprite`).
+/// Contorno ciano dell'NPC selezionato (figlio dell'entità `NpcSprite`,
+/// nascosto se non è selezionato).
 #[derive(Component)]
-struct NpcOutline;
-
-/// Attrezzo in mano (figlio dell'entità `NpcSprite`), visibile mentre lavora.
-#[derive(Component)]
-struct NpcTool;
-
-/// Capelli (figlio dell'entità `NpcSprite`).
-#[derive(Component)]
-struct NpcHair;
-
-/// Filtro delle query sugli attrezzi, disgiunto dalla camera.
-type ToolOnly = (With<NpcTool>, Without<Camera2d>);
+struct NpcHighlight;
 
 /// Sprite degli NPC, vivi o che stanno svanendo.
 type SpriteOrFading = Or<(With<NpcSprite>, With<FadingOut>)>;
 
-/// Filtro delle query sui capelli, disgiunto da corpi e bordi.
-type HairOnly = (With<NpcHair>, Without<NpcSprite>, Without<NpcOutline>);
+/// Filtro delle query sui contorni di selezione, disgiunto dagli NPC.
+type HighlightOnly = (With<NpcHighlight>, Without<NpcSprite>);
+
+/// Ciò che il contorno di selezione copia dallo sprite dell'NPC.
+type SelectedParts = (
+    &'static Transform,
+    &'static Sprite,
+    &'static Anchor,
+    &'static NpcVisual,
+);
+
+/// Posizione e visibilità del marcatore di selezione.
+type MarkerParts = (&'static mut Transform, &'static mut Visibility);
+
+/// Dove guardare quando si è fermi.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Face {
+    /// Come prima (o dove si stava andando).
+    Keep,
+    Left,
+    Right,
+    /// Verso questa x mondo (la postazione, la mamma).
+    Toward(f32),
+}
 
 /// Stato grafico di uno sprite NPC.
 #[derive(Component)]
 pub(crate) struct NpcVisual {
-    outline: Entity,
-    tool: Entity,
-    hair: Entity,
-    /// Capelli lunghi (donne).
-    long_hair: bool,
-    /// L'attrezzo in mano è visibile.
-    tool_shown: bool,
+    highlight: Entity,
+    key: AppearanceKey,
     /// Dove lo sprite vuole andare (coordinate mondo).
     target: Vec2,
-    /// Corpo in piedi (larghezza, altezza).
-    standing: Vec2,
-    /// Corpo sdraiato, prima della rotazione di 90°: (spessore, lunghezza).
-    /// Resta quello dell'ultimo letto anche dopo essersi alzato, per animare
-    /// la transizione.
-    lying: Vec2,
     /// La posa chiede di stare sdraiato (dorme in un letto).
     wants_lying: bool,
     /// Avanzamento della transizione: 0 = in piedi, 1 = sdraiato.
     lie: f32,
-    /// Semiampiezze del rettangolo in coordinate mondo (per il click).
+    /// Semiampiezze del corpo in coordinate mondo (per il click).
     half_extents: Vec2,
+    /// Azione corrente e attrezzo posseduto: decidono l'animazione.
+    action: Action,
+    has_tool: bool,
+    face: Face,
+    facing_left: bool,
+    /// Secondi reali dall'inizio dell'animazione corrente (con uno sfasamento
+    /// per NPC, così non respirano tutti insieme).
+    clock: f32,
+    /// Pixel percorsi camminando (scandiscono i passi).
+    walked: f32,
+    phase: f32,
+    frame: Frame,
+    anim: crate::characters::Anim,
 }
 
 impl NpcVisual {
@@ -205,19 +185,32 @@ impl NpcVisual {
         self.half_extents.y
     }
 
-    /// Dimensione dello sprite (prima della rotazione) con la transizione attuale.
-    fn body(&self) -> Vec2 {
-        self.standing.lerp(self.lying, self.lie)
+    fn stage(&self) -> Stage {
+        self.key.stage
     }
 
     fn rotation(&self) -> Quat {
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2 * self.lie)
+        // Durante la transizione il corpo in piedi ruota verso il letto; una
+        // volta sdraiato si passa al fotogramma disegnato apposta.
+        if self.lie <= 0.0 || self.lie >= 1.0 || self.stage() == Stage::Baby {
+            Quat::IDENTITY
+        } else {
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2 * self.lie)
+        }
     }
 
-    /// Semiampiezze del rettangolo ruotato (bounding box allineata agli assi).
-    fn rotated_half_extents(&self) -> Vec2 {
-        let half = self.body() / 2.0;
-        let (sin, cos) = (std::f32::consts::FRAC_PI_2 * self.lie).sin_cos();
+    /// Semiampiezze del corpo (bounding box allineata agli assi).
+    fn current_half_extents(&self) -> Vec2 {
+        if self.lie >= 1.0 {
+            return self.stage().lying_size() / 2.0;
+        }
+        let half = self.stage().size() / 2.0;
+        let angle = if self.stage() == Stage::Baby {
+            0.0
+        } else {
+            std::f32::consts::FRAC_PI_2 * self.lie
+        };
+        let (sin, cos) = angle.sin_cos();
         Vec2::new(
             cos.abs() * half.x + sin.abs() * half.y,
             sin.abs() * half.x + cos.abs() * half.y,
@@ -246,12 +239,12 @@ impl NpcSpriteIndex {
 /// Posa di un NPC calcolata dalla sua azione.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Pose {
-    /// Centro dello sprite in coordinate mondo.
+    /// Centro del corpo in coordinate mondo.
     position: Vec2,
     /// Sdraiato (a letto).
     lying: bool,
-    /// Scala della lunghezza del corpo, per stare nei letti stretti.
-    length_scale: f32,
+    /// Dove guarda da fermo.
+    face: Face,
 }
 
 // --- Calcolo della posa (dati puri) ----------------------------------------
@@ -272,7 +265,7 @@ fn carriage_x(carriage: CarriageId, local_x: f32) -> f32 {
 /// Punto casuale ma deterministico del pavimento di una carrozza (x mondo).
 fn floor_spot(carriage: CarriageId, key: u64) -> f32 {
     let (left, right) = interior_range();
-    let margin = ADULT_SIZE.x;
+    let margin = ADULT_WIDTH;
     carriage_x(
         carriage,
         left + margin + hash01(key) * (right - left - 2.0 * margin),
@@ -288,54 +281,9 @@ fn chat_spot(carriage: CarriageId, a: NpcId, b: NpcId) -> f32 {
     )
 }
 
-/// Taglia del corpo (larghezza, altezza) a una certa età, vedi [`SIZE_BY_AGE`].
-fn size_for_age(age: u32) -> Vec2 {
-    let age = age as f32;
-    let (first, last) = (SIZE_BY_AGE[0], SIZE_BY_AGE[SIZE_BY_AGE.len() - 1]);
-    if age <= first.0 {
-        return Vec2::new(first.1, first.2);
-    }
-    for pair in SIZE_BY_AGE.windows(2) {
-        let ((a0, w0, h0), (a1, w1, h1)) = (pair[0], pair[1]);
-        if age <= a1 {
-            let t = (age - a0) / (a1 - a0);
-            return Vec2::new(w0 + (w1 - w0) * t, h0 + (h1 - h0) * t);
-        }
-    }
-    Vec2::new(last.1, last.2)
-}
-
+/// Ingombro del corpo in piedi (larghezza, altezza), dalla fascia d'età.
 fn body_size(npc: &Npc) -> Vec2 {
-    size_for_age(npc.age)
-}
-
-/// Capelli per un corpo di dimensioni `body` (prima della rotazione):
-/// dimensioni e scarto verticale del centro rispetto al centro del corpo.
-fn hair_rect(body: Vec2, long: bool) -> (Vec2, f32) {
-    let top = body.y / 2.0;
-    if long {
-        let length = LONG_HAIR.min(body.y * 0.7);
-        let size = Vec2::new(body.x + 2.0 * LONG_HAIR_SIDE, length);
-        (size, top + LONG_HAIR_ABOVE - length / 2.0)
-    } else {
-        let cap = HAIR_CAP.min(body.y * 0.3);
-        (Vec2::new(body.x, cap), top - cap / 2.0)
-    }
-}
-
-/// Colore dei capelli: grigi da anziani, altrimenti uno a caso (fisso per NPC).
-fn hair_color(npc: &Npc) -> Color {
-    if npc.stage() == LifeStage::Anziano {
-        return GREY_HAIR;
-    }
-    let pick = hash01(u64::from(npc.id.0) ^ 0x4841_4952);
-    HAIR_COLORS[((pick * HAIR_COLORS.len() as f32) as usize).min(HAIR_COLORS.len() - 1)]
-}
-
-/// Transform dei capelli (figli dello sprite) per un corpo di dimensioni `body`.
-fn hair_transform(body: Vec2, long: bool) -> Transform {
-    let (_, offset) = hair_rect(body, long);
-    Transform::from_xyz(0.0, offset, Z_STEP / 4.0)
+    Stage::of_age(npc.age).size()
 }
 
 /// La mamma dell'NPC, se è viva.
@@ -345,10 +293,10 @@ fn mother<'w>(world: &'w World, npc: &Npc) -> Option<&'w Npc> {
         .find(|p| p.sex == Sex::Female)
 }
 
-/// Dove sta un neonato che ozia: accanto alla mamma, se è nella stessa
-/// carrozza e non sta viaggiando.
-fn baby_x(world: &World, stations: &StationLayout, npc: &Npc) -> Option<f32> {
-    if npc.age >= BABY_AGE {
+/// Dove sta un neonato che ozia, e dove sta la mamma: accanto a lei, se è
+/// nella stessa carrozza e non sta viaggiando.
+fn baby_x(world: &World, stations: &StationLayout, npc: &Npc) -> Option<(f32, f32)> {
+    if npc.age >= BABY_YEARS {
         return None;
     }
     let mother = mother(world, npc)?;
@@ -360,11 +308,15 @@ fn baby_x(world: &World, stations: &StationLayout, npc: &Npc) -> Option<f32> {
     } else {
         1.0
     };
-    let x = anchor_x(world, stations, mother) + side * BABY_OFFSET;
+    let mother_x = anchor_x(world, stations, mother);
+    let x = mother_x + side * BABY_OFFSET;
     let (left, right) = interior_range();
-    Some(x.clamp(
-        carriage_x(npc.carriage, left),
-        carriage_x(npc.carriage, right),
+    Some((
+        x.clamp(
+            carriage_x(npc.carriage, left),
+            carriage_x(npc.carriage, right),
+        ),
+        mother_x,
     ))
 }
 
@@ -432,32 +384,32 @@ fn travel_x(world: &World, npc: &Npc, to: CarriageId) -> f32 {
 /// Posa dell'NPC. `seat` è il suo indice tra chi usa la stessa postazione.
 fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Pose {
     let size = body_size(npc);
-    let standing = |x: f32| Pose {
+    let standing = |x: f32, face: Face| Pose {
         position: Vec2::new(x, FLOOR_Y + size.y / 2.0),
         lying: false,
-        length_scale: 1.0,
+        face,
     };
     let c = npc.carriage;
     match npc.action {
         Action::Sleep(s) => match stations.spot(c, s) {
             Some(spot) => {
-                let length_scale = ((spot.width - 2.0) / size.y).clamp(0.3, 1.0);
+                let lying = Stage::of_age(npc.age).lying_size();
                 // La testa sul cuscino (a sinistra): i piccoli non stanno al centro.
                 let head_end = spot.x - spot.width / 2.0 + 1.0;
                 Pose {
                     position: Vec2::new(
-                        carriage_x(c, head_end + size.y * length_scale / 2.0),
-                        spot.base_y() + BED_TOP + size.x * LYING_THICKNESS / 2.0,
+                        carriage_x(c, head_end + lying.x / 2.0),
+                        spot.base_y() + BED_TOP + lying.y / 2.0,
                     ),
                     lying: true,
-                    length_scale,
+                    face: Face::Right,
                 }
             }
-            None => standing(idle_x(npc)),
+            None => standing(idle_x(npc), Face::Keep),
         },
         Action::Eat(s) | Action::Work(s) => {
             let Some(spot) = stations.spot(c, s) else {
-                return standing(idle_x(npc));
+                return standing(idle_x(npc), Face::Keep);
             };
             let capacity = world
                 .carriage(c)
@@ -470,25 +422,43 @@ fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Po
             } else {
                 0.0
             };
-            standing(carriage_x(c, spot.x) + offset)
+            // Si guarda verso il centro della postazione (chi mangia guarda
+            // i vicini di tavola).
+            standing(
+                carriage_x(c, spot.x) + offset,
+                Face::Toward(carriage_x(c, spot.x)),
+            )
         }
         Action::Socialize(other) => {
             let side = if npc.id < other { -1.0 } else { 1.0 };
             let x = match world.npc(other) {
                 // Si parlano a vicenda: ai due lati del punto d'incontro.
                 Some(p) if p.carriage == c && p.action == Action::Socialize(npc.id) => {
-                    chat_spot(c, npc.id, other) + side * CHAT_DISTANCE / 2.0
+                    Some(chat_spot(c, npc.id, other) + side * CHAT_DISTANCE / 2.0)
                 }
                 // Il compagno fa altro (es. mangia): gli si mette accanto.
-                Some(p) if p.carriage == c => anchor_x(world, stations, p) + side * CHAT_DISTANCE,
-                _ => idle_x(npc),
+                Some(p) if p.carriage == c => {
+                    Some(anchor_x(world, stations, p) + side * CHAT_DISTANCE)
+                }
+                _ => None,
             };
             let (left, right) = interior_range();
-            standing(x.clamp(carriage_x(c, left), carriage_x(c, right)))
+            match x {
+                // Chi sta a sinistra guarda a destra, e viceversa.
+                Some(x) => standing(
+                    x.clamp(carriage_x(c, left), carriage_x(c, right)),
+                    if side < 0.0 { Face::Right } else { Face::Left },
+                ),
+                None => standing(idle_x(npc), Face::Keep),
+            }
         }
-        Action::Travel { to } => standing(travel_x(world, npc, to)),
-        Action::Buy(_) => standing(anchor_x(world, stations, npc)),
-        Action::Idle => standing(baby_x(world, stations, npc).unwrap_or_else(|| idle_x(npc))),
+        Action::Travel { to } => standing(travel_x(world, npc, to), Face::Keep),
+        // Il cliente sta a destra del bancone.
+        Action::Buy(_) => standing(anchor_x(world, stations, npc), Face::Left),
+        Action::Idle => match baby_x(world, stations, npc) {
+            Some((x, mother_x)) => standing(x, Face::Toward(mother_x)),
+            None => standing(idle_x(npc), Face::Keep),
+        },
     }
 }
 
@@ -497,38 +467,13 @@ pub(crate) fn npc_position(world: &World, stations: &StationLayout, npc: &Npc) -
     npc_pose(world, stations, npc, 0).position
 }
 
-/// Vero se l'NPC va disegnato con l'attrezzo in mano.
-fn holds_tool(npc: &Npc) -> bool {
-    matches!(npc.action, Action::Work(_)) && npc.inventory.tool.is_some()
-}
-
-fn npc_color(npc: &Npc) -> Color {
-    let base = match npc.job {
-        Some(Job::Contadino) => CONTADINO_COLOR,
-        Some(Job::Cuoco) => CUOCO_COLOR,
-        Some(Job::Operaio) => OPERAIO_COLOR,
-        Some(Job::Mercante) => MERCANTE_COLOR,
-        None => match npc.stage() {
-            LifeStage::Bambino | LifeStage::Giovane => CHILD_COLOR,
-            LifeStage::Anziano => ELDER_COLOR,
-            LifeStage::Adulto => JOBLESS_COLOR,
-        },
-    };
-    let mut c = base.to_srgba();
-    if npc.inventory.clothes.is_none() {
-        // Senza vestiti: più pallido (desaturato e un po' più chiaro).
-        let gray = 0.3 * c.red + 0.59 * c.green + 0.11 * c.blue;
-        let pale = |v: f32| (v + (gray - v) * NO_CLOTHES_DESATURATE + NO_CLOTHES_LIGHTEN).min(1.0);
-        c = Srgba::rgb(pale(c.red), pale(c.green), pale(c.blue));
+/// Chi dorme è disegnato più scuro.
+fn npc_tint(npc: &Npc) -> Color {
+    if npc.is_awake() {
+        Color::WHITE
+    } else {
+        SLEEP_TINT
     }
-    if !npc.is_awake() {
-        c = Srgba::rgb(
-            c.red * SLEEP_DARKEN,
-            c.green * SLEEP_DARKEN,
-            c.blue * SLEEP_DARKEN,
-        );
-    }
-    c.into()
 }
 
 /// Carrozze della finestra visibile: quelle inquadrate più una per lato.
@@ -550,6 +495,20 @@ fn in_window(npc: &Npc, lo: usize, hi: usize) -> bool {
             a <= hi && b >= lo
         }
         _ => (lo..=hi).contains(&here),
+    }
+}
+
+/// Da che parte guardare: si guarda dove si va; da fermi, secondo `face`.
+fn facing_left(was_left: bool, step_x: f32, position_x: f32, face: Face) -> bool {
+    if step_x.abs() > 1e-3 {
+        return step_x < 0.0;
+    }
+    match face {
+        Face::Keep => was_left,
+        Face::Left => true,
+        Face::Right => false,
+        Face::Toward(x) if (x - position_x).abs() > FACE_DEADZONE => x < position_x,
+        Face::Toward(_) => was_left,
     }
 }
 
@@ -585,13 +544,11 @@ fn sync_npc_sprites(
     mut commands: Commands,
     sim: Res<Sim>,
     stations: Res<StationLayout>,
-    selected: Res<SelectedNpc>,
     camera: Single<(&Transform, &Projection), With<Camera2d>>,
     mut index: ResMut<NpcSpriteIndex>,
-    mut sprites: Query<(&mut Sprite, &mut NpcVisual), With<NpcSprite>>,
-    mut outlines: Query<&mut Sprite, (With<NpcOutline>, Without<NpcSprite>)>,
-    mut tools: Query<(&mut Visibility, &mut Transform), ToolOnly>,
-    mut hairs: Query<&mut Sprite, HairOnly>,
+    mut art: ResMut<CharacterArt>,
+    mut images: ResMut<Assets<Image>>,
+    mut sprites: Query<(&mut Sprite, &mut Anchor, &mut NpcVisual), With<NpcSprite>>,
     mut seats: Local<HashMap<(CarriageId, u16), u16>>,
 ) {
     let world = &sim.world;
@@ -622,119 +579,100 @@ fn sync_npc_sprites(
             None => 0,
         };
         let pose = npc_pose(world, &stations, npc, seat);
-        let size = body_size(npc);
-        let color = npc_color(npc);
-        let outline_color = if selected.0 == Some(npc.id) {
-            SELECTED_COLOR
-        } else {
-            OUTLINE_COLOR
-        };
-        let lying = Vec2::new(size.x * LYING_THICKNESS, size.y * pose.length_scale);
-        let tool_shown = holds_tool(npc);
-        let hair = hair_color(npc);
-        let long_hair = npc.sex == Sex::Female;
+        let key = appearance(npc);
+        let tint = npc_tint(npc);
+        let has_tool = npc.inventory.tool.is_some();
 
         let existing = index.entities.get(&npc.id).map(|&(e, _)| e);
         if let Some(entity) = existing
-            && let Ok((mut sprite, mut visual)) = sprites.get_mut(entity)
+            && let Ok((mut sprite, mut anchor, mut visual)) = sprites.get_mut(entity)
         {
-            // Dimensioni e rotazione le aggiorna `move_npc_sprites`, in base
-            // a dove si trova davvero lo sprite.
+            // Posizione, animazione e rotazione le aggiorna `move_npc_sprites`,
+            // in base a dove si trova davvero lo sprite.
             visual.target = pose.position;
-            if visual.standing != size {
-                // È cresciuto: l'attrezzo resta accanto al fianco.
-                visual.standing = size;
-                if let Ok((_, mut transform)) = tools.get_mut(visual.tool) {
-                    transform.translation.x = tool_x(size);
-                }
-            }
             visual.wants_lying = pose.lying;
-            if pose.lying {
-                visual.lying = lying;
+            visual.action = npc.action;
+            visual.has_tool = has_tool;
+            visual.face = pose.face;
+            if visual.key != key {
+                // Cresciuto, cambiato lavoro, vestiti consumati o comprati.
+                visual.key = key;
+                sprite.image = art.sheet(key, &mut images);
+                anchor.0 = key.stage.anchor();
             }
-            if sprite.color != color {
-                sprite.color = color;
-            }
-            if let Ok(mut outline) = outlines.get_mut(visual.outline)
-                && outline.color != outline_color
-            {
-                outline.color = outline_color;
-            }
-            if visual.tool_shown != tool_shown {
-                visual.tool_shown = tool_shown;
-                if let Ok((mut visibility, _)) = tools.get_mut(visual.tool) {
-                    *visibility = tool_visibility(tool_shown);
-                }
-            }
-            if let Ok(mut sprite) = hairs.get_mut(visual.hair)
-                && sprite.color != hair
-            {
-                sprite.color = hair;
+            if sprite.color != tint {
+                sprite.color = tint;
             }
             index.entities.insert(npc.id, (entity, frame));
             continue;
         }
 
         // Nasce già nella posa finale (anche sdraiato, se è già a letto).
+        let phase = hash01(u64::from(npc.id.0) ^ 0xA11A) * 4.0;
+        let lie = if pose.lying { 1.0 } else { 0.0 };
+        let moving = false;
+        let anim = anim_for(&npc.action, moving, pose.lying, has_tool);
+        let first = anim_frame(anim, phase, 0.0, key.stage.stride());
         let mut visual = NpcVisual {
-            outline: Entity::PLACEHOLDER,
-            tool: Entity::PLACEHOLDER,
-            hair: Entity::PLACEHOLDER,
-            long_hair,
-            tool_shown,
+            highlight: Entity::PLACEHOLDER,
+            key,
             target: pose.position,
-            standing: size,
-            lying,
             wants_lying: pose.lying,
-            lie: if pose.lying { 1.0 } else { 0.0 },
+            lie,
             half_extents: Vec2::ZERO,
+            action: npc.action,
+            has_tool,
+            face: pose.face,
+            facing_left: facing_left(
+                hash01(u64::from(npc.id.0) ^ 0xFACE) < 0.5,
+                0.0,
+                pose.position.x,
+                pose.face,
+            ),
+            clock: phase,
+            walked: 0.0,
+            phase,
+            frame: first,
+            anim,
         };
-        visual.half_extents = visual.rotated_half_extents();
-        let body = visual.body();
-        let framed = body + Vec2::splat(2.0 * OUTLINE);
+        visual.half_extents = visual.current_half_extents();
 
         if let Some(stale) = existing {
             commands.entity(stale).despawn();
         }
-        let outline = commands
+        let image = art.sheet(key, &mut images);
+        let anchor = Anchor(key.stage.anchor());
+        // Contorno di selezione: sempre presente (nascosto), dietro lo sprite.
+        let highlight = commands
             .spawn((
-                NpcOutline,
-                Sprite::from_color(outline_color, framed),
+                NpcHighlight,
+                Sprite {
+                    color: SELECTED_COLOR,
+                    ..default()
+                },
+                anchor,
                 Transform::from_xyz(0.0, 0.0, -Z_STEP / 2.0),
+                Visibility::Hidden,
             ))
             .id();
-        visual.outline = outline;
-        // Attrezzo tenuto accanto al fianco destro, inclinato.
-        let tool = commands
-            .spawn((
-                NpcTool,
-                Sprite::from_color(TOOL_COLOR, TOOL_SIZE),
-                Transform::from_xyz(tool_x(size), -1.0, Z_STEP / 2.0)
-                    .with_rotation(Quat::from_rotation_z(TOOL_TILT)),
-                tool_visibility(tool_shown),
-            ))
-            .id();
-        visual.tool = tool;
-        let hair_entity = commands
-            .spawn((
-                NpcHair,
-                Sprite::from_color(hair, hair_rect(body, long_hair).0),
-                hair_transform(body, long_hair),
-            ))
-            .id();
-        visual.hair = hair_entity;
+        visual.highlight = highlight;
         // Ogni NPC ha una profondità propria: niente sfarfallio tra sprite sovrapposti.
         let z = NPC_Z + (npc.id.0 % 1000) as f32 * Z_STEP;
-        let rotation = visual.rotation();
+        let sprite = Sprite {
+            color: tint,
+            flip_x: visual.facing_left && lie < 1.0,
+            ..Sprite::from_atlas_image(image, art.atlas(first))
+        };
         let entity = commands
             .spawn((
                 Name::new(npc.name.clone()),
                 NpcSprite(npc.id),
                 visual,
-                Sprite::from_color(color, body),
-                Transform::from_translation(pose.position.extend(z)).with_rotation(rotation),
+                sprite,
+                anchor,
+                Transform::from_translation(pose.position.extend(z)),
             ))
-            .add_children(&[outline, tool, hair_entity])
+            .add_child(highlight)
             .id();
         index.entities.insert(npc.id, (entity, frame));
     }
@@ -755,33 +693,24 @@ fn sync_npc_sprites(
     });
 }
 
-/// Posizione x dell'attrezzo in mano, accanto al fianco destro.
-fn tool_x(body: Vec2) -> f32 {
-    body.x / 2.0 + TOOL_SIZE.x / 2.0
-}
-
-fn tool_visibility(shown: bool) -> Visibility {
-    if shown {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    }
-}
-
-/// Muove gli sprite verso la loro posizione obiettivo e li fa sdraiare solo
-/// una volta arrivati al letto (mentre ci vanno camminano in piedi).
+/// Muove gli sprite verso la loro posizione obiettivo, li fa sdraiare solo
+/// una volta arrivati al letto (mentre ci vanno camminano in piedi) e sceglie
+/// il fotogramma dell'animazione.
 fn move_npc_sprites(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
+    clock: Res<SimClock>,
+    art: Res<CharacterArt>,
     mut sprites: Query<(&mut Transform, &mut Sprite, &mut NpcVisual), With<NpcSprite>>,
-    mut outlines: Query<&mut Sprite, (With<NpcOutline>, Without<NpcSprite>)>,
-    mut hairs: Query<(&mut Sprite, &mut Transform), HairOnly>,
 ) {
     let dt = time.delta_secs();
+    // In pausa i gesti si fermano (i passi seguono comunque lo spostamento).
+    let anim_dt = if clock.paused { 0.0 } else { dt };
     for (mut transform, mut sprite, mut visual) in &mut sprites {
         let current = transform.translation.truncate();
         let delta = visual.target - current;
         let distance = delta.length();
-        let next = if distance > TELEPORT_DISTANCE {
+        let teleport = distance > TELEPORT_DISTANCE;
+        let next = if teleport {
             visual.target
         } else {
             let step = (WALK_SPEED + distance * CATCH_UP) * dt;
@@ -791,6 +720,7 @@ fn move_npc_sprites(
             transform.translation.x = next.x;
             transform.translation.y = next.y;
         }
+        let step = if teleport { Vec2::ZERO } else { next - current };
 
         let arrived = next.distance(visual.target) <= ARRIVE_DISTANCE;
         let goal = if visual.wants_lying && arrived {
@@ -798,7 +728,7 @@ fn move_npc_sprites(
         } else {
             0.0
         };
-        let lie = if distance > TELEPORT_DISTANCE {
+        let lie = if teleport {
             // Teletrasportato: niente animazione.
             goal
         } else {
@@ -807,29 +737,44 @@ fn move_npc_sprites(
         if lie != visual.lie {
             visual.lie = lie;
         }
-        let half_extents = visual.rotated_half_extents();
+        let half_extents = visual.current_half_extents();
         if visual.half_extents != half_extents {
             visual.half_extents = half_extents;
         }
-
         let rotation = visual.rotation();
         if transform.rotation != rotation {
             transform.rotation = rotation;
         }
-        let body = visual.body();
-        if sprite.custom_size != Some(body) {
-            sprite.custom_size = Some(body);
-            if let Ok((mut hair, mut hair_transform)) = hairs.get_mut(visual.hair) {
-                let (size, offset) = hair_rect(body, visual.long_hair);
-                hair.custom_size = Some(size);
-                hair_transform.translation.y = offset;
-            }
+
+        // Animazione.
+        let moving = !arrived && !teleport;
+        let anim = anim_for(&visual.action, moving, lie >= 1.0, visual.has_tool);
+        if anim != visual.anim {
+            visual.anim = anim;
+            visual.clock = visual.phase;
+        } else {
+            visual.clock += anim_dt;
         }
-        let framed = body + Vec2::splat(2.0 * OUTLINE);
-        if let Ok(mut outline) = outlines.get_mut(visual.outline)
-            && outline.custom_size != Some(framed)
-        {
-            outline.custom_size = Some(framed);
+        visual.walked += step.length();
+        let stage = visual.stage();
+        let frame = if lie > 0.0 && lie < 1.0 {
+            // Mentre si sdraia o si alza: il corpo in piedi che ruota.
+            Frame::Idle0
+        } else {
+            anim_frame(anim, visual.clock, visual.walked, stage.stride())
+        };
+        let left = facing_left(visual.facing_left, step.x, next.x, visual.face);
+        if left != visual.facing_left {
+            visual.facing_left = left;
+        }
+        // Sdraiati (o mentre ci si sdraia) la testa va sempre a sinistra.
+        let flip = visual.facing_left && lie <= 0.0;
+        if sprite.flip_x != flip {
+            sprite.flip_x = flip;
+        }
+        if visual.frame != frame || sprite.texture_atlas.is_none() {
+            visual.frame = frame;
+            sprite.texture_atlas = Some(art.atlas(frame));
         }
     }
 }
@@ -866,20 +811,36 @@ fn pick_npc(
     selected.0 = hit;
 }
 
-/// Mostra il marcatore sopra l'NPC selezionato (se è disegnato).
+/// Mostra il marcatore sopra l'NPC selezionato (se è disegnato) e il suo
+/// contorno ciano, che segue fotogramma, verso e ancora dello sprite.
+#[allow(clippy::too_many_arguments)]
 fn update_selection(
     time: Res<Time>,
     selected: Res<SelectedNpc>,
     index: Res<NpcSpriteIndex>,
-    sprites: Query<(&Transform, &NpcVisual), Without<SelectionMarker>>,
-    mut marker: Single<(&mut Transform, &mut Visibility), With<SelectionMarker>>,
+    mut art: ResMut<CharacterArt>,
+    mut images: ResMut<Assets<Image>>,
+    sprites: Query<SelectedParts, (Without<SelectionMarker>, Without<NpcHighlight>)>,
+    mut highlights: Query<(&mut Sprite, &mut Anchor, &mut Visibility), HighlightOnly>,
+    mut marker: Single<MarkerParts, (With<SelectionMarker>, Without<NpcHighlight>)>,
+    mut shown: Local<Option<(Entity, AppearanceKey)>>,
 ) {
     let (marker_transform, visibility) = &mut *marker;
     let target = selected
         .0
         .and_then(|id| index.entities.get(&id))
         .and_then(|&(entity, _)| sprites.get(entity).ok());
-    let Some((transform, visual)) = target else {
+    let highlight = target.map(|(_, _, _, visual)| visual.highlight);
+    // Il contorno di prima si nasconde se la selezione è cambiata.
+    if let Some((previous, _)) = *shown
+        && Some(previous) != highlight
+    {
+        if let Ok((_, _, mut vis)) = highlights.get_mut(previous) {
+            vis.set_if_neq(Visibility::Hidden);
+        }
+        *shown = None;
+    }
+    let Some((transform, sprite, anchor, visual)) = target else {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
@@ -888,6 +849,45 @@ fn update_selection(
     let top = transform.translation.y + visual.half_extents.y;
     marker_transform.translation.x = transform.translation.x;
     marker_transform.translation.y = top + 6.0 + bob;
+
+    if let Ok((mut outline, mut outline_anchor, mut vis)) = highlights.get_mut(visual.highlight) {
+        if *shown != Some((visual.highlight, visual.key)) {
+            outline.image = art.highlight(visual.key, &mut images);
+            *shown = Some((visual.highlight, visual.key));
+        }
+        if outline.texture_atlas.as_ref().map(|a| a.index)
+            != sprite.texture_atlas.as_ref().map(|a| a.index)
+        {
+            outline.texture_atlas = sprite.texture_atlas.clone();
+        }
+        if outline.flip_x != sprite.flip_x {
+            outline.flip_x = sprite.flip_x;
+        }
+        if *outline_anchor != *anchor {
+            *outline_anchor = *anchor;
+        }
+        vis.set_if_neq(Visibility::Inherited);
+    }
+}
+
+/// Ogni tanto libera i fogli degli aspetti che nessuno sprite usa più
+/// (NPC usciti dalla vista, cresciuti, morti).
+fn evict_unused_sheets(
+    time: Res<Time<Real>>,
+    mut art: ResMut<CharacterArt>,
+    visuals: Query<&NpcVisual>,
+    mut timer: Local<f32>,
+) {
+    *timer += time.delta_secs();
+    if *timer < EVICT_SECS {
+        return;
+    }
+    *timer = 0.0;
+    if art.cached() <= EVICT_ABOVE {
+        return;
+    }
+    let used: HashSet<AppearanceKey> = visuals.iter().map(|v| v.key).collect();
+    art.retain_used(&used);
 }
 
 #[cfg(test)]
@@ -905,16 +905,13 @@ mod tests {
 
     #[test]
     fn size_grows_with_age_and_shrinks_a_bit_when_old() {
-        let baby = size_for_age(0);
-        let child = size_for_age(8);
-        let youth = size_for_age(16);
-        let adult = size_for_age(30);
-        let old = size_for_age(90);
-        assert_eq!(adult, ADULT_SIZE);
-        assert_eq!(size_for_age(18), ADULT_SIZE);
-        assert_eq!(size_for_age(65), ADULT_SIZE);
+        let size = |age| Stage::of_age(age).size();
+        let (baby, child, youth, adult, old) = (size(0), size(8), size(16), size(30), size(90));
+        assert_eq!(adult, Vec2::new(8.0, 16.0));
+        assert_eq!(size(18), adult);
+        assert_eq!(size(64), adult);
         assert!(baby.y < child.y && child.y < youth.y && youth.y < adult.y);
-        assert!(baby.x < child.x && child.x < adult.x);
+        assert!(baby.x <= child.x && child.x < adult.x);
         assert!(baby.y <= adult.y / 3.0, "i neonati sono minuscoli: {baby}");
         assert!(
             youth.y >= adult.y * 0.85,
@@ -922,32 +919,14 @@ mod tests {
         );
         assert!(old.y < adult.y && old.y > adult.y * 0.8, "{old}");
         assert_eq!(old.x, adult.x);
-        // Continua anno per anno.
-        for age in 0..100 {
-            let (a, b) = (size_for_age(age), size_for_age(age + 1));
-            assert!((a - b).abs().max_element() <= 1.5, "{age}: {a} -> {b}");
+        // Non si rimpicciolisce mai crescendo (tranne da anziani).
+        for age in 0..64 {
+            assert!(size(age).y <= size(age + 1).y, "{age}");
         }
     }
 
     #[test]
-    fn long_hair_is_wider_and_frames_the_head() {
-        for age in [0, 5, 16, 40, 80] {
-            let body = size_for_age(age);
-            let (short, short_y) = hair_rect(body, false);
-            let (long, long_y) = hair_rect(body, true);
-            // Corti: dentro la testa, in cima.
-            assert_eq!(short.x, body.x);
-            assert!((short_y + short.y / 2.0 - body.y / 2.0).abs() < 1e-5);
-            // Lunghi: più larghi, sporgono sopra e scendono più in basso.
-            assert!(long.x > body.x);
-            assert!(long_y + long.y / 2.0 > body.y / 2.0);
-            assert!(long_y - long.y / 2.0 < short_y - short.y / 2.0);
-            assert!(long.y < body.y, "{age}: {long} vs {body}");
-        }
-    }
-
-    #[test]
-    fn idle_babies_stay_next_to_their_mother() {
+    fn idle_babies_stay_next_to_their_mother_and_look_at_her() {
         let mut sim = crate::sim_bridge::new_sim();
         // Qualche anno, finché nasce qualcuno.
         let baby = loop {
@@ -956,7 +935,7 @@ mod tests {
                 .world
                 .npcs
                 .iter()
-                .find(|n| n.age < BABY_AGE && mother(&sim.world, n).is_some())
+                .find(|n| n.age < BABY_YEARS && mother(&sim.world, n).is_some())
             {
                 break b.id;
             }
@@ -975,13 +954,31 @@ mod tests {
         let world = &sim.world;
         let b = world.npc(baby).unwrap();
         let m = world.npc(mother_id).unwrap();
-        let bx = npc_pose(world, &stations, b, 0).position.x;
+        let pose = npc_pose(world, &stations, b, 0);
+        let bx = pose.position.x;
         let mx = npc_pose(world, &stations, m, 0).position.x;
         assert!((bx - mx).abs() <= BABY_OFFSET + 0.01, "{bx} vs {mx}");
+        assert_eq!(pose.face, Face::Toward(mx));
+        assert_eq!(facing_left(false, 0.0, bx, pose.face), mx < bx);
         // Se la mamma è altrove, il neonato va per conto suo.
         let mut other = b.clone();
         other.carriage = CarriageId((dorm.0 + 1) % world.carriages.len() as u16);
         assert_eq!(baby_x(world, &stations, &other), None);
+    }
+
+    #[test]
+    fn facing_follows_movement_then_the_pose() {
+        // Camminando si guarda dove si va.
+        assert!(facing_left(false, -0.5, 0.0, Face::Right));
+        assert!(!facing_left(true, 0.5, 0.0, Face::Left));
+        // Da fermi: la posa decide, oppure si resta come prima.
+        assert!(facing_left(false, 0.0, 0.0, Face::Left));
+        assert!(!facing_left(true, 0.0, 0.0, Face::Right));
+        assert!(facing_left(true, 0.0, 0.0, Face::Keep));
+        assert!(facing_left(false, 0.0, 10.0, Face::Toward(0.0)));
+        assert!(!facing_left(true, 0.0, 10.0, Face::Toward(20.0)));
+        // Al centro della postazione non ci si gira.
+        assert!(facing_left(true, 0.0, 10.0, Face::Toward(10.5)));
     }
 
     #[test]
@@ -995,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn buyers_stand_next_to_a_staffed_counter() {
+    fn buyers_stand_next_to_a_staffed_counter_facing_it() {
         let mut world = World::generate(42, 20, 400);
         let stations = StationLayout::from_world(&world);
         let market = world
@@ -1025,24 +1022,46 @@ mod tests {
             let reach = COUNTER_CLEARANCE + body_size(npc).x + CUSTOMER_SPREAD;
             assert!(x > edge && x <= edge + reach, "{x} vs bancone {edge}");
             assert!(!pose.lying);
+            assert_eq!(pose.face, Face::Left);
         }
     }
 
     #[test]
-    fn npcs_without_clothes_are_paler() {
+    fn sleepers_lie_on_the_mattress_with_the_head_on_the_pillow() {
+        let mut world = World::generate(42, 20, 400);
+        let stations = StationLayout::from_world(&world);
+        let dorm = world.npcs[0].home;
+        let (bed, spot) = stations.carriages[dorm.index()]
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.kind == StationKind::Bed)
+            .map(|(i, s)| (sim::StationId(i as u16), *s))
+            .unwrap();
+        for age in [1, 8, 16, 30, 80] {
+            let npc = &mut world.npcs[0];
+            npc.carriage = dorm;
+            npc.age = age;
+            npc.action = Action::Sleep(bed);
+            let pose = npc_pose(&world, &stations, &world.npcs[0], 0);
+            let lying = Stage::of_age(age).lying_size();
+            assert!(pose.lying);
+            let bottom = pose.position.y - lying.y / 2.0;
+            assert!((bottom - (spot.base_y() + BED_TOP)).abs() < 1e-4, "{age}");
+            let left = pose.position.x - lying.x / 2.0;
+            let pillow = carriage_x(dorm, spot.x - spot.width / 2.0 + 1.0);
+            assert!((left - pillow).abs() < 1e-4, "{age}");
+        }
+    }
+
+    #[test]
+    fn sleeping_npcs_are_darker() {
         let world = World::generate(42, 20, 400);
         let mut npc = world.npcs[0].clone();
         npc.action = Action::Idle;
-        npc.inventory.clothes = Some(1.0);
-        let dressed = npc_color(&npc).to_srgba();
-        npc.inventory.clothes = None;
-        let bare = npc_color(&npc).to_srgba();
-        assert_ne!(dressed, bare);
-        let spread = |c: Srgba| {
-            let v = [c.red, c.green, c.blue];
-            v.iter().copied().fold(f32::MIN, f32::max) - v.iter().copied().fold(f32::MAX, f32::min)
-        };
-        assert!(spread(bare) <= spread(dressed) + 1e-6);
+        assert_eq!(npc_tint(&npc), Color::WHITE);
+        npc.action = Action::Sleep(sim::StationId(0));
+        let dark = npc_tint(&npc).to_srgba();
+        assert!(dark.red < 1.0 && dark.green < 1.0);
     }
 
     #[test]

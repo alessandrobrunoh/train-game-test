@@ -1,4 +1,4 @@
-//! Postazioni dentro le carrozze (solo grafica).
+//! Postazioni dentro le carrozze (solo grafica, arte in `prop_art.rs`).
 //!
 //! Nella sim una postazione non ha posizione: esiste solo come `(CarriageId,
 //! StationId)`. Qui ogni postazione riceve in modo deterministico un posto sul
@@ -14,6 +14,8 @@
 use bevy::prelude::*;
 use sim::{CarriageId, Station, StationId, StationKind, World};
 
+use crate::env_art::{ArtCache, ArtKey, art_sprite, hash2};
+use crate::prop_art;
 use crate::saves::WorldRebuildSet;
 use crate::state::{Sim, WorldReplaced};
 use crate::storage::{has_storage, storage_range};
@@ -36,16 +38,8 @@ pub const BED_TOP: f32 = 5.0;
 // Profondità: dietro agli NPC, tranne i tavoli che stanno davanti a chi mangia.
 const Z_STATION: f32 = -3.0;
 const Z_TABLE: f32 = 4.0;
-
-const WOOD: Color = Color::srgb(0.45, 0.30, 0.18);
-const TABLE_TOP: Color = Color::srgb(0.88, 0.78, 0.58);
-const MATTRESS: Color = Color::srgb(0.80, 0.78, 0.70);
-const PILLOW: Color = Color::srgb(0.95, 0.95, 0.92);
-const METAL: Color = Color::srgb(0.25, 0.26, 0.28);
-const BURNER: Color = Color::srgb(0.95, 0.45, 0.15);
-const SOIL: Color = Color::srgb(0.30, 0.20, 0.12);
-const PLANTS: Color = Color::srgb(0.18, 0.62, 0.22);
-const BENCH: Color = Color::srgb(0.78, 0.60, 0.30);
+/// Le scintille schizzano davanti a chi lavora.
+const Z_SPARKS: f32 = 4.2;
 
 /// Posto di una postazione, in coordinate locali alla carrozza (x = 0 è il
 /// bordo sinistro della carrozza).
@@ -265,12 +259,16 @@ pub struct StationsPlugin;
 
 impl Plugin for StationsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_stations).add_systems(
-            PreUpdate,
-            rebuild_stations
-                .in_set(WorldRebuildSet)
-                .run_if(on_message::<WorldReplaced>),
-        );
+        app.init_resource::<ArtCache>()
+            .init_resource::<StationAnim>()
+            .add_systems(Startup, spawn_stations)
+            .add_systems(
+                PreUpdate,
+                rebuild_stations
+                    .in_set(WorldRebuildSet)
+                    .run_if(on_message::<WorldReplaced>),
+            )
+            .add_systems(Update, animate_stations);
     }
 
     /// Come il layout del treno, nasce dalla sim dopo il `build` di tutti i plugin.
@@ -284,46 +282,33 @@ impl Plugin for StationsPlugin {
     }
 }
 
-/// Un rettangolo di una postazione: angolo in basso a sinistra relativo alla
-/// base della postazione, dimensioni, colore.
-fn station_rects(spot: &StationSpot) -> Vec<(Vec2, Vec2, Color)> {
-    let w = spot.width;
-    let rect = |x: f32, y: f32, width: f32, height: f32, color: Color| {
-        (Vec2::new(x, y), Vec2::new(width, height), color)
-    };
-    match spot.kind {
-        StationKind::Bed => vec![
-            rect(-w / 2.0, 0.0, w, 3.0, WOOD),
-            rect(-w / 2.0 + 1.0, 3.0, w - 2.0, BED_TOP - 3.0, MATTRESS),
-            rect(-w / 2.0 + 1.0, BED_TOP, 3.0_f32.min(w / 4.0), 1.5, PILLOW),
-        ],
-        StationKind::Table => vec![
-            rect(-1.5, 0.0, 3.0, 9.0, WOOD),
-            rect(-w / 2.0, 9.0, w, 3.0, TABLE_TOP),
-        ],
-        StationKind::Stove => vec![
-            rect(-w / 2.0, 0.0, w, 14.0, METAL),
-            rect(-w / 2.0 + 2.0, 14.0, (w - 4.0).max(1.0), 2.0, BURNER),
-        ],
-        StationKind::GrowBed => vec![
-            rect(-w / 2.0, 0.0, w, 6.0, SOIL),
-            rect(-w / 2.0 + 2.0, 6.0, (w - 4.0).max(1.0), 6.0, PLANTS),
-        ],
-        StationKind::Workbench => vec![
-            rect(-w / 2.0 + 1.0, 0.0, 2.0, 11.0, METAL),
-            rect(w / 2.0 - 3.0, 0.0, 2.0, 11.0, METAL),
-            rect(-w / 2.0, 11.0, w, 3.0, BENCH),
-        ],
-        StationKind::Counter => vec![
-            rect(-w / 2.0, 0.0, w, 11.0, WOOD),
-            rect(-w / 2.0, 11.0, w, 3.0, TABLE_TOP),
-        ],
-    }
-}
-
-/// Radice delle postazioni di una carrozza (i figli sono i rettangoli).
+/// Radice delle postazioni di una carrozza (i figli sono gli sprite).
 #[derive(Component, Debug)]
 pub(crate) struct StationsRoot;
+
+/// Vapore animato sopra una cucina.
+#[derive(Component, Debug)]
+struct Steam {
+    phase: u8,
+}
+
+/// Scintille su un banco da lavoro: si vedono quando qualcuno ci lavora.
+#[derive(Component, Debug)]
+struct Sparks {
+    carriage: usize,
+    station: usize,
+}
+
+/// Fotogrammi delle animazioni delle postazioni.
+#[derive(Resource, Default)]
+pub(crate) struct StationAnim {
+    steam: Vec<Handle<Image>>,
+    sparks: Vec<Handle<Image>>,
+}
+
+/// Fotogrammi al secondo di vapore e scintille.
+const STEAM_FPS: f32 = 3.0;
+const SPARKS_FPS: f32 = 14.0;
 
 /// Mondo sostituito: posti e grafica delle postazioni si rifanno da capo.
 pub(crate) fn rebuild_stations(
@@ -331,22 +316,170 @@ pub(crate) fn rebuild_stations(
     sim: Res<Sim>,
     mut layout: ResMut<StationLayout>,
     old: Query<Entity, With<StationsRoot>>,
+    mut art: ResMut<ArtCache>,
+    mut anim: ResMut<StationAnim>,
+    mut images: Option<ResMut<Assets<Image>>>,
 ) {
     for entity in &old {
         commands.entity(entity).despawn();
     }
     *layout = StationLayout::from_world(&sim.world);
-    spawn_station_entities(&mut commands, &layout);
+    spawn_station_entities(
+        &mut commands,
+        &layout,
+        &mut art,
+        &mut anim,
+        images.as_deref_mut(),
+    );
 }
 
 /// Disegna le postazioni di ogni carrozza, raggruppate sotto una radice.
-fn spawn_stations(mut commands: Commands, layout: Res<StationLayout>) {
-    spawn_station_entities(&mut commands, &layout);
+fn spawn_stations(
+    mut commands: Commands,
+    layout: Res<StationLayout>,
+    mut art: ResMut<ArtCache>,
+    mut anim: ResMut<StationAnim>,
+    mut images: Option<ResMut<Assets<Image>>>,
+) {
+    spawn_station_entities(
+        &mut commands,
+        &layout,
+        &mut art,
+        &mut anim,
+        images.as_deref_mut(),
+    );
 }
 
-fn spawn_station_entities(commands: &mut Commands, layout: &StationLayout) {
+/// Larghezza in pixel d'arte di una postazione.
+fn art_width(spot: &StationSpot) -> i32 {
+    (spot.width.round() as i32).max(3)
+}
+
+fn spawn_station_entities(
+    commands: &mut Commands,
+    layout: &StationLayout,
+    art: &mut ArtCache,
+    anim: &mut StationAnim,
+    mut images: Option<&mut Assets<Image>>,
+) {
+    anim.steam = (0..prop_art::STEAM_FRAMES)
+        .map(|f| art.get(images.as_deref_mut(), ArtKey::Steam(f), || prop_art::steam(f)))
+        .collect();
+    anim.sparks = (0..prop_art::SPARK_FRAMES)
+        .map(|f| art.get(images.as_deref_mut(), ArtKey::Sparks(f), || prop_art::sparks(f)))
+        .collect();
+
     for (index, spots) in layout.carriages.iter().enumerate() {
         let origin = Vec2::new(TrainLayout::carriage_left(index), FLOOR_Y);
+        let mut sprites: Vec<(Sprite, Transform, Option<StationFx>)> = Vec::new();
+        let mut counters = 0u8;
+        for (station, spot) in spots.iter().enumerate() {
+            let w = art_width(spot);
+            let wu = w as u16;
+            let base = spot.base_y() - FLOOR_Y;
+            // Sprite con il bordo inferiore alla quota `bottom` (locale).
+            let mut place = |image: Handle<Image>, height: i32, bottom: f32, z: f32| {
+                let size = Vec2::new(spot.width, height as f32);
+                sprites.push((
+                    art_sprite(image, size),
+                    Transform::from_xyz(spot.x, bottom + size.y / 2.0, z),
+                    None,
+                ));
+            };
+            match spot.kind {
+                StationKind::Bed => {
+                    let upper = spot.level > 0;
+                    let blanket = (hash2(index as i32, station as i32, 3)
+                        % u32::from(prop_art::BLANKET_VARIANTS)) as u8;
+                    let key = ArtKey::Bed {
+                        width: wu,
+                        upper,
+                        blanket,
+                    };
+                    let image = art.get(images.as_deref_mut(), key, || {
+                        prop_art::bed(w, upper, blanket)
+                    });
+                    let below = if upper { LEVEL_HEIGHT } else { 0.0 };
+                    place(image, prop_art::BED_H + below as i32, base - below, Z_STATION);
+                }
+                StationKind::Table => {
+                    let bench = art.get(images.as_deref_mut(), ArtKey::Bench(wu), || {
+                        prop_art::bench(w)
+                    });
+                    place(bench, prop_art::BENCH_H, base, Z_STATION);
+                    let image = art.get(images.as_deref_mut(), ArtKey::Table(wu), || {
+                        prop_art::table(w)
+                    });
+                    place(image, prop_art::TABLE_H, base, Z_TABLE);
+                }
+                StationKind::Stove => {
+                    let image = art.get(images.as_deref_mut(), ArtKey::Stove(wu), || {
+                        prop_art::stove(w)
+                    });
+                    place(image, prop_art::STOVE_H, base, Z_STATION);
+                    let size = Vec2::new(prop_art::STEAM_W as f32, prop_art::STEAM_H as f32);
+                    let phase = (station % usize::from(prop_art::STEAM_FRAMES)) as u8;
+                    sprites.push((
+                        art_sprite(anim.steam.first().cloned().unwrap_or_default(), size),
+                        Transform::from_xyz(
+                            spot.x,
+                            base + prop_art::POT_TOP + size.y / 2.0,
+                            Z_STATION + 0.1,
+                        ),
+                        Some(StationFx::Steam(Steam { phase })),
+                    ));
+                }
+                StationKind::GrowBed => {
+                    let variant = (hash2(index as i32, station as i32, 8) % 7) as u8;
+                    let key = ArtKey::GrowBed { width: wu, variant };
+                    let image = art.get(images.as_deref_mut(), key, || {
+                        prop_art::grow_bed(w, variant)
+                    });
+                    place(image, prop_art::GROW_H, base, Z_STATION);
+                }
+                StationKind::Workbench => {
+                    let image = art.get(images.as_deref_mut(), ArtKey::Workbench(wu), || {
+                        prop_art::workbench(w)
+                    });
+                    place(image, prop_art::WORKBENCH_H, base, Z_STATION);
+                    let size = Vec2::new(prop_art::SPARKS_W as f32, prop_art::SPARKS_H as f32);
+                    let x = spot.x - spot.width / 2.0 + 5.0;
+                    sprites.push((
+                        art_sprite(anim.sparks.first().cloned().unwrap_or_default(), size),
+                        Transform::from_xyz(x, base + prop_art::VISE_TOP + size.y / 2.0 - 2.0, Z_SPARKS),
+                        Some(StationFx::Sparks(Sparks {
+                            carriage: index,
+                            station,
+                        })),
+                    ));
+                }
+                StationKind::Counter => {
+                    let hue = counters % prop_art::STALL_VARIANTS;
+                    counters += 1;
+                    let key = ArtKey::Counter { width: wu, hue };
+                    let image = art.get(images.as_deref_mut(), key, || {
+                        prop_art::counter(w, hue)
+                    });
+                    place(image, prop_art::COUNTER_H, base, Z_STATION);
+                }
+            }
+        }
+        // Numero di ogni colonna di cuccette, su una targhetta sopra la più alta.
+        for (number, top) in bunk_columns(spots).into_iter().enumerate() {
+            let number = number as u16 + 1;
+            let plate = prop_art::bed_plate(number);
+            let size = Vec2::new(plate.width as f32, plate.height as f32);
+            if size.x + 2.0 > top.width {
+                continue;
+            }
+            let image = art.get(images.as_deref_mut(), ArtKey::BedPlate(number), || plate);
+            let y = top.base_y() - FLOOR_Y + prop_art::BED_H as f32 + 1.0 + size.y / 2.0;
+            sprites.push((
+                art_sprite(image, size),
+                Transform::from_xyz(top.x, y, Z_STATION),
+                None,
+            ));
+        }
         commands
             .spawn((
                 Name::new(format!("Postazioni carrozza {}", index + 1)),
@@ -355,22 +488,83 @@ fn spawn_station_entities(commands: &mut Commands, layout: &StationLayout) {
                 Visibility::default(),
             ))
             .with_children(|parent| {
-                for spot in spots {
-                    let z = if spot.kind == StationKind::Table {
-                        Z_TABLE
-                    } else {
-                        Z_STATION
-                    };
-                    for (corner, size, color) in station_rects(spot) {
-                        let center =
-                            Vec2::new(spot.x, spot.base_y() - FLOOR_Y) + corner + size / 2.0;
-                        parent.spawn((
-                            Sprite::from_color(color, size),
-                            Transform::from_translation(center.extend(z)),
-                        ));
+                for (sprite, transform, fx) in sprites {
+                    let mut entity = parent.spawn((sprite, transform));
+                    match fx {
+                        Some(StationFx::Steam(steam)) => {
+                            entity.insert(steam);
+                        }
+                        Some(StationFx::Sparks(sparks)) => {
+                            entity.insert((sparks, Visibility::Hidden));
+                        }
+                        None => {}
                     }
                 }
             });
+    }
+}
+
+/// Cuccetta più alta di ogni colonna di letti a castello, da sinistra a destra.
+fn bunk_columns(spots: &[StationSpot]) -> Vec<StationSpot> {
+    let mut tops: Vec<StationSpot> = Vec::new();
+    for spot in spots.iter().filter(|s| s.kind == StationKind::Bed) {
+        match tops.iter_mut().find(|t| (t.x - spot.x).abs() < 0.5) {
+            Some(top) if spot.level > top.level => *top = *spot,
+            Some(_) => {}
+            None => tops.push(*spot),
+        }
+    }
+    tops.sort_by(|a, b| a.x.total_cmp(&b.x));
+    tops
+}
+
+/// Effetto animato attaccato a uno sprite di postazione.
+enum StationFx {
+    Steam(Steam),
+    Sparks(Sparks),
+}
+
+/// Vapore sempre in movimento; scintille solo dove qualcuno lavora, a sprazzi.
+fn animate_stations(
+    time: Res<Time<Real>>,
+    anim: Res<StationAnim>,
+    sim: Res<Sim>,
+    mut steam: Query<(&Steam, &mut Sprite), Without<Sparks>>,
+    mut sparks: Query<(&Sparks, &mut Sprite, &mut Visibility)>,
+    mut last: Local<(u64, u64)>,
+) {
+    let t = time.elapsed_secs_f64();
+    let steam_tick = (t * f64::from(STEAM_FPS)) as u64;
+    if steam_tick != last.0 && !anim.steam.is_empty() {
+        last.0 = steam_tick;
+        for (s, mut sprite) in &mut steam {
+            let frame = (steam_tick + u64::from(s.phase)) as usize % anim.steam.len();
+            sprite.image = anim.steam[frame].clone();
+        }
+    }
+    let spark_tick = (t * f64::from(SPARKS_FPS)) as u64;
+    if spark_tick != last.1 && !anim.sparks.is_empty() {
+        last.1 = spark_tick;
+        for (s, mut sprite, mut visibility) in &mut sparks {
+            let busy = sim
+                .world
+                .carriages
+                .get(s.carriage)
+                .and_then(|c| c.stations.get(s.station))
+                .is_some_and(|st| st.occupancy > 0);
+            // A sprazzi: circa metà dei fotogrammi, diversi per ogni banco.
+            let burst = hash2(s.carriage as i32, s.station as i32, (spark_tick / 3) as u32) % 5 < 3;
+            let show = busy && burst;
+            visibility.set_if_neq(if show {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            });
+            if show {
+                let frame = (spark_tick as usize + s.station) % anim.sparks.len();
+                sprite.image = anim.sparks[frame].clone();
+            }
+        }
     }
 }
 
@@ -421,6 +615,18 @@ mod tests {
         check(&World::generate(1, 1, 5));
         check(&World::generate(7, 4, 30));
         check(&World::generate(3, 4, 2000));
+    }
+
+    #[test]
+    fn bunk_columns_are_numbered_left_to_right() {
+        let world = World::generate(42, 20, 400);
+        let layout = StationLayout::from_world(&world);
+        let spots = &layout.carriages[0];
+        let columns = bunk_columns(spots);
+        let levels = spots.iter().map(|s| s.level).max().unwrap();
+        assert_eq!(columns.len(), spots.len().div_ceil(usize::from(levels) + 1));
+        assert!(columns.windows(2).all(|w| w[0].x < w[1].x));
+        assert!(columns.iter().all(|c| c.kind == StationKind::Bed));
     }
 
     #[test]

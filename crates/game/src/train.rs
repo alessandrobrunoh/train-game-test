@@ -1,4 +1,5 @@
-//! Layout del treno (dati puri) e spawn della grafica placeholder.
+//! Layout del treno (dati puri) e spawn della grafica delle carrozze
+//! (arte in `env_art.rs`; esterno, binari e cielo in `background.rs`).
 //!
 //! Numero, tipo e nome delle carrozze arrivano dalla simulazione (`Sim`):
 //! la carrozza di indice `i` qui è la `CarriageId(i)` della sim. Il resto della
@@ -6,8 +7,10 @@
 //! di pixel art (la camera le ingrandisce, vedi `camera.rs`).
 
 use bevy::prelude::*;
+use bevy::sprite::Text2dShadow;
 use sim::{CarriageKind, World};
 
+use crate::env_art::{self, ArtCache, ArtKey, ExteriorArt, InteriorArt, LampGlow, art_sprite};
 use crate::saves::WorldRebuildSet;
 use crate::state::{Sim, WorldReplaced};
 
@@ -30,29 +33,19 @@ pub const FLOOR_Y: f32 = 0.0;
 
 // Profondità (z) dei vari strati.
 const Z_BACKGROUND: f32 = -10.0;
+/// Aloni delle lampade, subito davanti alla parete di fondo.
+const Z_GLOW: f32 = -9.0;
+const Z_GANGWAY: f32 = -9.5;
 const Z_DECOR: f32 = -5.0;
 const Z_STRUCTURE: f32 = 0.0;
 const Z_LABEL: f32 = 5.0;
 
-const STRUCTURE_COLOR: Color = Color::srgb(0.20, 0.20, 0.24);
-const GANGWAY_COLOR: Color = Color::srgb(0.12, 0.12, 0.14);
-const WINDOW_COLOR: Color = Color::srgb(0.62, 0.80, 0.92);
-const BOGIE_COLOR: Color = Color::srgb(0.08, 0.08, 0.09);
-const RAIL_COLOR: Color = Color::srgb(0.35, 0.33, 0.30);
-const GROUND_COLOR: Color = Color::srgb(0.42, 0.36, 0.28);
+/// Fotogrammi al secondo della rotazione delle ruote (indipendenti dalla sim:
+/// il treno è sempre in corsa).
+const WHEEL_FPS: f32 = 16.0;
 
-// --- Tipi di carrozza -------------------------------------------------------
-
-/// Colore dell'interno di una carrozza, in base alla sua funzione.
-pub fn carriage_tint(kind: CarriageKind) -> Color {
-    match kind {
-        CarriageKind::Dormitorio => Color::srgb(0.36, 0.40, 0.58),
-        CarriageKind::Mensa => Color::srgb(0.62, 0.44, 0.30),
-        CarriageKind::Serra => Color::srgb(0.32, 0.54, 0.34),
-        CarriageKind::Officina => Color::srgb(0.50, 0.47, 0.44),
-        CarriageKind::Mercato => Color::srgb(0.60, 0.52, 0.28),
-    }
-}
+const LABEL_COLOR: Color = Color::srgb(0.95, 0.93, 0.86);
+const LABEL_SHADOW: Color = Color::srgba(0.02, 0.02, 0.06, 0.9);
 
 // --- Layout -----------------------------------------------------------------
 
@@ -77,12 +70,8 @@ pub struct TrainLayout {
 impl TrainLayout {
     pub fn new(carriages: Vec<CarriageKind>) -> Self {
         let count = carriages.len();
-        let solids = carriages
-            .iter()
-            .enumerate()
-            .flat_map(|(i, &kind)| carriage_pieces(i, kind, count))
-            .filter(|p| p.solid)
-            .map(|p| p.rect)
+        let solids = (0..count)
+            .flat_map(|i| carriage_solids(i, count))
             .collect();
         Self { carriages, solids }
     }
@@ -125,27 +114,10 @@ impl TrainLayout {
     }
 }
 
-/// Un rettangolo della carrozza: serve sia per disegnare sia per le collisioni.
-struct Piece {
-    rect: Rect,
-    color: Color,
-    z: f32,
-    solid: bool,
-}
-
-impl Piece {
-    fn new(x0: f32, y0: f32, x1: f32, y1: f32, color: Color, z: f32, solid: bool) -> Self {
-        Self {
-            rect: Rect::new(x0, y0, x1, y1),
-            color,
-            z,
-            solid,
-        }
-    }
-}
-
-/// Tutti i pezzi della carrozza `index` (più il soffietto alla sua destra), in coordinate mondo.
-fn carriage_pieces(index: usize, kind: CarriageKind, count: usize) -> Vec<Piece> {
+/// Rettangoli solidi (pavimento, soffitto, pareti di testata e soffietto alla
+/// sua destra) della carrozza `index`, in coordinate mondo. La grafica è in
+/// `env_art.rs` e ricalca questi rettangoli.
+fn carriage_solids(index: usize, count: usize) -> Vec<Rect> {
     let x0 = TrainLayout::carriage_left(index);
     let x1 = x0 + CARRIAGE_LENGTH;
     let floor = FLOOR_Y;
@@ -153,150 +125,67 @@ fn carriage_pieces(index: usize, kind: CarriageKind, count: usize) -> Vec<Piece>
     let is_first = index == 0;
     let is_last = index + 1 == count;
 
-    let mut pieces = vec![
-        // Sfondo interno
-        Piece::new(
-            x0,
-            floor,
-            x1,
-            ceil,
-            carriage_tint(kind),
-            Z_BACKGROUND,
-            false,
-        ),
+    let mut solids = vec![
         // Pavimento e soffitto
-        Piece::new(
-            x0,
-            floor - WALL,
-            x1,
-            floor,
-            STRUCTURE_COLOR,
-            Z_STRUCTURE,
-            true,
-        ),
-        Piece::new(
-            x0,
-            ceil,
-            x1,
-            ceil + WALL,
-            STRUCTURE_COLOR,
-            Z_STRUCTURE,
-            true,
-        ),
+        Rect::new(x0, floor - WALL, x1, floor),
+        Rect::new(x0, ceil, x1, ceil + WALL),
     ];
-
     // Pareti di testata: piene alle estremità del treno, altrimenti solo
     // l'architrave sopra il vano porta.
-    let left_bottom = if is_first { floor } else { floor + DOOR_HEIGHT };
-    let right_bottom = if is_last { floor } else { floor + DOOR_HEIGHT };
-    pieces.push(Piece::new(
-        x0,
-        left_bottom,
-        x0 + WALL,
-        ceil,
-        STRUCTURE_COLOR,
-        Z_STRUCTURE,
-        true,
-    ));
-    pieces.push(Piece::new(
-        x1 - WALL,
-        right_bottom,
-        x1,
-        ceil,
-        STRUCTURE_COLOR,
-        Z_STRUCTURE,
-        true,
-    ));
-
-    // Finestrini decorativi sulla parete di fondo
-    const WINDOWS: usize = 4;
-    const WINDOW_W: f32 = 36.0;
-    let spacing = CARRIAGE_LENGTH / WINDOWS as f32;
-    for w in 0..WINDOWS {
-        let cx = x0 + spacing * (w as f32 + 0.5);
-        pieces.push(Piece::new(
-            cx - WINDOW_W / 2.0,
-            floor + 52.0,
-            cx + WINDOW_W / 2.0,
-            floor + 80.0,
-            WINDOW_COLOR,
-            Z_DECOR,
-            false,
-        ));
-    }
-
-    // Carrelli sotto il pavimento
-    for bx in [x0 + 40.0, x1 - 40.0] {
-        pieces.push(Piece::new(
-            bx - 24.0,
-            floor - WALL - 12.0,
-            bx + 24.0,
-            floor - WALL,
-            BOGIE_COLOR,
-            Z_DECOR,
-            false,
-        ));
-    }
-
-    // Soffietto verso la carrozza successiva
+    let (left_bottom, right_bottom) = end_wall_bottoms(is_first, is_last);
+    solids.push(Rect::new(x0, left_bottom, x0 + WALL, ceil));
+    solids.push(Rect::new(x1 - WALL, right_bottom, x1, ceil));
+    // Pedana e architrave del soffietto verso la carrozza successiva.
     if !is_last {
         let g1 = x1 + GANGWAY;
-        pieces.push(Piece::new(
-            x1,
-            floor,
-            g1,
-            floor + DOOR_HEIGHT,
-            GANGWAY_COLOR,
-            Z_BACKGROUND,
-            false,
-        ));
-        pieces.push(Piece::new(
-            x1,
-            floor - WALL,
-            g1,
-            floor,
-            STRUCTURE_COLOR,
-            Z_STRUCTURE,
-            true,
-        ));
-        pieces.push(Piece::new(
+        solids.push(Rect::new(x1, floor - WALL, g1, floor));
+        solids.push(Rect::new(
             x1,
             floor + DOOR_HEIGHT,
             g1,
             floor + DOOR_HEIGHT + WALL,
-            STRUCTURE_COLOR,
-            Z_STRUCTURE,
-            true,
         ));
     }
+    solids
+}
 
-    pieces
+/// Quota del bordo inferiore delle pareti di testata (sinistra, destra).
+fn end_wall_bottoms(is_first: bool, is_last: bool) -> (f32, f32) {
+    let door = FLOOR_Y + DOOR_HEIGHT;
+    (
+        if is_first { FLOOR_Y } else { door },
+        if is_last { FLOOR_Y } else { door },
+    )
 }
 
 // --- Plugin e spawn ---------------------------------------------------------
 
-/// Marca l'entità radice di una carrozza (i figli sono i suoi rettangoli).
+/// Marca l'entità radice di una carrozza (i figli sono i suoi sprite).
 #[derive(Component, Debug)]
 pub struct Carriage;
 
-/// Binario e terreno (ricreati con il treno quando cambia il mondo).
+/// Ruota di un carrello: il suo fotogramma cambia per farla girare.
 #[derive(Component, Debug)]
-struct Track;
+struct Wheel;
 
-/// Entità radice del treno: carrozze, binario e terreno.
-type TrainPart = Or<(With<Carriage>, With<Track>)>;
+/// Fotogrammi della rotazione delle ruote.
+#[derive(Resource, Default)]
+struct WheelFrames(Vec<Handle<Image>>);
 
 pub struct TrainPlugin;
 
 impl Plugin for TrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_track, spawn_carriages))
+        app.init_resource::<ArtCache>()
+            .init_resource::<WheelFrames>()
+            .add_systems(Startup, spawn_carriages)
             .add_systems(
                 PreUpdate,
                 rebuild_train
                     .in_set(WorldRebuildSet)
                     .run_if(on_message::<WorldReplaced>),
-            );
+            )
+            .add_systems(Update, spin_wheels);
     }
 
     /// Il layout nasce dalla sim, inserita da `SimBridgePlugin`: `finish` gira
@@ -312,27 +201,63 @@ impl Plugin for TrainPlugin {
 }
 
 /// Mondo sostituito (caricamento o nuova partita): il numero e il tipo delle
-/// carrozze possono cambiare, quindi layout, carrozze e binario si rifanno da capo.
+/// carrozze possono cambiare, quindi layout e carrozze si rifanno da capo.
 fn rebuild_train(
     mut commands: Commands,
     sim: Res<Sim>,
     mut layout: ResMut<TrainLayout>,
-    old: Query<Entity, TrainPart>,
+    old: Query<Entity, With<Carriage>>,
+    mut art: ResMut<ArtCache>,
+    mut wheels: ResMut<WheelFrames>,
+    mut images: Option<ResMut<Assets<Image>>>,
 ) {
     for entity in &old {
         commands.entity(entity).despawn();
     }
     *layout = TrainLayout::from_world(&sim.world);
-    spawn_track_entities(&mut commands, &layout);
-    spawn_carriage_entities(&mut commands, &layout, &sim.world);
+    spawn_carriage_entities(
+        &mut commands,
+        &layout,
+        &sim.world,
+        &mut art,
+        &mut wheels,
+        images.as_deref_mut(),
+    );
 }
 
 /// Crea le entità grafiche di ogni carrozza, raggruppate sotto una radice.
-fn spawn_carriages(mut commands: Commands, layout: Res<TrainLayout>, sim: Res<Sim>) {
-    spawn_carriage_entities(&mut commands, &layout, &sim.world);
+fn spawn_carriages(
+    mut commands: Commands,
+    layout: Res<TrainLayout>,
+    sim: Res<Sim>,
+    mut art: ResMut<ArtCache>,
+    mut wheels: ResMut<WheelFrames>,
+    mut images: Option<ResMut<Assets<Image>>>,
+) {
+    spawn_carriage_entities(
+        &mut commands,
+        &layout,
+        &sim.world,
+        &mut art,
+        &mut wheels,
+        images.as_deref_mut(),
+    );
 }
 
-fn spawn_carriage_entities(commands: &mut Commands, layout: &TrainLayout, world: &World) {
+fn spawn_carriage_entities(
+    commands: &mut Commands,
+    layout: &TrainLayout,
+    world: &World,
+    art: &mut ArtCache,
+    wheels: &mut WheelFrames,
+    mut images: Option<&mut Assets<Image>>,
+) {
+    wheels.0 = (0..env_art::WHEEL_FRAMES)
+        .map(|f| art.get(images.as_deref_mut(), ArtKey::Wheel(f), || env_art::wheel(f)))
+        .collect();
+    let bogie = art.get(images.as_deref_mut(), ArtKey::BogieFrame, env_art::bogie_frame);
+    let gangway = art.get(images.as_deref_mut(), ArtKey::Gangway, env_art::gangway);
+
     let count = layout.len();
     for (index, &kind) in layout.carriages.iter().enumerate() {
         let origin = Vec2::new(TrainLayout::carriage_left(index), FLOOR_Y);
@@ -340,6 +265,26 @@ fn spawn_carriage_entities(commands: &mut Commands, layout: &TrainLayout, world:
             Some(c) => format!("{} «{}»", c.kind, c.name),
             None => kind.name().to_string(),
         };
+        let interior = art.get(images.as_deref_mut(), ArtKey::Interior(kind), || {
+            env_art::interior(kind)
+        });
+        let body = art.get(images.as_deref_mut(), ArtKey::Body(kind), || {
+            env_art::body(kind)
+        });
+        let (left_bottom, right_bottom) = end_wall_bottoms(index == 0, index + 1 == count);
+        let mut ends = Vec::new();
+        for (bottom, right) in [(left_bottom, false), (right_bottom, true)] {
+            let door = bottom > FLOOR_Y;
+            let image = art.get(images.as_deref_mut(), ArtKey::EndWall { door }, || {
+                env_art::end_wall(door)
+            });
+            ends.push((image, bottom - FLOOR_Y, right));
+        }
+        let (glow_kind, strength) = env_art::glow_for(kind);
+        let glow = art.get(images.as_deref_mut(), ArtKey::Glow(glow_kind), || {
+            env_art::glow(glow_kind)
+        });
+
         commands
             .spawn((
                 Name::new(format!("Carrozza {} ({})", index + 1, title)),
@@ -348,12 +293,86 @@ fn spawn_carriage_entities(commands: &mut Commands, layout: &TrainLayout, world:
                 Visibility::default(),
             ))
             .with_children(|parent| {
-                for piece in carriage_pieces(index, kind, count) {
-                    // I pezzi sono in coordinate mondo: li riporto locali alla radice.
-                    let center = piece.rect.center() - origin;
+                let mid = CARRIAGE_LENGTH / 2.0;
+                // Parete di fondo con i finestrini e aloni delle lampade.
+                parent.spawn((
+                    InteriorArt,
+                    art_sprite(interior, Vec2::new(CARRIAGE_LENGTH, INTERIOR_HEIGHT)),
+                    Transform::from_xyz(mid, INTERIOR_HEIGHT / 2.0, Z_BACKGROUND),
+                ));
+                for x in env_art::LAMP_XS {
+                    let mut sprite = art_sprite(
+                        glow.clone(),
+                        Vec2::new(env_art::GLOW_W, env_art::GLOW_H),
+                    );
+                    sprite.color = Color::WHITE.with_alpha(strength * 0.4);
                     parent.spawn((
-                        Sprite::from_color(piece.color, piece.rect.size()),
-                        Transform::from_translation(center.extend(piece.z)),
+                        LampGlow { strength },
+                        sprite,
+                        Transform::from_xyz(x as f32, env_art::LAMP_Y - 12.0, Z_GLOW),
+                    ));
+                }
+                // Tetto, pavimento e telaio.
+                let body_h = env_art::ROOF_TOP - env_art::BODY_BOTTOM;
+                parent.spawn((
+                    ExteriorArt,
+                    art_sprite(body, Vec2::new(CARRIAGE_LENGTH, body_h)),
+                    Transform::from_xyz(mid, env_art::BODY_BOTTOM + body_h / 2.0, Z_STRUCTURE),
+                ));
+                // Pareti di testata.
+                for (image, bottom, right) in ends {
+                    let h = INTERIOR_HEIGHT - bottom;
+                    let mut sprite = art_sprite(image, Vec2::new(WALL, h));
+                    sprite.flip_x = right;
+                    let x = if right {
+                        CARRIAGE_LENGTH - WALL / 2.0
+                    } else {
+                        WALL / 2.0
+                    };
+                    parent.spawn((
+                        ExteriorArt,
+                        sprite,
+                        Transform::from_xyz(x, bottom + h / 2.0, Z_STRUCTURE),
+                    ));
+                }
+                // Carrelli con le ruote.
+                let rail_top = -WALL - env_art::BOGIE_H;
+                for bx in [env_art::BOGIE_INSET, CARRIAGE_LENGTH - env_art::BOGIE_INSET] {
+                    parent.spawn((
+                        ExteriorArt,
+                        art_sprite(
+                            bogie.clone(),
+                            Vec2::new(env_art::BOGIE_W, env_art::BOGIE_H),
+                        ),
+                        Transform::from_xyz(bx, rail_top + env_art::BOGIE_H / 2.0, Z_DECOR),
+                    ));
+                    for dx in [-env_art::WHEEL_OFFSET, env_art::WHEEL_OFFSET] {
+                        parent.spawn((
+                            Wheel,
+                            ExteriorArt,
+                            art_sprite(
+                                wheels.0.first().cloned().unwrap_or_default(),
+                                Vec2::splat(env_art::WHEEL_SIZE),
+                            ),
+                            Transform::from_xyz(
+                                bx + dx,
+                                rail_top + env_art::WHEEL_SIZE / 2.0,
+                                Z_DECOR + 0.1,
+                            ),
+                        ));
+                    }
+                }
+                // Soffietto verso la carrozza successiva.
+                if index + 1 < count {
+                    let h = env_art::GANGWAY_TOP - env_art::GANGWAY_BOTTOM;
+                    parent.spawn((
+                        ExteriorArt,
+                        art_sprite(gangway.clone(), Vec2::new(GANGWAY, h)),
+                        Transform::from_xyz(
+                            CARRIAGE_LENGTH + GANGWAY / 2.0,
+                            env_art::GANGWAY_BOTTOM + h / 2.0,
+                            Z_GANGWAY,
+                        ),
                     ));
                 }
 
@@ -365,40 +384,34 @@ fn spawn_carriage_entities(commands: &mut Commands, layout: &TrainLayout, world:
                         font_size: FontSize::Px(48.0),
                         ..default()
                     },
-                    TextColor(Color::srgb(0.10, 0.10, 0.14)),
-                    Transform::from_xyz(
-                        CARRIAGE_LENGTH / 2.0,
-                        INTERIOR_HEIGHT + WALL + 12.0,
-                        Z_LABEL,
-                    )
-                    .with_scale(Vec3::splat(0.25)),
+                    TextColor(LABEL_COLOR),
+                    Text2dShadow {
+                        offset: Vec2::new(4.0, -4.0),
+                        color: LABEL_SHADOW,
+                    },
+                    Transform::from_xyz(mid, env_art::ROOF_TOP + 9.0, Z_LABEL)
+                        .with_scale(Vec3::splat(0.25)),
                 ));
             });
     }
 }
 
-/// Binari e terreno sotto tutto il treno.
-fn spawn_track(mut commands: Commands, layout: Res<TrainLayout>) {
-    spawn_track_entities(&mut commands, &layout);
-}
-
-fn spawn_track_entities(commands: &mut Commands, layout: &TrainLayout) {
-    const MARGIN: f32 = 2000.0;
-    let (left, right) = layout.inner_bounds();
-    let width = right - left + 2.0 * MARGIN;
-    let center_x = (left + right) / 2.0;
-    let rail_top = FLOOR_Y - WALL - 12.0;
-
-    commands.spawn((
-        Name::new("Binario"),
-        Track,
-        Sprite::from_color(RAIL_COLOR, Vec2::new(width, 4.0)),
-        Transform::from_xyz(center_x, rail_top - 2.0, Z_DECOR),
-    ));
-    commands.spawn((
-        Name::new("Terreno"),
-        Track,
-        Sprite::from_color(GROUND_COLOR, Vec2::new(width, 200.0)),
-        Transform::from_xyz(center_x, rail_top - 4.0 - 100.0, Z_BACKGROUND),
-    ));
+/// Fa girare le ruote a velocità costante (il treno non si ferma mai).
+fn spin_wheels(
+    time: Res<Time<Real>>,
+    frames: Res<WheelFrames>,
+    mut wheels: Query<&mut Sprite, With<Wheel>>,
+    mut last: Local<Option<usize>>,
+) {
+    if frames.0.is_empty() {
+        return;
+    }
+    let frame = (time.elapsed_secs_f64() * f64::from(WHEEL_FPS)) as usize % frames.0.len();
+    if *last == Some(frame) {
+        return;
+    }
+    *last = Some(frame);
+    for mut sprite in &mut wheels {
+        sprite.image = frames.0[frame].clone();
+    }
 }
