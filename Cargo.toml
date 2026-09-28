@@ -10,5 +10,7 @@ version = "0.1.0"
 [profile.dev]
 opt-level = 1
 
+# Niente debuginfo per le dipendenze: target/ molto più piccolo, i backtrace del nostro codice restano completi
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
