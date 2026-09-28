@@ -16,8 +16,9 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use egui_plot::{Bar, BarChart, Corner, FilledArea, HLine, Legend, Line, LineStyle, Plot};
 use sim::{DeathCause, ItemKind, LifeStage, Stats, World};
 
+use crate::saves::WorldRebuildSet;
 use crate::sim_bridge::SimTickSet;
-use crate::state::Sim;
+use crate::state::{Sim, WorldReplaced};
 use crate::ui::{PointerCheck, year_of};
 
 /// Campioni tenuti al massimo prima di dimezzarli (200 anni da 12 giorni).
@@ -62,6 +63,12 @@ impl Plugin for PopulationPlugin {
         app.init_resource::<PopulationWindow>()
             .init_resource::<PopulationHistory>()
             .add_systems(Update, (toggle_window, sample_population.after(SimTickSet)))
+            .add_systems(
+                PreUpdate,
+                reset_history
+                    .in_set(WorldRebuildSet)
+                    .run_if(on_message::<WorldReplaced>),
+            )
             .add_systems(
                 EguiPrimaryContextPass,
                 population_window.before(PointerCheck),
@@ -244,6 +251,11 @@ fn toggle_window(keys: Res<ButtonInput<KeyCode>>, mut window: ResMut<PopulationW
     if keys.just_pressed(KeyCode::KeyG) {
         window.open = !window.open;
     }
+}
+
+/// Mondo sostituito: la serie storica riparte dal mondo caricato.
+fn reset_history(mut history: ResMut<PopulationHistory>) {
+    *history = PopulationHistory::default();
 }
 
 fn sample_population(sim: Res<Sim>, mut history: ResMut<PopulationHistory>) {

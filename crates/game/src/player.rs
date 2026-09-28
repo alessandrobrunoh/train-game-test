@@ -65,12 +65,26 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-fn spawn_player(mut commands: Commands) {
-    // Parte al centro della prima carrozza, appoggiato al pavimento.
-    let start = Vec2::new(
+impl Body {
+    /// Sposta il corpo di colpo (caricamento di una partita), da fermo.
+    pub fn teleport(&mut self, position: Vec2) {
+        self.position = position;
+        self.previous = position;
+        self.velocity = Vec2::ZERO;
+        self.grounded = false;
+    }
+}
+
+/// Dove comincia il giocatore: al centro della prima carrozza, appoggiato al pavimento.
+pub fn start_position() -> Vec2 {
+    Vec2::new(
         TrainLayout::carriage_center_x(0),
         FLOOR_Y + PLAYER_SIZE.y / 2.0,
-    );
+    )
+}
+
+fn spawn_player(mut commands: Commands) {
+    let start = start_position();
     commands.spawn((
         Name::new("Giocatore"),
         Player,

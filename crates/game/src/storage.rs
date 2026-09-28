@@ -17,7 +17,8 @@ use bevy::text::Justify;
 use sim::{CarriageId, CarriageKind, ItemKind, SimParams, StationKind, World};
 
 use crate::npc_render::visible_window;
-use crate::state::Sim;
+use crate::saves::WorldRebuildSet;
+use crate::state::{Sim, WorldReplaced};
 use crate::stations::{StationLayout, interior_range};
 use crate::train::{FLOOR_Y, TrainLayout};
 
@@ -172,13 +173,40 @@ impl Plugin for StoragePlugin {
             TimerMode::Repeating,
         )))
         .add_systems(Startup, spawn_storage)
+        .add_systems(
+            PreUpdate,
+            rebuild_storage
+                .in_set(WorldRebuildSet)
+                .after(crate::stations::rebuild_stations)
+                .run_if(on_message::<WorldReplaced>),
+        )
         .add_systems(Update, refresh_storage);
     }
 }
 
+/// Radice del magazzino di una carrozza (scaffale, casse, etichetta, merce).
+#[derive(Component)]
+struct StorageRoot;
+
+/// Mondo sostituito: magazzini rifatti da capo (dopo le postazioni, per i banconi).
+fn rebuild_storage(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    stations: Res<StationLayout>,
+    old: Query<Entity, With<StorageRoot>>,
+) {
+    for entity in &old {
+        commands.entity(entity).despawn();
+    }
+    spawn_storage_entities(&mut commands, &sim.world, &stations);
+}
+
 /// Crea scaffali, casse, etichette e merce sui banconi di ogni carrozza.
 fn spawn_storage(mut commands: Commands, sim: Res<Sim>, stations: Res<StationLayout>) {
-    let world = &sim.world;
+    spawn_storage_entities(&mut commands, &sim.world, &stations);
+}
+
+fn spawn_storage_entities(commands: &mut Commands, world: &World, stations: &StationLayout) {
     let (x0, x1) = storage_range();
     let crate_w = (STORAGE_WIDTH - 2.0 * PAD - (COLUMNS - 1) as f32 * CRATE_GAP) / COLUMNS as f32;
     let crate_h = (STORAGE_HEIGHT - 2.0 * PAD - (ROWS - 1) as f32 * CRATE_GAP) / ROWS as f32;
@@ -193,6 +221,7 @@ fn spawn_storage(mut commands: Commands, sim: Res<Sim>, stations: Res<StationLay
         commands
             .spawn((
                 Name::new(format!("Magazzino carrozza {}", c.id)),
+                StorageRoot,
                 Transform::from_translation(origin.extend(0.0)),
                 Visibility::default(),
             ))

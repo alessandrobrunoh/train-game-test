@@ -32,7 +32,8 @@ use sim::{Action, CarriageId, Job, LifeStage, Npc, NpcId, Sex, StationKind, Worl
 
 use crate::camera::follow_target;
 use crate::life_fx::FadingOut;
-use crate::state::{NpcSprite, PointerOverUi, SelectedNpc, Sim};
+use crate::saves::WorldRebuildSet;
+use crate::state::{NpcSprite, PointerOverUi, SelectedNpc, Sim, WorldReplaced};
 use crate::stations::{BED_TOP, StationLayout, interior_range};
 use crate::train::{CARRIAGE_PITCH, FLOOR_Y, TrainLayout};
 
@@ -127,6 +128,12 @@ impl Plugin for NpcRenderPlugin {
         app.init_resource::<NpcSpriteIndex>()
             .add_systems(Startup, spawn_marker)
             .add_systems(
+                PreUpdate,
+                reset_npc_sprites
+                    .in_set(WorldRebuildSet)
+                    .run_if(on_message::<WorldReplaced>),
+            )
+            .add_systems(
                 Update,
                 (
                     pick_npc,
@@ -159,6 +166,9 @@ struct NpcHair;
 
 /// Filtro delle query sugli attrezzi, disgiunto dalla camera.
 type ToolOnly = (With<NpcTool>, Without<Camera2d>);
+
+/// Sprite degli NPC, vivi o che stanno svanendo.
+type SpriteOrFading = Or<(With<NpcSprite>, With<FadingOut>)>;
 
 /// Filtro delle query sui capelli, disgiunto da corpi e bordi.
 type HairOnly = (With<NpcHair>, Without<NpcSprite>, Without<NpcOutline>);
@@ -554,6 +564,19 @@ fn spawn_marker(mut commands: Commands) {
             .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
         Visibility::Hidden,
     ));
+}
+
+/// Mondo sostituito: gli id degli NPC ora indicano altre persone, quindi via
+/// tutti gli sprite (senza dissolvenza); `sync_npc_sprites` li ricrea.
+fn reset_npc_sprites(
+    mut commands: Commands,
+    mut index: ResMut<NpcSpriteIndex>,
+    sprites: Query<Entity, SpriteOrFading>,
+) {
+    for entity in &sprites {
+        commands.entity(entity).despawn();
+    }
+    index.entities.clear();
 }
 
 /// Crea, aggiorna e rimuove gli sprite degli NPC della finestra visibile.

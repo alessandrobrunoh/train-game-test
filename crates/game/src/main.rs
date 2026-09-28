@@ -3,6 +3,8 @@
 
 mod camera;
 mod fonts;
+mod history_sync;
+mod history_ui;
 mod hud;
 mod interaction;
 mod inventory;
@@ -10,6 +12,8 @@ mod life_fx;
 mod npc_render;
 mod player;
 mod population;
+mod save_file;
+mod saves;
 mod sim_bridge;
 mod state;
 mod stations;
@@ -38,10 +42,14 @@ fn main() {
                 // Filtro "nearest" per le future texture in pixel art.
                 .set(ImagePlugin::default_nearest()),
         )
+        // Al massimo 15 plugin per tupla: la prima parte crea stato, mondo e run.
         .add_plugins((
             fonts::FontsPlugin,
             state::StatePlugin,
             sim_bridge::SimBridgePlugin,
+            saves::SavesPlugin::default(),
+        ))
+        .add_plugins((
             train::TrainPlugin,
             stations::StationsPlugin,
             storage::StoragePlugin,
@@ -54,6 +62,8 @@ fn main() {
             inventory::InventoryPlugin,
             life_fx::LifeFxPlugin,
             population::PopulationPlugin,
+            history_sync::HistorySyncPlugin,
+            history_ui::HistoryUiPlugin,
         ))
         .run();
 }

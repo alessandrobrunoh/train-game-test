@@ -4,6 +4,8 @@
 //! `ui.rs` mostra controlli del tempo, ispettore ed eventi, `interaction.rs`
 //! e `inventory.rs` gestiscono cosa il giocatore prende, compra e regala.
 
+use std::path::PathBuf;
+
 use bevy::prelude::*;
 use sim::{ItemKind, NpcId, Stock, UtilityBrain, World};
 
@@ -19,7 +21,8 @@ impl Plugin for StatePlugin {
             .init_resource::<FollowNpc>()
             .init_resource::<SimPerf>()
             .init_resource::<PlayerInventory>()
-            .init_resource::<PointerOverUi>();
+            .init_resource::<PointerOverUi>()
+            .add_message::<WorldReplaced>();
     }
 }
 
@@ -112,3 +115,20 @@ impl PlayerInventory {
         true
     }
 }
+
+/// Partita in corso: una "run" nasce con una nuova partita e continua nei
+/// salvataggi. Lo storico SQLite (`history`) e i salvataggi (`saves`) vivono
+/// nella sua cartella. La crea e la aggiorna `saves.rs`.
+#[derive(Resource, Debug, Clone)]
+pub struct RunInfo {
+    /// Identificativo stabile della run, usato anche come nome della cartella.
+    pub run_id: String,
+    /// Cartella della run, ad esempio `.../TrainGame/runs/<run_id>/`.
+    pub dir: PathBuf,
+}
+
+/// Inviato quando `Sim` viene sostituito da un caricamento o da una nuova
+/// partita: chi tiene uno stato derivato dal mondo (storico, grafici,
+/// sprite, selezione) deve ricostruirlo. `RunInfo` è già aggiornato.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct WorldReplaced;

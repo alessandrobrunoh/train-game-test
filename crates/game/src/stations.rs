@@ -14,7 +14,8 @@
 use bevy::prelude::*;
 use sim::{CarriageId, Station, StationId, StationKind, World};
 
-use crate::state::Sim;
+use crate::saves::WorldRebuildSet;
+use crate::state::{Sim, WorldReplaced};
 use crate::storage::{has_storage, storage_range};
 use crate::train::{CARRIAGE_LENGTH, FLOOR_Y, INTERIOR_HEIGHT, TrainLayout, WALL};
 
@@ -264,7 +265,12 @@ pub struct StationsPlugin;
 
 impl Plugin for StationsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_stations);
+        app.add_systems(Startup, spawn_stations).add_systems(
+            PreUpdate,
+            rebuild_stations
+                .in_set(WorldRebuildSet)
+                .run_if(on_message::<WorldReplaced>),
+        );
     }
 
     /// Come il layout del treno, nasce dalla sim dopo il `build` di tutti i plugin.
@@ -315,13 +321,36 @@ fn station_rects(spot: &StationSpot) -> Vec<(Vec2, Vec2, Color)> {
     }
 }
 
+/// Radice delle postazioni di una carrozza (i figli sono i rettangoli).
+#[derive(Component, Debug)]
+pub(crate) struct StationsRoot;
+
+/// Mondo sostituito: posti e grafica delle postazioni si rifanno da capo.
+pub(crate) fn rebuild_stations(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    mut layout: ResMut<StationLayout>,
+    old: Query<Entity, With<StationsRoot>>,
+) {
+    for entity in &old {
+        commands.entity(entity).despawn();
+    }
+    *layout = StationLayout::from_world(&sim.world);
+    spawn_station_entities(&mut commands, &layout);
+}
+
 /// Disegna le postazioni di ogni carrozza, raggruppate sotto una radice.
 fn spawn_stations(mut commands: Commands, layout: Res<StationLayout>) {
+    spawn_station_entities(&mut commands, &layout);
+}
+
+fn spawn_station_entities(commands: &mut Commands, layout: &StationLayout) {
     for (index, spots) in layout.carriages.iter().enumerate() {
         let origin = Vec2::new(TrainLayout::carriage_left(index), FLOOR_Y);
         commands
             .spawn((
                 Name::new(format!("Postazioni carrozza {}", index + 1)),
+                StationsRoot,
                 Transform::from_translation(origin.extend(0.0)),
                 Visibility::default(),
             ))

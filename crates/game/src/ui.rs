@@ -16,7 +16,9 @@ use sim::{
     Stats, World,
 };
 
+use crate::history_ui::HistoryWindow;
 use crate::population::PopulationWindow;
+use crate::saves::SavesWindow;
 use crate::sim_bridge::{SPEEDS, seconds_per_year};
 use crate::state::{FollowNpc, PointerOverUi, SelectedNpc, Sim, SimClock, SimPerf};
 use crate::storage::{item_color, plural_title, storable_items};
@@ -110,12 +112,15 @@ fn refresh_cache(time: Res<Time<Real>>, sim: Option<Res<Sim>>, mut cache: ResMut
 // Pannello del tempo (in alto al centro)
 // ----------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)] // sistema Bevy: un parametro per finestra
 fn time_panel(
     mut contexts: EguiContexts,
     sim: Option<Res<Sim>>,
     mut clock: ResMut<SimClock>,
     perf: Res<SimPerf>,
     mut population: ResMut<PopulationWindow>,
+    mut saves: ResMut<SavesWindow>,
+    mut history: ResMut<HistoryWindow>,
     cache: Res<UiCache>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -160,6 +165,10 @@ fn time_panel(
                 }
                 ui.separator();
                 ui.toggle_value(&mut population.open, "Popolazione (G)");
+                ui.toggle_value(&mut history.open, "Storia (H)");
+                if ui.toggle_value(&mut saves.open, "Partite (Esc)").changed() {
+                    saves.refresh();
+                }
             });
             if perf.behind && !clock.paused {
                 let days_per_year = sim.as_ref().map_or(12, |s| s.world.params.days_per_year);
@@ -214,6 +223,7 @@ fn inspector(
     sim: Option<Res<Sim>>,
     mut selected: ResMut<SelectedNpc>,
     mut follow: ResMut<FollowNpc>,
+    mut history: ResMut<HistoryWindow>,
 ) {
     let Some(id) = selected.0 else {
         return;
@@ -224,6 +234,7 @@ fn inspector(
     let mut open = true;
     let mut clicked = None;
     let mut following = follow.0;
+    let mut show_history = false;
     // Non più alto dello schermo: il resto scorre.
     let max_height = (ctx.content_rect().height() - 4.0 * MARGIN - 40.0).max(120.0);
     egui::Window::new("Ispettore")
@@ -241,7 +252,8 @@ fn inspector(
                     egui::ScrollArea::vertical()
                         .max_height(max_height)
                         .show(ui, |ui| {
-                            clicked = npc_details(ui, &sim.world, npc, &mut following);
+                            clicked =
+                                npc_details(ui, &sim.world, npc, &mut following, &mut show_history);
                         });
                 }
                 None => missing_npc(ui, &sim.world, id),
@@ -249,6 +261,9 @@ fn inspector(
         });
     if follow.0 != following {
         follow.0 = following;
+    }
+    if show_history {
+        history.show(id);
     }
     if !open {
         selected.0 = None;
@@ -258,7 +273,13 @@ fn inspector(
 }
 
 /// Dettagli dell'NPC; restituisce il parente o amico cliccato, se c'è.
-fn npc_details(ui: &mut egui::Ui, world: &World, npc: &Npc, following: &mut bool) -> Option<NpcId> {
+fn npc_details(
+    ui: &mut egui::Ui,
+    world: &World,
+    npc: &Npc,
+    following: &mut bool,
+    show_history: &mut bool,
+) -> Option<NpcId> {
     let now = world.clock;
     let mut clicked = None;
     ui.heading(&npc.name);
@@ -279,6 +300,13 @@ fn npc_details(ui: &mut egui::Ui, world: &World, npc: &Npc, following: &mut bool
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.toggle_value(following, "Segui (F)")
                 .on_hover_text("La camera segue questo NPC invece del giocatore");
+            if ui
+                .button("Storia (H)")
+                .on_hover_text("Biografia e albero genealogico")
+                .clicked()
+            {
+                *show_history = true;
+            }
         });
     });
     ui.separator();

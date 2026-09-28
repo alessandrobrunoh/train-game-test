@@ -8,7 +8,8 @@
 use bevy::prelude::*;
 use sim::{CarriageKind, World};
 
-use crate::state::Sim;
+use crate::saves::WorldRebuildSet;
+use crate::state::{Sim, WorldReplaced};
 
 // --- Costanti di layout -----------------------------------------------------
 
@@ -278,11 +279,24 @@ fn carriage_pieces(index: usize, kind: CarriageKind, count: usize) -> Vec<Piece>
 #[derive(Component, Debug)]
 pub struct Carriage;
 
+/// Binario e terreno (ricreati con il treno quando cambia il mondo).
+#[derive(Component, Debug)]
+struct Track;
+
+/// Entità radice del treno: carrozze, binario e terreno.
+type TrainPart = Or<(With<Carriage>, With<Track>)>;
+
 pub struct TrainPlugin;
 
 impl Plugin for TrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_track, spawn_carriages));
+        app.add_systems(Startup, (spawn_track, spawn_carriages))
+            .add_systems(
+                PreUpdate,
+                rebuild_train
+                    .in_set(WorldRebuildSet)
+                    .run_if(on_message::<WorldReplaced>),
+            );
     }
 
     /// Il layout nasce dalla sim, inserita da `SimBridgePlugin`: `finish` gira
@@ -297,12 +311,32 @@ impl Plugin for TrainPlugin {
     }
 }
 
+/// Mondo sostituito (caricamento o nuova partita): il numero e il tipo delle
+/// carrozze possono cambiare, quindi layout, carrozze e binario si rifanno da capo.
+fn rebuild_train(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    mut layout: ResMut<TrainLayout>,
+    old: Query<Entity, TrainPart>,
+) {
+    for entity in &old {
+        commands.entity(entity).despawn();
+    }
+    *layout = TrainLayout::from_world(&sim.world);
+    spawn_track_entities(&mut commands, &layout);
+    spawn_carriage_entities(&mut commands, &layout, &sim.world);
+}
+
 /// Crea le entità grafiche di ogni carrozza, raggruppate sotto una radice.
 fn spawn_carriages(mut commands: Commands, layout: Res<TrainLayout>, sim: Res<Sim>) {
+    spawn_carriage_entities(&mut commands, &layout, &sim.world);
+}
+
+fn spawn_carriage_entities(commands: &mut Commands, layout: &TrainLayout, world: &World) {
     let count = layout.len();
     for (index, &kind) in layout.carriages.iter().enumerate() {
         let origin = Vec2::new(TrainLayout::carriage_left(index), FLOOR_Y);
-        let title = match sim.world.carriages.get(index) {
+        let title = match world.carriages.get(index) {
             Some(c) => format!("{} «{}»", c.kind, c.name),
             None => kind.name().to_string(),
         };
@@ -345,6 +379,10 @@ fn spawn_carriages(mut commands: Commands, layout: Res<TrainLayout>, sim: Res<Si
 
 /// Binari e terreno sotto tutto il treno.
 fn spawn_track(mut commands: Commands, layout: Res<TrainLayout>) {
+    spawn_track_entities(&mut commands, &layout);
+}
+
+fn spawn_track_entities(commands: &mut Commands, layout: &TrainLayout) {
     const MARGIN: f32 = 2000.0;
     let (left, right) = layout.inner_bounds();
     let width = right - left + 2.0 * MARGIN;
@@ -353,11 +391,13 @@ fn spawn_track(mut commands: Commands, layout: Res<TrainLayout>) {
 
     commands.spawn((
         Name::new("Binario"),
+        Track,
         Sprite::from_color(RAIL_COLOR, Vec2::new(width, 4.0)),
         Transform::from_xyz(center_x, rail_top - 2.0, Z_DECOR),
     ));
     commands.spawn((
         Name::new("Terreno"),
+        Track,
         Sprite::from_color(GROUND_COLOR, Vec2::new(width, 200.0)),
         Transform::from_xyz(center_x, rail_top - 4.0 - 100.0, Z_BACKGROUND),
     ));

@@ -18,7 +18,8 @@ use sim::{Action, Event, EventKind, NpcId};
 
 use crate::inventory::InventoryWindow;
 use crate::npc_render::{NpcSpriteIndex, NpcVisual};
-use crate::state::{NpcSprite, SelectedNpc, Sim};
+use crate::saves::WorldRebuildSet;
+use crate::state::{NpcSprite, SelectedNpc, Sim, WorldReplaced};
 use crate::ui::{EventFilter, MARGIN, PointerCheck, event_color, event_message, year_of};
 
 /// Durata della dissolvenza di chi muore (secondi).
@@ -58,6 +59,12 @@ pub struct LifeFxPlugin;
 impl Plugin for LifeFxPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Toasts>()
+            .add_systems(
+                PreUpdate,
+                reset_life_fx
+                    .in_set(WorldRebuildSet)
+                    .run_if(on_message::<WorldReplaced>),
+            )
             .add_systems(
                 Update,
                 (read_life_events, chat_hearts, move_icons, fade_out_dead)
@@ -224,6 +231,19 @@ fn head_of(
 
 // --- Sistemi ------------------------------------------------------------------
 
+/// Mondo sostituito: via notifiche e icone del mondo precedente (chi svanisce
+/// lo toglie `npc_render`).
+fn reset_life_fx(
+    mut commands: Commands,
+    mut toasts: ResMut<Toasts>,
+    icons: Query<Entity, With<FloatingIcon>>,
+) {
+    toasts.0.clear();
+    for entity in &icons {
+        commands.entity(entity).despawn();
+    }
+}
+
 /// Legge gli eventi nuovi: notifiche e icone sopra chi nasce o si mette in coppia.
 #[allow(clippy::too_many_arguments)]
 fn read_life_events(
@@ -234,11 +254,16 @@ fn read_life_events(
     index: Res<NpcSpriteIndex>,
     sprites: Query<(&Transform, &NpcVisual), With<NpcSprite>>,
     mut toasts: ResMut<Toasts>,
+    mut replaced: MessageReader<WorldReplaced>,
     mut cursor: Local<Option<u64>>,
 ) {
     let world = &sim.world;
     let total = world.events_total();
-    // Al primo frame si parte dagli eventi già presenti, senza notificarli.
+    // Al primo frame, e quando il mondo viene sostituito, si parte dagli
+    // eventi già presenti, senza notificarli.
+    if replaced.read().count() > 0 {
+        *cursor = None;
+    }
     let cursor = cursor.get_or_insert(total);
     let now = time.elapsed_secs_f64();
     for event in new_events(&world.events, total, cursor) {
