@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/sim", "crates/game"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+# Bevy: compila le dipendenze ottimizzate anche in debug, altrimenti il gioco è lentissimo
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

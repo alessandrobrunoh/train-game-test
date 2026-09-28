@@ -1,0 +1,12 @@
+[package]
+name = "sim"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+rand = { version = "0.10", default-features = false, features = ["std"] }
+rand_chacha = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
