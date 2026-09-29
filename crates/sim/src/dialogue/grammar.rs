@@ -107,6 +107,7 @@ pub fn article(word: &str, feminine: bool, plural: bool) -> Article {
 /// Head words of place names that are feminine plural although they end in -e.
 const FEMININE_PLURALS: &[&str] = &[
     "cuccette", "brande", "carrozze", "cucine", "serre", "officine", "mense", "botteghe", "stanze",
+    "erbe",
 ];
 
 /// Gender and number guessed from a noun: (feminine, plural).
@@ -186,6 +187,81 @@ pub fn prep_in(name: &str) -> String {
 /// "del Refettorio", "della Brace", "dell'Alveare", "delle Brande".
 pub fn prep_di(name: &str) -> String {
     place_with(Some(Prep::Di), name)
+}
+
+/// Gender and number of an item from its catalog names (`name` singular,
+/// `plural`): (feminine, plural). Mass nouns ("cotone", "tè") have the same
+/// name for both and stay singular.
+pub fn item_noun(name: &str, plural: &str) -> (bool, bool) {
+    let (feminine, many) = guess_noun(name);
+    (feminine, many || plural != name)
+}
+
+/// Regular Italian plural of a noun: "barra" → "barre", "pezzo" → "pezzi",
+/// "pacco" → "pacchi", "mensola" → "mensole", "razione" → "razioni".
+pub fn pluralize(word: &str) -> String {
+    let stem = |n: usize| &word[..word.len() - n];
+    for (end, plural) in [
+        ("ca", "che"),
+        ("ga", "ghe"),
+        ("co", "chi"),
+        ("go", "ghi"),
+        ("a", "e"),
+        ("o", "i"),
+        ("e", "i"),
+    ] {
+        if word.ends_with(end) {
+            return format!("{}{plural}", stem(end.len()));
+        }
+    }
+    word.to_string()
+}
+
+/// A small number in words ("due", "tre"…), digits from 11 on.
+pub fn number_word(n: u32) -> String {
+    const WORDS: [&str; 11] = [
+        "zero", "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci",
+    ];
+    WORDS
+        .get(n as usize)
+        .map_or_else(|| n.to_string(), |w| w.to_string())
+}
+
+/// `n` units of an item whose single unit reads `one` ("una barra di
+/// metallo", "un attrezzo") and whose plural name is `plural`: "una barra di
+/// metallo", "due barre di metallo", "tre attrezzi".
+pub fn counted(n: u32, one: &str, plural: &str) -> String {
+    if n == 1 {
+        return one.to_string();
+    }
+    let number = number_word(n);
+    let mut words = one.splitn(3, ' ');
+    match (words.next(), words.next(), words.next()) {
+        (Some(_article), Some(unit), Some(rest)) if rest.starts_with("di ") => {
+            format!("{number} {} {rest}", pluralize(unit))
+        }
+        _ => format!("{number} {plural}"),
+    }
+}
+
+/// "N gettoni", "un gettone".
+pub fn tokens(n: u32) -> String {
+    if n == 1 {
+        "un gettone".to_string()
+    } else {
+        format!("{n} gettoni")
+    }
+}
+
+/// An hour with "da" (`prep_da`) or "a": "dalle 7", "alle 16"; written with
+/// digits only 1 elides ("dall'1", "all'1").
+pub fn at_hour(prep_da: bool, hour: u32) -> String {
+    match (prep_da, hour) {
+        (true, 1) => "dall'1".to_string(),
+        (false, 1) => "all'1".to_string(),
+        (true, h) => format!("dalle {h}"),
+        (false, h) => format!("alle {h}"),
+    }
 }
 
 /// A family by its surname: "Rossi" → (I, "Rossi"), "Esposito" → (Gli, ..).
@@ -428,6 +504,40 @@ mod tests {
         assert_eq!(capitalize("al Nido c'è gente."), "Al Nido c'è gente.");
         assert_eq!(capitalize("…già."), "…già.");
         assert_eq!(tidy(" Ciao  Anna "), "Ciao Anna");
+    }
+
+    #[test]
+    fn counts_and_plurals() {
+        assert_eq!(pluralize("barra"), "barre");
+        assert_eq!(pluralize("pezzo"), "pezzi");
+        assert_eq!(pluralize("pacco"), "pacchi");
+        assert_eq!(pluralize("razione"), "razioni");
+        assert_eq!(
+            counted(1, "una barra di metallo", "metallo"),
+            "una barra di metallo"
+        );
+        assert_eq!(
+            counted(2, "una barra di metallo", "metallo"),
+            "due barre di metallo"
+        );
+        assert_eq!(
+            counted(3, "un pezzo di rottame", "rottami"),
+            "tre pezzi di rottame"
+        );
+        assert_eq!(
+            counted(2, "una cassetta di verdura", "verdure"),
+            "due cassette di verdura"
+        );
+        assert_eq!(counted(2, "un attrezzo", "attrezzi"), "due attrezzi");
+        assert_eq!(counted(12, "una razione", "razioni"), "12 razioni");
+        assert_eq!(item_noun("verdura", "verdure"), (true, true));
+        assert_eq!(item_noun("cotone", "cotone"), (false, false));
+        assert_eq!(item_noun("erbe", "erbe"), (true, true));
+        assert_eq!(item_noun("tè", "tè"), (false, false));
+        assert_eq!(tokens(1), "un gettone");
+        assert_eq!(tokens(12), "12 gettoni");
+        assert_eq!(at_hour(true, 7), "dalle 7");
+        assert_eq!(at_hour(false, 1), "all'1");
     }
 
     #[test]

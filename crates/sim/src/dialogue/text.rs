@@ -177,10 +177,10 @@ enum FollowKind {
 
 /// A tiny deterministic generator (SplitMix64) for picking variants: much
 /// cheaper to seed than the world's ChaCha, and text needs no more.
-struct Mix(u64);
+pub(super) struct Mix(pub(super) u64);
 
 impl Mix {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -189,16 +189,16 @@ impl Mix {
     }
 
     /// Uniform in `0..n` (n > 0).
-    fn below(&mut self, n: usize) -> usize {
+    pub(super) fn below(&mut self, n: usize) -> usize {
         (self.next() % n as u64) as usize
     }
 
     /// True with probability `p`.
-    fn chance(&mut self, p: f64) -> bool {
+    pub(super) fn chance(&mut self, p: f64) -> bool {
         ((self.next() >> 11) as f64 / (1u64 << 53) as f64) < p
     }
 
-    fn one_of<T: Copy>(&mut self, items: &[T]) -> T {
+    pub(super) fn one_of<T: Copy>(&mut self, items: &[T]) -> T {
         items[self.below(items.len())]
     }
 }
@@ -971,7 +971,7 @@ fn pick(
 }
 
 /// "in serra", "in cucina"...: where someone with `job` works.
-fn workplace(job: Option<Job>) -> &'static str {
+pub(super) fn workplace(job: Option<Job>) -> &'static str {
     match job {
         Some(Job::Contadino) => "in serra",
         Some(Job::Cuoco) => "in cucina",
@@ -981,7 +981,7 @@ fn workplace(job: Option<Job>) -> &'static str {
     }
 }
 
-fn job_word(job: Option<Job>, sex: Sex) -> &'static str {
+pub(super) fn job_word(job: Option<Job>, sex: Sex) -> &'static str {
     match job {
         Some(Job::Contadino) => sex.pick("contadina", "contadino"),
         Some(Job::Cuoco) => sex.pick("cuoca", "cuoco"),
@@ -1003,7 +1003,7 @@ fn news_item(news: Option<News>) -> (&'static str, bool) {
     }
 }
 
-fn greeting(hour: u32) -> &'static str {
+pub(super) fn greeting(hour: u32) -> &'static str {
     if (5..14).contains(&hour) {
         "Buongiorno"
     } else {
@@ -1011,7 +1011,7 @@ fn greeting(hour: u32) -> &'static str {
     }
 }
 
-fn goodbye(hour: u32) -> &'static str {
+pub(super) fn goodbye(hour: u32) -> &'static str {
     match hour {
         5..=16 => "Buona giornata",
         17..=21 => "Buona serata",
@@ -1021,7 +1021,7 @@ fn goodbye(hour: u32) -> &'static str {
 
 /// Appends `value` after `out`, turning a joining "e"/"a" into "ed"/"ad"
 /// before a vowel ("Bruno ed Elena", "ad Anna").
-fn push_joined(out: &mut String, value: &str) {
+pub(super) fn push_joined(out: &mut String, value: &str) {
     for (word, euphonic) in [("e", grammar::e_ed(value)), ("a", grammar::a_ad(value))] {
         if euphonic.len() == word.len() {
             continue;
@@ -2224,7 +2224,7 @@ const KID_CLOSE: Pool = &["Ciao ciao!", "Vado a giocare!", "Ciao, {n}!"];
 
 // Children.
 
-const BABBLE: Pool = &["Gu-gu!", "Ah-ah!", "Bla!", "Pappa!", "Mmmh!", "Eeeh!"];
+pub(super) const BABBLE: Pool = &["Gu-gu!", "Ah-ah!", "Bla!", "Pappa!", "Mmmh!", "Eeeh!"];
 const KID: Pool = &[
     "Posso andare a giocare?",
     "Uffa, che noia!",
@@ -2815,6 +2815,50 @@ const ALL_POOLS: &[Pool] = &[
     TO_BABY_OPEN,
     TO_BABY,
 ];
+
+/// A piece of news told by `speaker` to the player (whose first name is
+/// `listener`) in the chat ([`crate::chat`]): the same openers as the
+/// conversations between NPCs, as news or, with `gossip`, as gossip. `place`
+/// is where it happened (or where they are). None if no template fits.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn news_line(
+    news: News,
+    about: Option<&Subject>,
+    gossip: bool,
+    speaker: Voice,
+    listener: &str,
+    place: &str,
+    hour: u32,
+    seed: u64,
+) -> Option<String> {
+    let player = Voice {
+        id: NpcId(u32::MAX),
+        first: listener,
+        sex: Sex::Male,
+        age: 30,
+        job: None,
+        personality: Personality::default(),
+    };
+    let script = Script {
+        topic: if gossip { Topic::Gossip } else { Topic::News },
+        tone: Tone::Friendly,
+        news: Some(news),
+        a: speaker,
+        b: player,
+        tie: None,
+        about,
+        fond: true,
+        need: Need::Loneliness,
+        place,
+        hour,
+    };
+    let pool = if gossip && about.is_some() {
+        gossip_open(news)
+    } else {
+        news_open(news, about.is_some())
+    };
+    pick(pool, &script, Side::A, &[], &mut Mix(seed)).map(|(_, text)| text)
+}
 
 /// Number of distinct line templates.
 pub fn template_count() -> usize {

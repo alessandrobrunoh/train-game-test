@@ -13,6 +13,9 @@
 //! nomi delle carrozze ("all'Alveare", "nella Brace") e la d eufonica
 //! ("Bruno ed Elena").
 //!
+//! La chat del giocatore ([`crate::chat`]) prende le risposte da [`chat`]:
+//! intenzione × affinità × carattere × stato dell'NPC.
+//!
 //! Il `game` legge [`World::conversations`](crate::World::conversations) per
 //! disegnare i fumetti: a ogni istante mostra la battuta con `at` più recente
 //! non successiva all'ora corrente.
@@ -25,6 +28,7 @@ use crate::ids::NpcId;
 use crate::item::ItemKind;
 use crate::time::GameTime;
 
+pub(crate) mod chat;
 pub mod grammar;
 pub(crate) mod text;
 

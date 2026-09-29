@@ -18,12 +18,14 @@
 //!   [`crate::Npc::player`] ([`PlayerTie`]), separate from their ties with
 //!   each other: gifts and purchases raise it, thefts they witness lower it.
 //!   It changes the price at their counter, whether they accept gifts, and
-//!   whether they greet the player ([`Greeting`]).
+//!   whether they greet the player ([`Greeting`]), how they answer in the
+//!   chat ([`crate::chat`]) and the favours they ask.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::chat::{ChatLog, Favour};
 use crate::defs::RecipeDef;
 use crate::ids::{CarriageId, NpcId, StationId};
 use crate::item::ItemKind;
@@ -242,10 +244,25 @@ pub struct PlayerTie {
     /// Last time the NPC greeted the player.
     pub greeted: Option<GameTime>,
     /// The NPC has something to tell the player: the game draws a "!" over
-    /// its head. For now a friend who just greeted the player; quests and
-    /// the chat (Fase 5.4) will set and clear it. Cleared by any
-    /// interaction with the player and at midnight.
+    /// its head. A friend who just greeted the player, or someone with a
+    /// favour to ask ([`PlayerTie::favour`] not told yet); it speaks first
+    /// when the player opens the chat. Cleared by any interaction with the
+    /// player and at midnight (kept for a favour still to tell).
     pub wants_to_talk: bool,
+    /// Last greeting in the chat that raised the affinity (see
+    /// [`crate::chat::CHAT_BONUS_COOLDOWN_MINUTES`]).
+    #[serde(default)]
+    pub chat_bonus_at: Option<GameTime>,
+    /// Last insult that lowered the affinity (see
+    /// [`crate::chat::INSULT_COOLDOWN_MINUTES`]).
+    #[serde(default)]
+    pub insulted_at: Option<GameTime>,
+    /// The errand the NPC asked the player, if any (see [`Favour`]).
+    #[serde(default)]
+    pub favour: Option<Favour>,
+    /// When the NPC last offered a favour on its own.
+    #[serde(default)]
+    pub favour_offered_at: Option<GameTime>,
 }
 
 /// How an NPC regards the player, from its [`PlayerTie`].
@@ -309,6 +326,9 @@ pub struct PlayerCharacter {
     pub asleep_until: Option<GameTime>,
     /// Lines NPCs are saying to the player right now, oldest first.
     pub greetings: Vec<Greeting>,
+    /// What the player and the NPCs said to each other in the chat, one log
+    /// per NPC (at most [`crate::chat::CHAT_LOGS_KEPT`], the most recent last).
+    pub chats: Vec<ChatLog>,
 }
 
 impl Default for PlayerCharacter {
@@ -325,6 +345,7 @@ impl Default for PlayerCharacter {
             needs: None,
             asleep_until: None,
             greetings: Vec::new(),
+            chats: Vec::new(),
         }
     }
 }

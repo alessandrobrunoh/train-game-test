@@ -25,6 +25,7 @@ use crate::personality::Personality;
 use crate::player::{Cabin, PlayerCharacter};
 use crate::time::GameTime;
 
+mod chat;
 mod comfort;
 mod conversation;
 mod craft;
@@ -35,6 +36,7 @@ mod market;
 mod mensa;
 mod player;
 
+pub use chat::KNOWN_MARKET_REACH;
 pub use comfort::Comfort;
 pub use craft::CraftError;
 pub use economy::{Economy, EconomyCounters, Tally};

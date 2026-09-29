@@ -112,7 +112,7 @@ fn subject(name: &str, sex: Sex, other: &str) -> Subject {
     }
 }
 
-fn voice(n: &Npc) -> Voice<'_> {
+pub(super) fn voice(n: &Npc) -> Voice<'_> {
     Voice {
         id: n.id,
         first: n.first_name(),
@@ -813,6 +813,56 @@ impl World {
             self.news.drain(..extra);
         }
         self.news_seen = total;
+    }
+
+    /// The piece of news NPC `i` would tell the player in the chat, without
+    /// randomness: among the recent facts it did not live firsthand, one of
+    /// the most relevant few (scored like the topics of a conversation;
+    /// `salt` picks which). With whom it is about and where it happened (or
+    /// where the NPC is). Call [`World::collect_news`] first.
+    pub(super) fn chat_news(
+        &self,
+        i: usize,
+        salt: u64,
+    ) -> Option<(News, Option<Subject>, CarriageId)> {
+        let now = self.clock;
+        let a = &self.npcs[i];
+        let window = self.params.news_days.max(1) * MINUTES_PER_DAY;
+        let mut scored: Vec<(f32, usize)> = self
+            .news
+            .iter()
+            .enumerate()
+            .filter_map(|(k, item)| {
+                let age = now.since(item.time);
+                if age > window || item.involves(a.id) {
+                    return None;
+                }
+                let known = item
+                    .involved
+                    .iter()
+                    .flatten()
+                    .any(|&x| a.relation(x).is_some());
+                let place = item
+                    .place
+                    .or_else(|| item.home_of.and_then(|h| self.npc(h)).map(|n| n.home));
+                let near = place.is_some_and(|p| p == a.carriage || p == a.home);
+                let score = (1.0 + if known { 2.0 } else { 0.0 } + if near { 0.5 } else { 0.0 })
+                    * (1.0 - 0.7 * age as f32 / window as f32);
+                Some((score, k))
+            })
+            .collect();
+        if scored.is_empty() {
+            return None;
+        }
+        // Best first; the newest first on a tie.
+        scored.sort_by(|x, y| y.0.total_cmp(&x.0).then(y.1.cmp(&x.1)));
+        scored.truncate(3);
+        let item = &self.news[scored[(salt % scored.len() as u64) as usize].1];
+        let place = item
+            .place
+            .or_else(|| item.home_of.and_then(|h| self.npc(h)).map(|n| n.home))
+            .unwrap_or(a.carriage);
+        Some((item.news, self.subject_of(item), place))
     }
 
     /// Whom a news item is about, for the text.

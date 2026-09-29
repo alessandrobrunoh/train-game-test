@@ -17,7 +17,8 @@
 //! a [`Regard::Wary`] NPC refuses gifts; NPCs who like the player greet it
 //! when they are idle in the same place ([`Greeting`], at most every
 //! [`GREET_COOLDOWN_MINUTES`]) and step close for [`GREET_MINUTES`]; a
-//! friend who greets has "something to say" ([`crate::PlayerTie::wants_to_talk`]).
+//! friend who greets has "something to say" ([`crate::PlayerTie::wants_to_talk`]),
+//! and so has who thinks of a favour to ask (see `chat.rs`).
 
 use super::{BuyError, GiveError, World};
 use crate::action::Action;
@@ -83,7 +84,7 @@ impl World {
 
     /// Changes NPC `i`'s affinity with the player by `delta` (a first
     /// meeting creates the tie); any interaction clears "wants to talk".
-    fn add_player_affinity(&mut self, i: usize, delta: f32) {
+    pub(super) fn add_player_affinity(&mut self, i: usize, delta: f32) {
         let tie = self.npcs[i].player.get_or_insert_with(PlayerTie::default);
         tie.affinity = (tie.affinity + delta).clamp(-1.0, 1.0);
         tie.wants_to_talk = false;
@@ -197,12 +198,28 @@ impl World {
         if self.npcs[i].regard() == Regard::Wary {
             return Err(GiveError::Distrust);
         }
+        if !self.npcs[i].accepts_gift(item) {
+            return Err(GiveError::NotWanted);
+        }
+        self.gift_effect(i, item);
+        let name = self.npcs[i].name.clone();
+        self.player.inventory.remove(item, 1);
+        let gain = if item.def().usage.is_owned() {
+            2.0 * GIFT_AFFINITY
+        } else {
+            GIFT_AFFINITY
+        };
+        self.add_player_affinity(i, gain);
+        self.log(EventKind::PlayerGave { npc, name, item });
+        Ok(())
+    }
+
+    /// What NPC `i` gets from one `item` the player hands over: food feeds,
+    /// Tè refreshes, an owned good arrives new (see [`World::player_give`]).
+    pub(super) fn gift_effect(&mut self, i: usize, item: ItemKind) {
         let restore = self.params.meal_restore;
         let (te_energy, te_social) = (self.params.te_energy_boost, self.params.te_social_boost);
         let target = &mut self.npcs[i];
-        if !target.accepts_gift(item) {
-            return Err(GiveError::NotWanted);
-        }
         match item {
             ItemKind::Razione | ItemKind::Verdura => {
                 let amount = if item == ItemKind::Razione {
@@ -224,16 +241,6 @@ impl World {
                 }
             }
         }
-        let name = target.name.clone();
-        self.player.inventory.remove(item, 1);
-        let gain = if item.def().usage.is_owned() {
-            2.0 * GIFT_AFFINITY
-        } else {
-            GIFT_AFFINITY
-        };
-        self.add_player_affinity(i, gain);
-        self.log(EventKind::PlayerGave { npc, name, item });
-        Ok(())
     }
 
     /// Moves the stack in the inventory's `slot` into the chest (what fits).
@@ -312,8 +319,9 @@ impl World {
     }
 
     /// End of a tick: the player wakes up; every few minutes an NPC who
-    /// likes the player and is idle where it is greets it; at midnight the
-    /// "wants to talk" flags are cleared.
+    /// likes the player and is idle where it is greets it (and may think of
+    /// a favour to ask); at midnight the "wants to talk" flags are cleared
+    /// (except for favours still to tell) and expired favours dropped.
     pub(super) fn player_tick(&mut self) {
         let now = self.clock;
         if self.player.asleep_until.is_some_and(|t| t <= now + 1) {
@@ -321,11 +329,7 @@ impl World {
         }
         self.player.greetings.retain(|g| g.until > now);
         if now.minute_of_day() == 0 {
-            for npc in &mut self.npcs {
-                if let Some(t) = &mut npc.player {
-                    t.wants_to_talk = false;
-                }
-            }
+            self.chat_midnight();
         }
         if now.minutes().is_multiple_of(GREET_EVERY) && !self.player.is_asleep() {
             self.greet_player();
@@ -374,6 +378,7 @@ impl World {
             since: now,
             until: now + GREET_MINUTES,
         });
+        self.maybe_offer_favour(i);
     }
 }
 

@@ -58,6 +58,11 @@
 //! NPCs keep an affinity with it ([`Npc::player`]) that moves prices, gifts
 //! and greetings.
 //!
+//! The player chats with the NPCs ([`chat`], [`World::player_chat`]):
+//! suggested replies or free text read by an [`IntentReader`], answers from
+//! [`dialogue`] by intent, affinity, personality and state, a memory of the
+//! last lines per NPC and small favours paid from the NPC's tokens.
+//!
 //! Conversations ([`dialogue`]): a chat (`Action::Socialize`) with someone
 //! free nearby becomes a two-sided [`Conversation`] with a topic, a tone set
 //! by the pair's tie and [`Personality`], and short Italian lines for speech
@@ -70,6 +75,7 @@
 pub mod action;
 pub mod brain;
 pub mod carriage;
+pub mod chat;
 pub mod defs;
 pub mod deliberation;
 pub mod dialogue;
@@ -88,6 +94,10 @@ pub mod world;
 pub use action::{Action, ActionKind, ActionOption, DecisionRequest};
 pub use brain::{Brain, RandomBrain, THINK, UtilityBrain, UtilityWeights};
 pub use carriage::{Carriage, CarriageKind, Owner, Station, StationKind};
+pub use chat::{
+    Band, CHAT_MEMORY_LINES, ChatAction, ChatError, ChatLine, ChatLog, ChatReply, Favour, Intent,
+    IntentReader, KeywordReader, Speaker,
+};
 pub use defs::{
     Amenity, CarriageDef, ItemCategory, ItemDef, ItemUse, JobDef, RECIPES, RecipeDef, Work,
 };
