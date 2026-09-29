@@ -154,6 +154,10 @@ pub enum News {
     Austerity,
     PayRaised,
     PayCut,
+    /// `about` attacked someone (the subject's `other`), see [`crate::combat`].
+    Fight,
+    /// `about` killed someone (the subject's `other`).
+    Killing,
 }
 
 impl News {
@@ -175,7 +179,11 @@ impl News {
             | News::BirthDenied
             | News::Austerity
             | News::PayCut => Valence::Bad,
-            News::TheftCaught | News::TheftUnseen | News::HelpRefused => Valence::Scandal,
+            News::TheftCaught
+            | News::TheftUnseen
+            | News::HelpRefused
+            | News::Fight
+            | News::Killing => Valence::Scandal,
         }
     }
 }

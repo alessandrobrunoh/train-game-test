@@ -73,6 +73,14 @@
 //! bubbles; at the end it changes their affinity and spreads gossip. See
 //! [`World::conversations`].
 //!
+//! Health and combat ([`combat`]): NPCs and the player have health; blows,
+//! long starvation and wounds take it away, rest and food give it back.
+//! Hurt people slow down, the badly hurt stay in bed. NPCs rarely fight
+//! (a quarrel gone too far, a grudge, revenge, a thief caught, hunger;
+//! scaled by [`SimParams::violence`]) and the player can hit them
+//! ([`World::player_attack`]): the victim reacts, witnesses remember,
+//! loved ones hold grudges, and it becomes news. See [`World::fights`].
+//!
 //! 1 tick = 1 game minute. All randomness comes from seeded ChaCha RNGs, so a
 //! world is fully deterministic given its seed and the brain's seed.
 
@@ -81,6 +89,7 @@ pub mod brain;
 pub mod carriage;
 pub mod catalog;
 pub mod chat;
+pub mod combat;
 pub mod custode;
 pub mod defs;
 pub mod deliberation;
@@ -105,6 +114,10 @@ pub use catalog::Catalog;
 pub use chat::{
     Band, CHAT_MEMORY_LINES, ChatAction, ChatError, ChatLine, ChatLog, ChatReply, Favour, Intent,
     IntentReader, KeywordReader, Speaker,
+};
+pub use combat::{
+    AttackError, AttackOutcome, CombatCounters, Condition, Fight, Fighter, Grudge, GrudgeReason,
+    MAX_HEALTH, Motive, Reaction, Reputation,
 };
 pub use custode::{Applied, Plan, Rejection};
 pub use defs::{

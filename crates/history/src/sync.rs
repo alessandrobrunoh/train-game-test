@@ -333,6 +333,41 @@ pub(crate) fn columns(kind: &EventKind) -> Columns {
             c.other = Some(other);
             c.third = about;
         }
+        // The player is not an NPC: only NPC fighters get a column.
+        EventKind::Attacked {
+            attacker,
+            victim,
+            damage,
+            place,
+            ..
+        } => {
+            c.npc = attacker.npc();
+            c.other = victim.npc();
+            c.carriage = Some(place.0);
+            c.amount = Some(damage);
+        }
+        EventKind::Killed {
+            killer,
+            victim,
+            place,
+            ..
+        } => {
+            c.npc = killer.npc();
+            c.other = victim.npc();
+            c.carriage = Some(place.0);
+        }
+        EventKind::Fainted {
+            by,
+            place,
+            tokens,
+            item,
+            ..
+        } => {
+            c.other = by;
+            c.carriage = Some(place.0);
+            c.amount = Some(tokens);
+            c.item = item;
+        }
     }
     c
 }
@@ -365,6 +400,9 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Austerity { .. } => "Austerity",
         EventKind::PayChanged { .. } => "PayChanged",
         EventKind::Chat { .. } => "Chat",
+        EventKind::Attacked { .. } => "Attacked",
+        EventKind::Killed { .. } => "Killed",
+        EventKind::Fainted { .. } => "Fainted",
     }
 }
 
@@ -378,6 +416,8 @@ pub(crate) fn cause_name(cause: DeathCause) -> &'static str {
     match cause {
         DeathCause::Starvation => "Starvation",
         DeathCause::OldAge => "OldAge",
+        DeathCause::Violence => "Violence",
+        DeathCause::Wounds => "Wounds",
     }
 }
 

@@ -4,6 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::combat::{Fighter, Motive};
 use crate::deliberation::{Choice, DeliberationId, DeliberationKind, Grievance, Resolver};
 use crate::dialogue::{ConversationId, Tone, Topic};
 use crate::ids::{CarriageId, NpcId};
@@ -207,19 +208,75 @@ pub enum EventKind {
         /// The line that sums it up.
         line: String,
     },
+    /// `attacker` hit `victim` in `place` for `damage` hit points (0: the
+    /// blow missed). `first` marks the opening blow of a fight (logged even
+    /// when it misses; later blows only when they land). See [`crate::combat`].
+    Attacked {
+        attacker: Fighter,
+        attacker_name: String,
+        victim: Fighter,
+        victim_name: String,
+        damage: u32,
+        place: CarriageId,
+        motive: Motive,
+        first: bool,
+    },
+    /// `killer` killed `victim` in `place` (by a blow, or `victim` died of
+    /// the wounds it left). Followed by the `NpcDied` event of the victim.
+    Killed {
+        killer: Fighter,
+        killer_name: String,
+        victim: Fighter,
+        victim_name: String,
+        place: CarriageId,
+    },
+    /// The player fainted in `place` (health at 0): it wakes up in its
+    /// cabin, having lost `tokens` tokens and `item` to `by` (if an NPC
+    /// knocked it down; else to the treasury).
+    Fainted {
+        by: Option<NpcId>,
+        by_name: Option<String>,
+        place: CarriageId,
+        tokens: u32,
+        item: Option<ItemKind>,
+        /// With [`crate::SimParams::permadeath`]: the player died (game over).
+        dead: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DeathCause {
+    /// Fame: health drained by long starvation.
     Starvation,
     OldAge,
+    /// Violenza: killed by a blow.
+    Violence,
+    /// Ferite: died of the wounds left by a fight.
+    Wounds,
 }
 
 impl DeathCause {
-    pub const ALL: [DeathCause; 2] = [DeathCause::Starvation, DeathCause::OldAge];
+    pub const COUNT: usize = 4;
+    pub const ALL: [DeathCause; Self::COUNT] = [
+        DeathCause::Starvation,
+        DeathCause::OldAge,
+        DeathCause::Violence,
+        DeathCause::Wounds,
+    ];
 
     pub fn index(self) -> usize {
         self as usize
+    }
+
+    /// "di fame", "di vecchiaia", "uccisa"/"ucciso", "per le ferite"
+    /// (after "morto").
+    pub fn how(self, sex: Sex) -> &'static str {
+        match self {
+            DeathCause::Starvation => "di fame",
+            DeathCause::OldAge => "di vecchiaia",
+            DeathCause::Violence => sex.pick("uccisa", "ucciso"),
+            DeathCause::Wounds => "per le ferite",
+        }
     }
 }
 
@@ -260,6 +317,12 @@ impl fmt::Display for Event {
                 match cause {
                     DeathCause::Starvation => write!(f, "{name} è {died} di fame a {age} anni"),
                     DeathCause::OldAge => write!(f, "{name} è {died} di vecchiaia a {age} anni"),
+                    DeathCause::Violence => write!(
+                        f,
+                        "{name} è {} a {age} anni",
+                        sex.pick("stata uccisa", "stato ucciso")
+                    ),
+                    DeathCause::Wounds => write!(f, "{name} è {died} per le ferite a {age} anni"),
                 }
             }
             EventKind::Born {
@@ -503,6 +566,62 @@ impl fmt::Display for Event {
                     topic.name()
                 ),
             },
+            EventKind::Attacked {
+                attacker_name,
+                victim_name,
+                damage,
+                place,
+                motive,
+                first,
+                ..
+            } => match (first, damage) {
+                (true, 0) => write!(
+                    f,
+                    "{attacker_name} aggredisce {victim_name} nella carrozza {place} ({}), ma manca il colpo",
+                    motive.name()
+                ),
+                (true, d) => write!(
+                    f,
+                    "{attacker_name} aggredisce {victim_name} nella carrozza {place} ({}): -{d} salute",
+                    motive.name()
+                ),
+                (false, d) => write!(f, "{attacker_name} colpisce {victim_name}: -{d} salute"),
+            },
+            EventKind::Killed {
+                killer_name,
+                victim_name,
+                place,
+                ..
+            } => write!(
+                f,
+                "{killer_name} ha ucciso {victim_name} nella carrozza {place}"
+            ),
+            EventKind::Fainted {
+                by_name,
+                tokens,
+                item,
+                dead,
+                ..
+            } => {
+                if *dead {
+                    return match by_name {
+                        Some(by) => write!(f, "Sei morto: ti ha ucciso {by}"),
+                        None => f.write_str("Sei morto"),
+                    };
+                }
+                match by_name {
+                    Some(by) => write!(f, "{by} ti ha messo al tappeto: sei svenuto")?,
+                    None => f.write_str("Sei svenuto")?,
+                }
+                match (tokens, item) {
+                    (0, None) => Ok(()),
+                    (t, None) => write!(f, " e hai perso {t} gettoni"),
+                    (0, Some(i)) => write!(f, " e hai perso {}", i.with_article()),
+                    (t, Some(i)) => {
+                        write!(f, " e hai perso {t} gettoni e {}", i.with_article())
+                    }
+                }
+            }
         }
     }
 }

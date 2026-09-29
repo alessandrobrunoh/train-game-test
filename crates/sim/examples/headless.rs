@@ -8,9 +8,10 @@
 use std::time::Instant;
 
 use sim::{
-    Action, ActionKind, CarriageKind, Choice, Comfort, ConversationCounters, DeathCause,
-    DeliberationCounters, DeliberationKind, EventKind, ItemKind, LifeStage, MINUTES_PER_DAY, Needs,
-    Seller, StallEvent, Stats, Tally, Tone, Topic, TradeCounters, UtilityBrain, World,
+    Action, ActionKind, CarriageKind, Choice, CombatCounters, Comfort, ConversationCounters,
+    DeathCause, DeliberationCounters, DeliberationKind, EventKind, ItemKind, LifeStage,
+    MINUTES_PER_DAY, Motive, Needs, Seller, StallEvent, Stats, Tally, Tone, Topic, TradeCounters,
+    UtilityBrain, World,
 };
 
 fn main() {
@@ -351,7 +352,9 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
         "Per anno: popolazione (% delle cuccette), bambini/giovani/adulti/anziani, coppie, nati/morti (di fame)/nascite negate nell'anno, \
          età media, nati sul treno, scorte a fine anno (verdura, razioni), attrezzi e vestiti posseduti, gettoni degli NPC\n\
          Economia per anno: moneta totale e tesoreria, gettoni per adulto (media, mediana), indice di Gini, livello di paghe e prezzi, \
-         spreco di verdura (marcita o persa a magazzino pieno) e giorni di austerità nell'anno"
+         spreco di verdura (marcita o persa a magazzino pieno) e giorni di austerità nell'anno\n\
+         Violenza per anno: risse per movente (lite/rancore/vendetta/ladro/rapina/giocatore/difesa), colpi andati a segno e danno, \
+         reazioni delle vittime, morti violente, pasti portati a chi è a letto, feriti e NPC con rancori a fine anno"
     );
     println!(
         "Deliberazioni per anno: aperte per tipo (coppia/figlio/furto/protesta), proposte accettate/rifiutate/rinviate, \
@@ -366,6 +369,7 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
         let delib_before = world.deliberation_counters.clone();
         let talk_before = world.conversation_counters.clone();
         let trade_before = world.trade_counters().clone();
+        let combat_before = world.combat.clone();
         for _ in 0..world.params.days_per_year {
             run_day(world, brain);
             let pop = world.npcs.len();
@@ -420,21 +424,29 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
             &world.conversation_counters,
             u64::from(world.params.days_per_year),
         );
+        print_violence(world, &before, &combat_before);
         if s.population == 0 {
             break;
         }
     }
     let life = &world.life;
     println!(
-        "\nSimulati {years} anni in {:.1?}. Nati {}, morti {} (vecchiaia {}, fame {}), nascite negate {}, coppie formate {}. Popolazione min {min_pop}, max {max_pop}, finale {}.",
+        "\nSimulati {years} anni in {:.1?}. Nati {}, morti {} (vecchiaia {}, fame {}, violenza {}, ferite {}), nascite negate {}, coppie formate {}. Popolazione min {min_pop}, max {max_pop}, finale {}.",
         start.elapsed(),
         life.births_total,
         life.deaths_total,
         life.deaths_by_cause[DeathCause::OldAge.index()],
         life.deaths_by_cause[DeathCause::Starvation.index()],
+        life.deaths_by_cause[DeathCause::Violence.index()],
+        life.deaths_by_cause[DeathCause::Wounds.index()],
         life.births_denied_total,
         life.couples_formed_total,
         world.npcs.len(),
+    );
+    print_violence(
+        world,
+        &sim::LifeCounters::default(),
+        &CombatCounters::default(),
     );
     let d = &world.deliberation_counters;
     println!(
@@ -563,6 +575,43 @@ fn print_stalls(world: &World, before: &TradeCounters, days: u64) {
         100.0 * carrying as f64 / world.npcs.len().max(1) as f64,
         (t.own_share_units - before.own_share_units) as f64 / days,
         (t.eaten_units - before.eaten_units) as f64 / days,
+    );
+}
+
+/// One line about violence and health since the snapshots `life` and
+/// `combat`: fights by motive, blows, reactions, deaths (killed, of wounds),
+/// meals brought to the bedridden, who is hurt or holds a grudge now.
+fn print_violence(world: &World, life: &sim::LifeCounters, combat: &CombatCounters) {
+    let c = &world.combat;
+    let since = |now: u64, then: u64| now - then;
+    let motives: Vec<String> = Motive::ALL
+        .iter()
+        .map(|m| since(c.fights[m.index()], combat.fights[m.index()]).to_string())
+        .collect();
+    let deaths = |cause: DeathCause| {
+        world.life.deaths_by_cause[cause.index()] - life.deaths_by_cause[cause.index()]
+    };
+    let hurt = world
+        .npcs
+        .iter()
+        .filter(|n| n.health < world.params.hurt_below)
+        .count();
+    let grudges = world.npcs.iter().filter(|n| !n.grudges.is_empty()).count();
+    println!(
+        "      violenza: risse {} ({}) colpi {} danno {:.0} | reagito {}/{}/{} (difesa/fuga/resa) | uccisi {} morti di ferite {} | pasti portati {} rapine {} | feriti ora {} con rancori {}",
+        since(c.total_fights(), combat.total_fights()),
+        motives.join("/"),
+        since(c.hits, combat.hits),
+        c.damage - combat.damage,
+        since(c.fought_back, combat.fought_back),
+        since(c.fled, combat.fled),
+        since(c.gave_in, combat.gave_in),
+        deaths(DeathCause::Violence),
+        deaths(DeathCause::Wounds),
+        since(c.meals_brought, combat.meals_brought),
+        since(c.robberies, combat.robberies),
+        hurt,
+        grudges,
     );
 }
 

@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::combat::Fighter;
 use crate::ids::{CarriageId, NpcId, StationId};
 use crate::item::ItemKind;
 
@@ -31,6 +32,7 @@ pub enum Action {
     Buy(ItemKind),
     Idle,
     Wait,
+    Attack(Fighter),
 }
 
 /// Coarse action category, for stats and rendering.
@@ -44,10 +46,11 @@ pub enum ActionKind {
     Buy,
     Idle,
     Wait,
+    Attack,
 }
 
 impl ActionKind {
-    pub const ALL: [ActionKind; 8] = [
+    pub const ALL: [ActionKind; 9] = [
         ActionKind::Eat,
         ActionKind::Sleep,
         ActionKind::Work,
@@ -56,6 +59,7 @@ impl ActionKind {
         ActionKind::Buy,
         ActionKind::Idle,
         ActionKind::Wait,
+        ActionKind::Attack,
     ];
 
     pub fn name(self) -> &'static str {
@@ -68,6 +72,7 @@ impl ActionKind {
             ActionKind::Buy => "compra",
             ActionKind::Idle => "ozia",
             ActionKind::Wait => "aspetta",
+            ActionKind::Attack => "combatte",
         }
     }
 }
@@ -83,6 +88,7 @@ impl Action {
             Action::Buy(_) => ActionKind::Buy,
             Action::Idle => ActionKind::Idle,
             Action::Wait => ActionKind::Wait,
+            Action::Attack(_) => ActionKind::Attack,
         }
     }
 

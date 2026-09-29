@@ -17,6 +17,7 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
+use crate::combat::MAX_HEALTH;
 use crate::defs::ItemUse;
 use crate::deliberation::{Deliberation, DeliberationAnswer};
 use crate::item::ItemKind;
@@ -117,6 +118,14 @@ pub struct UtilityWeights {
     pub sell: f32,
     /// Uniform noise added to each score (`0..noise`).
     pub noise: f32,
+    /// Hurt people (below [`crate::SimParams::hurt_below`]) want to rest:
+    /// sleeping scores at least this times how hurt they are
+    /// (`1 - health / MAX_HEALTH`)...
+    #[serde(default = "default_rest_when_hurt")]
+    pub rest_when_hurt: f32,
+    /// ...and working scores less, down to this share of `work` at 0 health.
+    #[serde(default = "default_hurt_work")]
+    pub hurt_work: f32,
 }
 
 impl Default for UtilityWeights {
@@ -146,6 +155,8 @@ impl Default for UtilityWeights {
             buy_food: default_buy_food(),
             sell: default_sell(),
             noise: 0.08,
+            rest_when_hurt: default_rest_when_hurt(),
+            hurt_work: default_hurt_work(),
         }
     }
 }
@@ -164,6 +175,14 @@ fn default_buy_food() -> f32 {
 
 fn default_sell() -> f32 {
     0.35
+}
+
+fn default_rest_when_hurt() -> f32 {
+    1.3
+}
+
+fn default_hurt_work() -> f32 {
+    0.3
 }
 
 /// Fast rule-based brain: scores every option from needs, time of day and job
@@ -285,7 +304,7 @@ impl UtilityBrain {
             }
             ActionKind::Sleep => {
                 let u = 1.0 - npc.needs.energy;
-                if world.params.is_night(hour) {
+                let sleep = if world.params.is_night(hour) {
                     if u < 0.05 {
                         -1.0
                     } else {
@@ -295,7 +314,17 @@ impl UtilityBrain {
                     w.day_nap * u.powi(3)
                 } else {
                     -1.0
+                };
+                // Hurt: rest (above `hurt_below` the score is unchanged).
+                if npc.health < world.params.hurt_below {
+                    sleep.max(w.rest_when_hurt * (1.0 - npc.health / MAX_HEALTH))
+                } else {
+                    sleep
                 }
+            }
+            ActionKind::Work if world.works_now(npc) && npc.health < world.params.hurt_below => {
+                let health = npc.health / MAX_HEALTH;
+                w.work * (w.hurt_work + (1.0 - w.hurt_work) * health * health)
             }
             ActionKind::Work if world.works_now(npc) => w.work,
             ActionKind::Work => -1.0,
@@ -321,6 +350,8 @@ impl UtilityBrain {
                     .fold(sell, f32::max)
             }
             ActionKind::Idle | ActionKind::Travel => w.idle,
+            // Never offered: fights are started by the sim.
+            ActionKind::Attack => -1.0,
             // Queuing for a seat here: eating, minus the expected wait.
             ActionKind::Wait => {
                 let wait = world.expected_wait_minutes(npc.carriage).unwrap_or(0) as f32;

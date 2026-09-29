@@ -210,6 +210,7 @@ fn generated_options_are_valid() {
                         assert!(w.price(here.id, item).unwrap() <= npc.inventory.tokens);
                     }
                     Action::Idle => {}
+                    Action::Attack(_) => panic!("fights are never offered to a brain"),
                     Action::Wait => {
                         assert_eq!(here.kind, CarriageKind::Mensa);
                         assert!(!here.has_free(StationKind::Table));

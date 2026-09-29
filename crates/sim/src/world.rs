@@ -11,6 +11,7 @@ use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
 use crate::brain::{Brain, THINK};
 use crate::carriage::{Carriage, CarriageKind, Owner, StationKind};
 use crate::catalog::Catalog;
+use crate::combat::{CombatCounters, Fight, MAX_HEALTH};
 use crate::defs::{ItemUse, StationCount};
 use crate::deliberation::{
     Deliberation, DeliberationCounters, Gathering, Grievance, ResolvedDeliberation,
@@ -27,12 +28,14 @@ use crate::player::{Cabin, PlayerCharacter};
 use crate::time::GameTime;
 
 mod chat;
+mod combat;
 mod comfort;
 mod conversation;
 mod craft;
 mod custode;
 mod deliberate;
 mod economy;
+mod health;
 mod life;
 mod market;
 mod mensa;
@@ -81,6 +84,14 @@ const TRADE_SEED: u64 = 0x57A1_1B0B_7E11;
 /// The stalls' RNG stream of a world saved before it existed.
 fn default_trade_rng() -> ChaCha8Rng {
     ChaCha8Rng::seed_from_u64(TRADE_SEED)
+}
+
+/// Seed of the fights' own RNG stream (xored with the world seed).
+const COMBAT_SEED: u64 = 0xF157_C0FF_B10D;
+
+/// The fights' RNG stream of a world saved before it existed.
+fn default_combat_rng() -> ChaCha8Rng {
+    ChaCha8Rng::seed_from_u64(COMBAT_SEED)
 }
 
 /// Repeating carriage pattern, head to tail. 20 carriages give 6 Dormitori,
@@ -193,6 +204,16 @@ pub struct World {
     /// The player, a character of the train (see [`crate::player`]).
     #[serde(default)]
     pub player: PlayerCharacter,
+    /// Randomness of the fights (see `combat.rs`), a stream of its own:
+    /// never drawn with `violence` 0 and no fights.
+    #[serde(default = "default_combat_rng")]
+    combat_rng: ChaCha8Rng,
+    /// Fights going on, and those ended a few minutes ago (see [`World::fights`]).
+    #[serde(default)]
+    fights: Vec<Fight>,
+    /// Fight counters since the world was generated.
+    #[serde(default)]
+    pub combat: CombatCounters,
     /// Scratch buffer reused every tick (see `presence_index`).
     #[serde(skip)]
     presence: Presence,
@@ -474,6 +495,11 @@ impl World {
                 meal_shift: Some(shift_of[i]),
                 personality: Some(personality),
                 player: None,
+                health: MAX_HEALTH,
+                injury: 0.0,
+                grudges: Vec::new(),
+                violence: 0.0,
+                last_attacker: None,
             });
         }
 
@@ -663,6 +689,9 @@ impl World {
             news: Vec::new(),
             news_seen: 0,
             player,
+            combat_rng: ChaCha8Rng::seed_from_u64(seed ^ COMBAT_SEED),
+            fights: Vec::new(),
+            combat: CombatCounters::default(),
             presence: Presence::default(),
             load: Vec::new(),
         };
@@ -720,14 +749,20 @@ impl World {
     }
 
     /// Minutes `npc` takes to walk to `to`: the carriages to cross, plus the
-    /// stairs down if it is on an upper floor.
+    /// stairs down if it is on an upper floor; slower when it is hurt
+    /// ([`SimParams::hurt_walk_factor`]).
     pub fn trip_minutes(&self, npc: &Npc, to: CarriageId) -> u64 {
         let stairs = if npc.floor > 0 {
             self.params.stairs_minutes
         } else {
             0
         };
-        self.travel_minutes(npc.carriage, to) + stairs
+        let minutes = self.travel_minutes(npc.carriage, to) + stairs;
+        if npc.health < self.params.hurt_below {
+            (minutes as f32 * self.params.hurt_walk_factor).round() as u64
+        } else {
+            minutes
+        }
     }
 
     /// e.g. `Mensa «Il Refettorio» (carrozza 2)`.
@@ -797,7 +832,8 @@ impl World {
                 format!("{clothes}; porta con sé {}", list.join(", "))
             }
         };
-        let family = self.family_context(npc);
+        let mut family = self.family_context(npc);
+        family.push_str(&self.health_context(npc));
         Some(format!(
             "{} ({moment}). {}, {} anni ({}), si trova in {}{}. Casa: {}. {job} {family}\
              Possiede {} gettoni, {tool} e {clothes}. \
@@ -817,6 +853,36 @@ impl World {
             level(npc.needs.social),
             npc.needs.social,
         ))
+    }
+
+    /// Health, wounds, grudges and reputation, for [`World::npc_context`]
+    /// (empty for a healthy, peaceful NPC without grudges).
+    fn health_context(&self, npc: &Npc) -> String {
+        let mut text = String::new();
+        if npc.is_hurt() {
+            text.push_str(&format!(
+                "Salute {:.0}/100 ({}{}). ",
+                npc.health,
+                npc.condition(&self.params).label(npc.sex),
+                if npc.injury >= 1.0 {
+                    format!(", ferite {:.0}", npc.injury)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        if let Some(g) = npc
+            .grudges
+            .iter()
+            .max_by(|a, b| a.strength.total_cmp(&b.strength))
+        {
+            text.push_str(&format!("Ce l'ha con {}. ", self.fighter_name(g.against)));
+        }
+        let reputation = npc.reputation();
+        if reputation != crate::combat::Reputation::Peaceful {
+            text.push_str(&format!("Ha fama di {}. ", reputation.label(npc.sex)));
+        }
+        text
     }
 
     /// Amount of `item` where people can get it ([`ItemKind::outlet`]):
@@ -987,6 +1053,11 @@ impl World {
             self.presence = presence;
         }
 
+        // Fights: one exchange of blows a minute.
+        if !self.fights.is_empty() {
+            self.combat_tick();
+        }
+
         self.update_needs();
 
         if now.minute() == 0 {
@@ -998,15 +1069,19 @@ impl World {
                 self.daily_life();
                 self.record_prices();
                 self.furnish_dorms();
+                self.combat_midnight();
             }
             self.check_shortages();
             self.end_gatherings();
             self.temptations();
             self.stalls_hour();
+            self.violence_hour();
+            self.care_for_bedridden();
         }
 
         self.run_deliberations(brain);
         self.player_tick();
+        self.player_recover();
         self.trim_events();
         self.clock = now + 1;
     }
@@ -1079,6 +1154,10 @@ impl World {
                 goal,
                 description: String::new(),
             }];
+        }
+        // Badly hurt: home to bed (see `health.rs`).
+        if self.npcs[i].health < self.params.bedridden_below {
+            return self.bedridden_options(i);
         }
         let p = &self.params;
         let npc = &self.npcs[i];
@@ -1214,8 +1293,15 @@ impl World {
 
         // --- Travel, each with the goal it serves ---
         let stairs = if npc.floor > 0 { p.stairs_minutes } else { 0 };
-        let travel =
-            |to: CarriageId| u64::from(to.distance(here)) * p.travel_minutes_per_carriage + stairs;
+        // Hurt: slower on its feet.
+        let slow = (npc.health < p.hurt_below).then_some(p.hurt_walk_factor);
+        let travel = |to: CarriageId| {
+            let minutes = u64::from(to.distance(here)) * p.travel_minutes_per_carriage + stairs;
+            match slow {
+                Some(factor) => (minutes as f32 * factor).round() as u64,
+                None => minutes,
+            }
+        };
         let nearest = |pred: &dyn Fn(&Carriage) -> bool| {
             self.carriages
                 .iter()
@@ -1373,6 +1459,9 @@ impl World {
                 )
             }
             Action::Socialize(other) => self.describe_chat(npc, other, minutes),
+            Action::Attack(target) => {
+                format!("aggredisce {} ({minutes} min)", self.fighter_name(target))
+            }
             Action::Travel { to } => {
                 let dest = self.carriage(to);
                 let shopping = dest.and_then(|c| {
@@ -1411,6 +1500,7 @@ impl World {
         let npc = &self.npcs[i];
         let (action, here, job) = (npc.action, npc.carriage, npc.job);
         let has_tool = npc.inventory.tool.is_some();
+        let hurt = npc.health < self.params.hurt_below;
         let minutes = npc.action_until.since(npc.action_since);
         if let Some(station) = action.station() {
             self.release(here, station);
@@ -1424,7 +1514,13 @@ impl World {
                     } else {
                         1.0
                     };
-                    if let Some((item, made)) = self.produce(job, here, minutes as f32, bonus) {
+                    // Hurt: less work gets done.
+                    let effort = if hurt {
+                        minutes as f32 * self.params.hurt_work_factor
+                    } else {
+                        minutes as f32
+                    };
+                    if let Some((item, made)) = self.produce(job, here, effort, bonus) {
                         self.keep_own_share(i, here, item, made);
                     }
                     if job.uses_tool() {
@@ -1456,7 +1552,12 @@ impl World {
                     self.add_affinity(i, j, delta);
                 }
             }
-            Action::Eat(_) | Action::Sleep(_) | Action::Buy(_) | Action::Idle | Action::Wait => {}
+            Action::Eat(_)
+            | Action::Sleep(_)
+            | Action::Buy(_)
+            | Action::Idle
+            | Action::Wait
+            | Action::Attack(_) => {}
         }
         self.npcs[i].action = Action::Idle;
         // Stalls and home (see `stalls.rs`).
@@ -1598,6 +1699,7 @@ impl World {
             }
             Action::Travel { to } => to != here && to.index() < self.carriages.len(),
             Action::Socialize(partner) => self.npc_index(partner).is_some(),
+            Action::Attack(target) => self.fighter_health(target).is_some(),
             Action::Idle => true,
             Action::Wait => {
                 carriage.kind == CarriageKind::Mensa
@@ -1614,6 +1716,7 @@ impl World {
         let comfort = self.comfort_levels();
         let p = &self.params;
         let now = self.clock;
+        let drain = health::starvation_drain(p);
         let mut dead = Vec::new();
         for (i, npc) in self.npcs.iter_mut().enumerate() {
             let (sleep_gain, social_decay) = comfort::need_factors(p, &comfort, npc);
@@ -1655,15 +1758,31 @@ impl World {
                         },
                     });
                 }
-                if npc.starving_minutes >= p.starvation_minutes {
-                    dead.push(i);
+                // Past the grace period hunger eats away at health.
+                if npc.starving_minutes > p.starvation_grace_minutes {
+                    npc.health = (npc.health - drain).max(0.0);
+                    if npc.health <= 0.0 {
+                        dead.push((i, DeathCause::Starvation));
+                    }
                 }
             } else {
                 npc.starving_minutes = 0;
+                if npc.health < MAX_HEALTH
+                    && let health::Health::BledOut = health::recover(p, npc)
+                {
+                    dead.push((i, DeathCause::Wounds));
+                }
             }
         }
-        for &i in dead.iter().rev() {
-            self.kill(i, DeathCause::Starvation);
+        for &(i, cause) in dead.iter().rev() {
+            match (cause, self.npcs[i].last_attacker) {
+                (DeathCause::Wounds, Some(killer)) => {
+                    let place = self.npcs[i].carriage;
+                    self.combat.died_of_wounds += 1;
+                    self.slain(i, killer, place, cause);
+                }
+                _ => self.kill(i, cause),
+            }
         }
     }
 

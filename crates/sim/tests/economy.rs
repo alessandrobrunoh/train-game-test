@@ -151,6 +151,10 @@ fn money_is_conserved_for_30_days() {
                     sold += 1;
                 }
                 w.player_take(serra, ItemKind::Verdura, 2);
+                // Whatever the Operai did (fights change who works when),
+                // there is Tessuto to craft with.
+                let stock = &mut w.carriages[officina.index()].stock;
+                stock.set(ItemKind::Tessuto, stock.get(ItemKind::Tessuto).max(2.0));
                 w.player_take(officina, ItemKind::Tessuto, 2);
                 if w.player_craft(coperta, officina).is_ok() {
                     crafted += 1;

@@ -1099,6 +1099,10 @@ impl World {
             fine,
         };
         self.push_event(kind);
+        if caught {
+            // The Mercante may punish the thief (see `combat.rs`).
+            self.thief_caught(i, market);
+        }
     }
 
     /// NPC `i` asks `helper` for the tokens it lacks; the closer they are,

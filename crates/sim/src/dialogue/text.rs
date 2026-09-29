@@ -530,6 +530,8 @@ fn news_open(news: News, about: bool) -> Pool {
         News::Austerity => NEWS_AUSTERITY,
         News::PayRaised => NEWS_PAY_RAISED,
         News::PayCut => NEWS_PAY_CUT,
+        News::Fight if about => NEWS_FIGHT,
+        News::Killing if about => NEWS_KILLING,
         // News about someone without their name: say it generically.
         _ => NEWS_VAGUE,
     }
@@ -544,6 +546,7 @@ fn gossip_open(news: News) -> Pool {
         News::HelpRefused => GOSSIP_STINGY,
         News::HelpGiven => GOSSIP_GENEROUS,
         News::CameOfAge => GOSSIP_GROWN,
+        News::Fight => GOSSIP_FIGHT,
         _ => news_open(news, true),
     }
 }
@@ -573,6 +576,8 @@ fn news_specific(news: News) -> (Option<Pool>, Pool) {
         News::Austerity => (None, AUSTERITY_FOLLOW),
         News::PayRaised => (None, PAY_RAISED_FOLLOW),
         News::PayCut => (None, PAY_CUT_FOLLOW),
+        News::Fight => (Some(FIGHT_REPLY), FIGHT_FOLLOW),
+        News::Killing => (Some(KILLING_REPLY), KILLING_FOLLOW),
     }
 }
 
@@ -1567,6 +1572,22 @@ const NEWS_THEFT_CAUGHT: Pool = &[
     "{a} {f}? Sorpres{A:a/o} a rubare!",
     "Hai sentito di {a}? {A:Ladra/Ladro}!",
 ];
+const NEWS_FIGHT: Pool = &[
+    "Hai sentito? {a} ha picchiato {o}!",
+    "{a} ha preso a pugni {o}!",
+    "{a} {f} ha aggredito {o}, sai?",
+];
+/// A fight told in the player's chat, where `{al}` is where it happened.
+const NEWS_FIGHT_AT: Pool = &[
+    "{a} ha menato {o} {al}!",
+    "Botte {al}! {a} contro {o}.",
+    "Hai sentito? {a} ha picchiato {o}!",
+];
+const NEWS_KILLING: Pool = &[
+    "{a} ha ucciso {o}… terribile.",
+    "Hai saputo? {a} ha ucciso {o}!",
+    "C'è {A:un'assassina/un assassino}: {a} {f}!",
+];
 const NEWS_THEFT_UNSEEN: Pool = &[
     "Qualcuno ha rubato al mercato.",
     "Al mercato è sparita della merce!",
@@ -1766,6 +1787,27 @@ const PAY_CUT_FOLLOW: Pool = &[
 
 // Gossip.
 
+const GOSSIP_FIGHT: Pool = &[
+    "Sai di {a}? Ha picchiato {o}!",
+    "{a} che mena le mani… ma dai!",
+    "Occhio a {a}, è {A:una violenta/un violento}.",
+];
+const FIGHT_REPLY: Pool = &[
+    "Ma dai! Picchiare così…",
+    "{a}? Non ci credo!",
+    "Che brutta storia.",
+];
+const FIGHT_FOLLOW: Pool = &[
+    "Io da {a} sto alla larga.",
+    "Speriamo che {o} stia bene.",
+    "Ci vorrebbero le guardie, qui.",
+];
+const KILLING_REPLY: Pool = &["Dio mio…", "No! Non è possibile!", "Che orrore."];
+const KILLING_FOLLOW: Pool = &[
+    "Nessuno è più al sicuro.",
+    "Che fine per {o}…",
+    "Qualcuno dovrà fargliela pagare.",
+];
 const GOSSIP_THEFT: Pool = &[
     "Sai di {a}? L'hanno beccat{A:a/o}!",
     "{a} che ruba… chi l'avrebbe detto!",
@@ -2635,6 +2677,9 @@ const ALL_POOLS: &[Pool] = &[
     NEWS_COUPLE,
     NEWS_WIDOWED,
     NEWS_THEFT_CAUGHT,
+    NEWS_FIGHT,
+    NEWS_FIGHT_AT,
+    NEWS_KILLING,
     NEWS_THEFT_UNSEEN,
     NEWS_HELP_GIVEN,
     NEWS_HELP_REFUSED,
@@ -2663,6 +2708,10 @@ const ALL_POOLS: &[Pool] = &[
     THEFT_REPLY,
     THEFT_CAUGHT_FOLLOW,
     THEFT_UNSEEN_FOLLOW,
+    FIGHT_REPLY,
+    FIGHT_FOLLOW,
+    KILLING_REPLY,
+    KILLING_FOLLOW,
     GENEROUS_REPLY,
     HELP_GIVEN_FOLLOW,
     HELP_REFUSED_FOLLOW,
@@ -2681,6 +2730,7 @@ const ALL_POOLS: &[Pool] = &[
     PAY_RAISED_FOLLOW,
     PAY_CUT_FOLLOW,
     GOSSIP_THEFT,
+    GOSSIP_FIGHT,
     GOSSIP_COUPLE,
     GOSSIP_BIRTH,
     GOSSIP_WIDOWED,
@@ -2860,6 +2910,9 @@ pub(crate) fn news_line(
     };
     let pool = if gossip && about.is_some() {
         gossip_open(news)
+    } else if news == News::Fight && about.is_some() {
+        // In the chat `{al}` is where it happened.
+        NEWS_FIGHT_AT
     } else {
         news_open(news, about.is_some())
     };

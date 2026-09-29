@@ -484,6 +484,8 @@ impl World {
                     News::BirthDenied | News::PayRaised | News::PayCut => 0.7,
                     News::HelpRefused | News::Restocked(_) | News::CameOfAge => 0.5,
                     News::HelpGiven | News::Retired => 0.4,
+                    News::Fight => 1.5,
+                    News::Killing => 2.0,
                 };
                 let known = |n: &Npc| {
                     item.involved
@@ -514,6 +516,7 @@ impl World {
             matches!(
                 item.news,
                 News::TheftCaught
+                    | News::Fight
                     | News::Couple
                     | News::Birth
                     | News::Widowed
@@ -726,6 +729,10 @@ impl World {
         };
         self.add_affinity(i, j, delta);
         self.spread_gossip(c, i, j);
+        // Rarely, a quarrel goes too far (see `combat.rs`).
+        if c.tone == Tone::Tense {
+            self.quarrel_may_turn_violent(i, j);
+        }
     }
 
     /// What `b` (index `j`) heard from `a` (index `i`) changes its opinion
@@ -739,7 +746,8 @@ impl World {
         }
         let g = self.params.gossip_affinity;
         let delta = match c.news {
-            Some(News::TheftCaught) => -g,
+            Some(News::TheftCaught | News::Fight) => -g,
+            Some(News::Killing) => -2.0 * g,
             Some(News::HelpRefused) => -g / 2.0,
             Some(News::HelpGiven) => g / 2.0,
             Some(News::Couple | News::Birth | News::CameOfAge | News::Widowed) => g * 0.3,
@@ -1063,6 +1071,35 @@ fn news_item(time: GameTime, kind: &EventKind) -> Option<NewsItem> {
         EventKind::Austerity { .. } => {
             item(News::Austerity, None, nobody, Where::Nowhere, Who::Nobody)
         }
+        // The opening blow of a fight: who attacked whom, and where.
+        EventKind::Attacked {
+            attacker,
+            attacker_name,
+            victim,
+            victim_name,
+            place,
+            first: true,
+            ..
+        } => item(
+            News::Fight,
+            attacker.npc(),
+            [attacker.npc(), victim.npc(), None],
+            Where::At(*place),
+            Who::Named(attacker_name, None, victim_name),
+        ),
+        EventKind::Killed {
+            killer,
+            killer_name,
+            victim,
+            victim_name,
+            place,
+        } => item(
+            News::Killing,
+            killer.npc(),
+            [killer.npc(), victim.npc(), None],
+            Where::At(*place),
+            Who::Named(killer_name, None, victim_name),
+        ),
         EventKind::PayChanged { raised, .. } => item(
             if *raised {
                 News::PayRaised

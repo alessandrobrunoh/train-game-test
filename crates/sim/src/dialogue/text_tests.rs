@@ -46,7 +46,9 @@ fn script<'a>(
     }
 }
 
-const NEWS: [News; 22] = [
+const NEWS: [News; 24] = [
+    News::Fight,
+    News::Killing,
     News::Birth,
     News::Death,
     News::Couple,

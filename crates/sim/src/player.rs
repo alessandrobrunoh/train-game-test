@@ -26,6 +26,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::chat::{ChatLog, Favour};
+use crate::combat::{MAX_HEALTH, Reputation};
 use crate::defs::RecipeDef;
 use crate::ids::{CarriageId, NpcId, StationId};
 use crate::item::ItemKind;
@@ -329,6 +330,18 @@ pub struct PlayerCharacter {
     /// What the player and the NPCs said to each other in the chat, one log
     /// per NPC (at most [`crate::chat::CHAT_LOGS_KEPT`], the most recent last).
     pub chats: Vec<ChatLog>,
+    /// Hit points, like an NPC's ([`crate::Npc::health`]). At 0 the player
+    /// faints ([`crate::World::player_attack`], [`crate::combat`]).
+    pub health: f32,
+    /// Wounds still to heal (see [`crate::Npc::injury`]).
+    pub injury: f32,
+    /// Violence score, like an NPC's ([`crate::Npc::violence`]).
+    pub violence: f32,
+    /// When the player last fainted: it wakes up in its cabin the next
+    /// morning (see [`PlayerCharacter::asleep_until`]).
+    pub fainted: Option<GameTime>,
+    /// With [`crate::SimParams::permadeath`]: when the player died (game over).
+    pub dead: Option<GameTime>,
 }
 
 impl Default for PlayerCharacter {
@@ -346,6 +359,11 @@ impl Default for PlayerCharacter {
             asleep_until: None,
             greetings: Vec::new(),
             chats: Vec::new(),
+            health: MAX_HEALTH,
+            injury: 0.0,
+            violence: 0.0,
+            fainted: None,
+            dead: None,
         }
     }
 }
@@ -367,6 +385,16 @@ impl PlayerCharacter {
 
     pub fn is_asleep(&self) -> bool {
         self.asleep_until.is_some()
+    }
+
+    /// Whether the player can act: not fainted (asleep after a faint) nor dead.
+    pub fn is_down(&self) -> bool {
+        self.dead.is_some() || (self.fainted.is_some() && self.is_asleep())
+    }
+
+    /// What the train thinks of the player's violence.
+    pub fn reputation(&self) -> Reputation {
+        Reputation::of(self.violence)
     }
 
     /// Whether the player is in the cabin (its carriage and floor).

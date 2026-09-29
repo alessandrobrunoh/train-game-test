@@ -4,10 +4,13 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::action::Action;
+use crate::combat::{
+    Condition, Fighter, Grudge, MAX_HEALTH, Reputation, health_factor, strength_at_age,
+};
 use crate::defs::ItemUse;
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
-use crate::personality::Personality;
+use crate::personality::{Personality, Temper};
 use crate::player::{PlayerTie, Regard, SlotInventory};
 use crate::time::{GameTime, MINUTES_PER_DAY};
 
@@ -169,6 +172,29 @@ pub struct Npc {
     /// NPCs: see [`crate::player`].
     #[serde(default)]
     pub player: Option<PlayerTie>,
+    /// Hit points, `0..=`[`MAX_HEALTH`] (see [`crate::combat`]): blows and
+    /// long starvation take them away, rest and food give them back. At 0
+    /// the NPC dies.
+    #[serde(default = "full_health")]
+    pub health: f32,
+    /// Wounds still to heal: the part of the missing health left by blows
+    /// (`0..=MAX_HEALTH - health`).
+    #[serde(default)]
+    pub injury: f32,
+    /// Grudges held, at most [`crate::combat::MAX_GRUDGES`] (see [`Grudge`]).
+    #[serde(default)]
+    pub grudges: Vec<Grudge>,
+    /// Violence score `0..=1`: up with every fight started (more for a
+    /// killing), fading slowly. See [`Npc::reputation`].
+    #[serde(default)]
+    pub violence: f32,
+    /// Who hurt the NPC last (the killer if it dies of its wounds).
+    #[serde(default)]
+    pub last_attacker: Option<Fighter>,
+}
+
+fn full_health() -> f32 {
+    MAX_HEALTH
 }
 
 /// Character traits in `0..=1`, drawn at birth and never changed. They weigh
@@ -308,6 +334,53 @@ impl Npc {
         self.relations_of(RelationKind::Friend)
             .filter(|r| r.affinity > 0.0)
             .max_by(|a, b| a.affinity.total_cmp(&b.affinity))
+    }
+
+    /// How the NPC is, from its health.
+    pub fn condition(&self, p: &crate::SimParams) -> Condition {
+        Condition::of(self.health, p)
+    }
+
+    /// Whether the NPC is below full health.
+    pub fn is_hurt(&self) -> bool {
+        self.health < MAX_HEALTH
+    }
+
+    /// How much it tends to violence, `0..=1`: bold, not very honest,
+    /// grumpy people more; kind and shy ones less. Derived from the traits
+    /// and personality (nothing drawn).
+    pub fn aggression(&self) -> f32 {
+        let p = self.personality();
+        let mut a = 0.55 * self.traits.boldness + 0.45 * (1.0 - self.traits.honesty);
+        if p.has(Temper::Burbero) {
+            a += 0.25;
+        }
+        if p.has(Temper::Gentile) {
+            a -= 0.25;
+        }
+        if p.has(Temper::Timido) {
+            a -= 0.2;
+        }
+        a.clamp(0.0, 1.0)
+    }
+
+    /// Fighting strength: by age (adults strongest), a little by boldness,
+    /// lower when hurt.
+    pub fn strength(&self) -> f32 {
+        strength_at_age(self.age) * (0.9 + 0.2 * self.traits.boldness) * health_factor(self.health)
+    }
+
+    /// What the train thinks of its violence.
+    pub fn reputation(&self) -> Reputation {
+        Reputation::of(self.violence)
+    }
+
+    /// The strongest grudge against `who`, if any.
+    pub fn grudge_against(&self, who: Fighter) -> Option<&Grudge> {
+        self.grudges
+            .iter()
+            .filter(|g| g.against == who)
+            .max_by(|a, b| a.strength.total_cmp(&b.strength))
     }
 
     /// Progress of the current action in `0..=1` (handy for animating travel).

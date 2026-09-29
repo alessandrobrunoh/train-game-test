@@ -174,9 +174,16 @@ impl World {
             return;
         }
         stock.take(ItemKind::Te, per_meal);
-        let needs = &mut self.npcs[i].needs;
+        let heal = self.params.te_heal;
+        let npc = &mut self.npcs[i];
+        let needs = &mut npc.needs;
         needs.energy = (needs.energy + energy).min(1.0);
         needs.social = (needs.social + social).min(1.0);
+        // Tè helps who is hurt get better.
+        if npc.is_hurt() {
+            npc.health = (npc.health + heal).min(crate::combat::MAX_HEALTH);
+            npc.injury = npc.injury.min(crate::combat::MAX_HEALTH - npc.health);
+        }
     }
 
     /// Midnight: comfort goods in the Dormitori wear out, then the Officine

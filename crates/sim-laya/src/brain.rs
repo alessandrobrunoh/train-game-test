@@ -306,7 +306,8 @@ pub enum Tie {
 impl OptionSig {
     pub fn of(npc: &Npc, option: &ActionOption) -> OptionSig {
         match option.action {
-            Action::Idle => OptionSig::Idle,
+            // Fights are started by the sim, never offered: like idling.
+            Action::Idle | Action::Attack(_) => OptionSig::Idle,
             Action::Eat(_) => OptionSig::Eat,
             Action::Wait => OptionSig::Wait,
             Action::Sleep(_) => OptionSig::Sleep,

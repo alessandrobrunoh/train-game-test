@@ -256,7 +256,9 @@ pub struct SimParams {
     pub buy_minutes: u64,
 
     // --- Death ---
-    /// An NPC with hunger at 0 for this long dies.
+    /// An NPC in full health with hunger at 0 for this long dies: after
+    /// `starvation_grace_minutes` its health starts draining, reaching 0
+    /// at this time (see [`crate::combat`]).
     pub starvation_minutes: u64,
 
     // --- Life cycle (checked once per game day, at midnight) ---
@@ -375,6 +377,83 @@ pub struct SimParams {
     /// At most one notable conversation (quarrel, gossip about a theft)
     /// logged as an event every this many hours, per kind.
     pub conversation_log_hours: u64,
+
+    // --- Health and combat (see [`crate::combat`]) ---
+    /// Scales how often NPCs start fights (quarrels that go too far,
+    /// grudges, revenge, thieves caught, robbery for hunger); 0 disables
+    /// NPC-initiated violence entirely (self-defense and the player's
+    /// fights stay). At 1 a train of 400 sees a handful of fights a month.
+    pub violence: f32,
+    /// "Morte permanente": the player dies at 0 health (game over) instead
+    /// of fainting and waking up in its cabin. Off by default.
+    pub permadeath: bool,
+    /// Health (of [`crate::combat::MAX_HEALTH`]) regained per minute
+    /// awake, when not starving...
+    pub heal_per_minute: f32,
+    /// ...times this asleep in a bed...
+    pub bed_heal_factor: f32,
+    /// ...and times this when well fed (hunger at least 0.6).
+    pub fed_heal_factor: f32,
+    /// Health a cup of Tè at a meal gives back to who is hurt.
+    pub te_heal: f32,
+    /// With hunger at 0 for longer than this, health drains (see
+    /// `starvation_minutes`).
+    pub starvation_grace_minutes: u64,
+    /// Below this health an NPC is hurt: it walks `hurt_walk_factor` times
+    /// slower, works at `hurt_work_factor` of its output and prefers resting.
+    pub hurt_below: f32,
+    pub hurt_walk_factor: f32,
+    pub hurt_work_factor: f32,
+    /// Below this health it is bedridden: it goes home to bed and doesn't
+    /// work; family and friends bring it food.
+    pub bedridden_below: f32,
+    /// Below this health, with open wounds and out of bed, it bleeds:
+    /// losing `bleed_per_minute` (it can die of its wounds).
+    pub bleed_below: f32,
+    pub bleed_per_minute: f32,
+    /// Damage of a blow from a strong adult (times strength, times 0.75–1.25)...
+    pub blow_damage: f32,
+    /// ...times `1 + weapon_bonus` with an Attrezzo in hand...
+    pub weapon_bonus: f32,
+    /// ...if it lands (this chance, a little more for the stronger).
+    pub hit_chance: f32,
+    /// Longest fight: one exchange of blows a minute (twice as long for a
+    /// lethal one, see [`crate::combat::Fight::lethal`]).
+    pub fight_minutes: u64,
+    /// Chance that a tense conversation between people of 14+ turns into a
+    /// fight, times `violence` and the aggression of the more aggressive one
+    /// (`(2 × aggression)^3`, so the calm almost never do).
+    pub quarrel_fight_chance: f32,
+    /// Hourly chance that someone holding a grudge attacks its target when
+    /// they are in the same place, times `violence`, the grudge's strength
+    /// and the aggression factor; twice for revenge.
+    pub grudge_attack_per_hour: f32,
+    /// Chance that the Mercante on duty attacks a thief it caught (times
+    /// `violence` and its aggression factor).
+    pub thief_attack_chance: f32,
+    /// Hourly chance that a starving, dishonest NPC robs food from someone
+    /// weaker in the same place (times `violence`).
+    pub robbery_per_hour: f32,
+    /// Grudge the victim holds after an attack (more with the damage)...
+    pub grudge_victim: f32,
+    /// ...and its loved ones (partner, family, close friends): more if it was killed.
+    pub grudge_loved_ones: f32,
+    /// Grudges fade by this much every day.
+    pub grudge_decay_per_day: f32,
+    /// Affinity lost with the attacker by the victim (and its loved ones)...
+    pub attack_affinity: f32,
+    /// ...and by who saw the fight.
+    pub witness_affinity: f32,
+    /// Violence score gained for starting a fight, and for a killing; it
+    /// fades by `violence_decay_per_day`.
+    pub violence_per_fight: f32,
+    pub violence_per_kill: f32,
+    pub violence_decay_per_day: f32,
+    /// The player wakes up from a faint with this health...
+    pub faint_health: f32,
+    /// ...having lost this share of its tokens (and one of its most
+    /// valuable things), to who knocked it down.
+    pub faint_token_share: f32,
 
     // --- Event log ---
     /// Most events kept in [`crate::World::events`]: beyond it the oldest are
@@ -558,6 +637,38 @@ impl Default for SimParams {
             news_days: 3,
             recent_conversations_kept: 64,
             conversation_log_hours: 6,
+
+            violence: 1.0,
+            permadeath: false,
+            heal_per_minute: 0.01,
+            bed_heal_factor: 3.0,
+            fed_heal_factor: 1.5,
+            te_heal: 3.0,
+            starvation_grace_minutes: 24 * 60,
+            hurt_below: 60.0,
+            hurt_walk_factor: 1.5,
+            hurt_work_factor: 0.6,
+            bedridden_below: 25.0,
+            bleed_below: 10.0,
+            bleed_per_minute: 0.004,
+            blow_damage: 8.0,
+            weapon_bonus: 0.5,
+            hit_chance: 0.7,
+            fight_minutes: 5,
+            quarrel_fight_chance: 0.001,
+            grudge_attack_per_hour: 0.004,
+            thief_attack_chance: 0.3,
+            robbery_per_hour: 0.05,
+            grudge_victim: 0.5,
+            grudge_loved_ones: 0.35,
+            grudge_decay_per_day: 0.03,
+            attack_affinity: 0.4,
+            witness_affinity: 0.1,
+            violence_per_fight: 0.15,
+            violence_per_kill: 0.5,
+            violence_decay_per_day: 0.005,
+            faint_health: 20.0,
+            faint_token_share: 0.25,
 
             max_events: default_max_events(),
         }

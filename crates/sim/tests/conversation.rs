@@ -260,11 +260,12 @@ fn a_death_ends_the_conversation_for_the_other() {
     w.tick(&mut brain);
     let c = w.conversation_of(ida).unwrap().clone();
     w.run(&mut brain, 5);
-    // `b` starves to death in the next minute.
+    // `b` starves to death in the next minute: its health is all but gone.
     let starve = w.params.starvation_minutes;
     let b = index(&w, idb);
     w.npcs[b].needs.hunger = 0.0;
     w.npcs[b].starving_minutes = starve - 1;
+    w.npcs[b].health = 0.01;
     let death = w.clock;
     w.tick(&mut brain);
     assert!(w.npc(idb).is_none());

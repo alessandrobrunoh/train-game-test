@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use super::{NEEDED_JOBS, World, job_quotas, max_population_for};
 use crate::action::Action;
 use crate::carriage::{CarriageKind, StationKind};
+use crate::combat::MAX_HEALTH;
 use crate::deliberation::DeliberationKind;
 use crate::event::{BirthDenial, DeathCause, Event, EventKind};
 use crate::ids::{CarriageId, NpcId};
@@ -48,7 +49,7 @@ pub struct LifeCounters {
     pub births_total: u64,
     pub deaths_total: u64,
     /// Deaths per cause, indexed by [`DeathCause::index`].
-    pub deaths_by_cause: [u64; 2],
+    pub deaths_by_cause: [u64; DeathCause::COUNT],
     /// Births refused by the administration (each one, logged or not).
     pub births_denied_total: u64,
     pub couples_formed_total: u64,
@@ -267,6 +268,8 @@ impl World {
         self.estate_goods(&npc);
         self.forget_deliberations_of(npc.id);
         self.drop_conversation_of(npc.id);
+        // Grudges against it are dropped, its fights end.
+        self.forget_fighter(npc.id);
     }
 
     // ------------------------------------------------------------------
@@ -596,6 +599,11 @@ impl World {
             meal_shift: Some(meal_shift),
             personality: Some(personality),
             player: None,
+            health: MAX_HEALTH,
+            injury: 0.0,
+            grudges: Vec::new(),
+            violence: 0.0,
+            last_attacker: None,
         };
         for &parent in &[mother, father] {
             self.npcs[parent].relations.push(Relation {
