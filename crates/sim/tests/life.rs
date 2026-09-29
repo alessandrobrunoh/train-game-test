@@ -1,18 +1,21 @@
 //! Ciclo di vita: età, coppie, nascite, morti, ricambio generazionale.
 
+mod common;
+
 use sim::{
-    Action, BirthDenial, CarriageKind, DeathCause, EventKind, GameTime, ItemKind, Job, LifeStage,
-    MINUTES_PER_DAY, Npc, NpcId, RelationKind, Sex, SimParams, StationKind, Stats, UtilityBrain,
-    World,
+    Action, BirthDenial, Brain, CarriageKind, Choice, DeathCause, EventKind, GameTime, ItemKind,
+    Job, LifeStage, MINUTES_PER_DAY, Npc, NpcId, RelationKind, Sex, SimParams, StationKind, Stats,
+    UtilityBrain, World,
 };
 
 const DAY: u64 = MINUTES_PER_DAY;
 
-/// No random deaths nor births unless a test asks for them.
+/// No random deaths, births, thefts nor protests unless a test asks for them.
 fn quiet_params() -> SimParams {
     SimParams {
         mortality_base: 0.0,
         birth_chance_per_year: 0.0,
+        deliberation_rate: 0.0,
         ..SimParams::default()
     }
 }
@@ -25,7 +28,7 @@ fn world_with(params: SimParams) -> (World, UtilityBrain) {
 }
 
 /// Runs until just after the next midnight (the daily life pass).
-fn past_midnight(w: &mut World, brain: &mut UtilityBrain) {
+fn past_midnight(w: &mut World, brain: &mut dyn Brain) {
     let midnight = w.clock.next_at(0, 0);
     w.run(brain, midnight - w.clock + 1);
 }
@@ -196,7 +199,7 @@ fn retirement_clears_job() {
 
 #[test]
 fn couples_form_only_between_eligible_adults() {
-    let (mut w, mut brain) = world_with(quiet_params());
+    let (mut w, _) = world_with(quiet_params());
     w.params.max_events = usize::MAX;
     let single = |w: &World, sex: Sex, stage: LifeStage, skip: &[usize]| {
         (0..w.npcs.len())
@@ -235,7 +238,8 @@ fn couples_form_only_between_eligible_adults() {
     // Different homes: one of them moves in with the other.
     assert_ne!(homes[0], homes[1], "pick partners from different dorms");
 
-    past_midnight(&mut w, &mut brain);
+    // Whoever is proposed to accepts.
+    past_midnight(&mut w, &mut common::always(42, Choice::Accept));
     let npc = |k: usize| w.npc(ids[k]).unwrap();
     assert_eq!(npc(0).partner(), Some(ids[1]));
     assert_eq!(npc(1).partner(), Some(ids[0]));
@@ -588,4 +592,18 @@ fn fifty_years_stay_balanced_with_turnover() {
     for stage in LifeStage::ALL {
         assert!(s.stage(stage) > 0, "{stage:?} missing: {s}");
     }
+    // A few deliberations a day, of every kind, all resolved by the rules.
+    let d = &w.deliberation_counters;
+    let days = 50 * u64::from(w.params.days_per_year);
+    assert!(
+        (2 * days..=30 * days).contains(&d.opened_total()),
+        "{} deliberations in {days} days",
+        d.opened_total()
+    );
+    assert!(d.opened.iter().all(|&n| n > 0), "{d:?}");
+    assert!(
+        d.thefts > 0 && d.help_given > 0 && d.protests_called > 0,
+        "{d:?}"
+    );
+    assert_eq!(d.resolved_total() + d.cancelled, d.opened_total());
 }

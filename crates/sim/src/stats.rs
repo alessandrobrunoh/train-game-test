@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::action::ActionKind;
 use crate::carriage::CarriageKind;
+use crate::deliberation::DeliberationCounters;
 use crate::item::{ItemKind, Stock};
 use crate::npc::{LifeStage, Needs};
 use crate::time::GameTime;
@@ -42,6 +43,11 @@ pub struct Stats {
     pub deaths_today: u32,
     pub births_total: u64,
     pub deaths_total: u64,
+    /// Deliberations waiting for a decision (see [`World::open_deliberations`]).
+    pub deliberations_open: usize,
+    /// Deliberations since the world was generated: opened and resolved per
+    /// kind, by rules or brain, per choice, thefts, help, protests.
+    pub deliberations: DeliberationCounters,
 }
 
 impl Stats {
@@ -99,6 +105,8 @@ impl Stats {
             deaths_today: world.life.deaths_today,
             births_total: world.life.births_total,
             deaths_total: world.life.deaths_total,
+            deliberations_open: world.open_deliberations().len(),
+            deliberations: world.deliberation_counters.clone(),
         }
     }
 

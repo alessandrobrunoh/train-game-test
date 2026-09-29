@@ -8,8 +8,14 @@
 //!    needed, Operai are moved to food/trade jobs lacking staff (and back
 //!    when those are clearly overstaffed); quotas follow the population;
 //! 4. friend ties fade;
-//! 5. couples form between single adults with enough affinity;
-//! 6. births, if the administration allows them ([`World::birth_permit`]).
+//! 5. couple proposals between single adults with enough affinity: the
+//!    other one deliberates (accept, refuse, ask for time);
+//! 6. births: a couple considering a child is refused if the administration
+//!    does not allow it ([`World::birth_permit`]), otherwise the woman
+//!    deliberates whether to try now. A refusal may lead to protests.
+//!
+//! Deliberations are resolved at the end of the tick (see `deliberate.rs`):
+//! the couple forms, or the child is born, when the answer comes.
 //!
 //! Beds: every NPC, babies included, needs a bed (everyone sleeps in a Bed
 //! station), so the population is capped by the beds of the Dormitori.
@@ -21,12 +27,13 @@ use serde::{Deserialize, Serialize};
 use super::{NEEDED_JOBS, World, job_quotas, max_population_for};
 use crate::action::Action;
 use crate::carriage::{CarriageKind, StationKind};
+use crate::deliberation::DeliberationKind;
 use crate::event::{BirthDenial, DeathCause, Event, EventKind};
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
 use crate::names;
 use crate::npc::{
-    Inventory, Job, LifeStage, MAX_RELATIONS, Needs, Npc, Relation, RelationKind, Sex,
+    Inventory, Job, LifeStage, MAX_RELATIONS, Needs, Npc, Relation, RelationKind, Sex, Traits,
 };
 
 /// Life-cycle counters since the world was generated. "Today" means since
@@ -67,9 +74,18 @@ impl World {
     }
 
     /// Population above which the administration denies births: a fraction
-    /// ([`crate::SimParams::birth_max_bed_occupancy`]) of all beds.
+    /// ([`crate::SimParams::birth_max_bed_occupancy`]) of all beds, plus
+    /// [`crate::SimParams::protest_birth_bonus`] while a concession won by
+    /// protests lasts ([`World::birth_bonus_until`]).
     pub fn max_population(&self) -> usize {
-        max_population_for(&self.params, self.total_beds())
+        let beds = self.total_beds();
+        if self.birth_bonus_until().is_some() {
+            let share = (self.params.birth_max_bed_occupancy + self.params.protest_birth_bonus)
+                .clamp(0.0, 1.0);
+            (beds as f32 * share).floor() as usize
+        } else {
+            max_population_for(&self.params, beds)
+        }
     }
 
     /// Whether `id` was generated with the world (not born in the simulation).
@@ -97,7 +113,7 @@ impl World {
     }
 
     /// Residents per carriage, indexed like `carriages`.
-    fn resident_counts(&self) -> Vec<usize> {
+    pub(super) fn resident_counts(&self) -> Vec<usize> {
         let mut counts = vec![0; self.carriages.len()];
         for npc in &self.npcs {
             counts[npc.home.index()] += 1;
@@ -133,7 +149,7 @@ impl World {
     }
 
     /// Pushes an event without trimming the log (trimmed at the end of the tick).
-    fn push_event(&mut self, kind: EventKind) {
+    pub(super) fn push_event(&mut self, kind: EventKind) {
         self.events.push(Event {
             time: self.clock,
             kind,
@@ -231,6 +247,7 @@ impl World {
         for other in &mut self.npcs {
             other.relations.retain(|r| r.other != npc.id);
         }
+        self.forget_deliberations_of(npc.id);
     }
 
     // ------------------------------------------------------------------
@@ -268,8 +285,9 @@ impl World {
             self.push_event(kind);
         }
         self.fade_friendships();
-        self.form_couples(&mut residents);
-        self.births(&mut residents);
+        self.prune_cooldowns();
+        self.propose_couples();
+        self.births(&residents);
     }
 
     /// Refreshes every cached age; retires who turned 65. Returns who turned 18.
@@ -338,7 +356,7 @@ impl World {
         }
     }
 
-    fn can_couple(&self, a: &Npc, b: &Npc) -> bool {
+    pub(super) fn can_couple(&self, a: &Npc, b: &Npc) -> bool {
         let adult = |n: &Npc| n.age >= LifeStage::ADULTO_FROM;
         adult(a)
             && adult(b)
@@ -348,31 +366,9 @@ impl World {
             && a.age.abs_diff(b.age) <= self.params.couple_max_age_gap
     }
 
-    /// Single adults pair with their dearest eligible friend above
-    /// [`crate::SimParams::couple_affinity`]. Partners move in together if one's
-    /// Dormitorio has a free bed (the woman moves first).
-    fn form_couples(&mut self, residents: &mut [usize]) {
-        let threshold = self.params.couple_affinity;
-        for i in 0..self.npcs.len() {
-            let a = &self.npcs[i];
-            if a.age < LifeStage::ADULTO_FROM || a.partner().is_some() {
-                continue;
-            }
-            let best = a
-                .relations_of(RelationKind::Friend)
-                .filter(|r| r.affinity >= threshold)
-                .filter_map(|r| {
-                    let j = self.npc_index(r.other)?;
-                    self.can_couple(a, &self.npcs[j]).then_some((r.affinity, j))
-                })
-                .max_by(|x, y| x.0.total_cmp(&y.0).then(y.1.cmp(&x.1)));
-            if let Some((_, j)) = best {
-                self.couple(i, j, residents);
-            }
-        }
-    }
-
-    fn couple(&mut self, i: usize, j: usize, residents: &mut [usize]) {
+    /// Makes NPCs `i` and `j` (indices) partners. They move in together if
+    /// one's Dormitorio has a free bed (the woman moves first).
+    pub(super) fn couple(&mut self, i: usize, j: usize, residents: &mut [usize]) {
         let (a, b) = (self.npcs[i].id, self.npcs[j].id);
         for (x, other) in [(i, b), (j, a)] {
             if let Some(r) = self.npcs[x].relation_mut(other) {
@@ -410,8 +406,9 @@ impl World {
         self.push_event(kind);
     }
 
-    /// Couples with a fertile woman may have a child, if allowed.
-    fn births(&mut self, residents: &mut [usize]) {
+    /// Couples with a fertile woman may consider a child: refused if the
+    /// administration does not allow it, else the woman deliberates.
+    fn births(&mut self, residents: &[usize]) {
         let p = &self.params;
         let fertile = p.fertile_min_age..=p.fertile_max_age;
         let daily_chance = p.birth_chance_per_year / p.days_per_year.max(1) as f32;
@@ -432,39 +429,56 @@ impl World {
                 .children()
                 .filter_map(|c| self.npc(c))
                 .any(|c| c.age < spacing);
-            if toddler || self.rng.random::<f32>() >= daily_chance {
+            if toddler || self.is_involved(mother.id) || self.rng.random::<f32>() >= daily_chance {
                 continue;
             }
             match self.birth_permit_with(residents) {
-                Ok(fallback) => {
-                    let home = self
-                        .free_dorm(residents, Some(self.npcs[i].home))
-                        .unwrap_or(fallback);
-                    residents[home.index()] += 1;
-                    self.give_birth(i, j, home);
+                Ok(_) => {
+                    let (mother, partner) = (self.npcs[i].id, self.npcs[j].id);
+                    self.open_deliberation(mother, DeliberationKind::HaveChild { partner });
                 }
-                Err(reason) => {
-                    self.life.births_denied_total += 1;
-                    let now = self.clock;
-                    let every = self.params.birth_denied_log_days.max(1) * crate::MINUTES_PER_DAY;
-                    if self
-                        .last_birth_denied_log
-                        .is_none_or(|last| now.since(last) >= every)
-                    {
-                        self.last_birth_denied_log = Some(now);
-                        let (m, f) = (&self.npcs[i], &self.npcs[j]);
-                        let kind = EventKind::BirthDenied {
-                            mother: m.id,
-                            mother_name: m.name.clone(),
-                            father: f.id,
-                            father_name: f.name.clone(),
-                            reason,
-                        };
-                        self.push_event(kind);
-                    }
-                }
+                Err(reason) => self.deny_birth(i, j, reason),
             }
         }
+    }
+
+    /// Mother `i` and father `j` (indices) try for a child: born if the
+    /// administration still allows it, else denied.
+    pub(super) fn attempt_birth(&mut self, i: usize, j: usize, residents: &mut [usize]) {
+        match self.birth_permit_with(residents) {
+            Ok(fallback) => {
+                let home = self
+                    .free_dorm(residents, Some(self.npcs[i].home))
+                    .unwrap_or(fallback);
+                residents[home.index()] += 1;
+                self.give_birth(i, j, home);
+            }
+            Err(reason) => self.deny_birth(i, j, reason),
+        }
+    }
+
+    /// The administration refuses mother `i` and father `j` a child (logged at
+    /// most every [`crate::SimParams::birth_denied_log_days`]); they may protest.
+    fn deny_birth(&mut self, i: usize, j: usize, reason: BirthDenial) {
+        self.life.births_denied_total += 1;
+        let now = self.clock;
+        let every = self.params.birth_denied_log_days.max(1) * crate::MINUTES_PER_DAY;
+        if self
+            .last_birth_denied_log
+            .is_none_or(|last| now.since(last) >= every)
+        {
+            self.last_birth_denied_log = Some(now);
+            let (m, f) = (&self.npcs[i], &self.npcs[j]);
+            let kind = EventKind::BirthDenied {
+                mother: m.id,
+                mother_name: m.name.clone(),
+                father: f.id,
+                father_name: f.name.clone(),
+                reason,
+            };
+            self.push_event(kind);
+        }
+        self.protest_on_denial(i, j);
     }
 
     /// A child of `mother` and `father` (indices) is born, living in `home`.
@@ -498,6 +512,11 @@ impl World {
             }
             first = pool.choose(&mut self.rng).copied().unwrap_or("Anna");
         }
+        let traits = Traits::inherited(
+            self.npcs[mother].traits,
+            self.npcs[father].traits,
+            &mut self.rng,
+        );
         let (m, f) = (&self.npcs[mother], &self.npcs[father]);
         let name = format!("{first} {}", f.surname());
         let id = NpcId(self.next_npc_id);
@@ -549,6 +568,7 @@ impl World {
             action_until: now,
             starving_minutes: 0,
             relations,
+            traits,
         };
         for &parent in &[mother, father] {
             self.npcs[parent].relations.push(Relation {

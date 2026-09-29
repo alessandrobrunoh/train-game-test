@@ -29,12 +29,18 @@
 //! of old age (or hunger). Jobs follow the population: new adults take the job
 //! most needed, food first. See [`World::life`] and [`Stats`].
 //!
+//! Deliberations ([`deliberation`]): rare, meaningful life choices (accepting
+//! a couple proposal, having a child, stealing, protesting) are asked as an
+//! Italian question with 2–4 options; a brain may answer them, otherwise a
+//! built-in rule decides. See [`World::open_deliberations`].
+//!
 //! 1 tick = 1 game minute. All randomness comes from seeded ChaCha RNGs, so a
 //! world is fully deterministic given its seed and the brain's seed.
 
 pub mod action;
 pub mod brain;
 pub mod carriage;
+pub mod deliberation;
 pub mod event;
 pub mod ids;
 pub mod item;
@@ -48,10 +54,16 @@ pub mod world;
 pub use action::{Action, ActionKind, ActionOption, DecisionRequest};
 pub use brain::{Brain, RandomBrain, THINK, UtilityBrain, UtilityWeights};
 pub use carriage::{Carriage, CarriageKind, Station, StationKind};
+pub use deliberation::{
+    Choice, Deliberation, DeliberationAnswer, DeliberationCounters, DeliberationId,
+    DeliberationKind, DeliberationOption, Gathering, Grievance, ResolvedDeliberation, Resolver,
+};
 pub use event::{BirthDenial, DeathCause, Event, EventKind};
 pub use ids::{CarriageId, NpcId, StationId};
 pub use item::{ItemKind, Stock};
-pub use npc::{Inventory, Job, LifeStage, MAX_RELATIONS, Needs, Npc, Relation, RelationKind, Sex};
+pub use npc::{
+    Inventory, Job, LifeStage, MAX_RELATIONS, Needs, Npc, Relation, RelationKind, Sex, Traits,
+};
 pub use params::SimParams;
 pub use stats::Stats;
 pub use time::{GameTime, MINUTES_PER_DAY, MINUTES_PER_HOUR};

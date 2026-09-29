@@ -131,8 +131,10 @@ pub struct SimParams {
     /// Whether couples may also form between two NPCs of the same sex (they
     /// don't have children).
     pub same_sex_couples: bool,
-    /// Yearly chance that a couple with a fertile woman has a child (if the
-    /// administration allows it).
+    /// Yearly chance that a couple with a fertile woman considers a child. If
+    /// the administration allows it, she deliberates ("provarci ora" /
+    /// "aspettare", see [`crate::DeliberationKind::HaveChild`]); otherwise the
+    /// birth is denied.
     pub birth_chance_per_year: f32,
     /// Fertile ages of the mother, inclusive.
     pub fertile_min_age: u32,
@@ -148,6 +150,58 @@ pub struct SimParams {
     pub birth_denied_log_days: u64,
     /// Generation: spare beds in each Dormitorio, as a fraction of its residents.
     pub spare_beds: f32,
+
+    // --- Deliberations (see [`crate::deliberation`]) ---
+    /// Scales how often temptations (theft) and protests are considered;
+    /// 0 disables them. Couple proposals and children follow the life cycle.
+    pub deliberation_rate: f32,
+    /// Game hours a brain has to answer, per kind; then the built-in rule decides.
+    pub couple_deliberation_hours: u64,
+    pub child_deliberation_hours: u64,
+    pub theft_deliberation_hours: u64,
+    pub protest_deliberation_hours: u64,
+    /// Couple: after "chiede tempo" the proposal comes back after this many days...
+    pub proposal_retry_days: u64,
+    /// ...after a refusal not before this many days, and the affinity drops by this.
+    pub proposal_refused_days: u64,
+    pub proposal_refused_affinity: f32,
+    /// Theft: hourly chance, while the Mercati are open, that an NPC (14+)
+    /// who needs an Attrezzo or Vestito it cannot afford, at most
+    /// `theft_max_distance` carriages from a Mercato that has one, is tempted.
+    pub theft_temptation_per_hour: f32,
+    pub theft_max_distance: u32,
+    /// No new temptation for the same NPC for this many days.
+    pub theft_cooldown_days: u64,
+    /// Chance of being caught: this, plus `theft_caught_merchant` if a
+    /// Mercante is at the counter, plus `theft_caught_per_witness` per other
+    /// person in the Mercato (capped at 0.9 overall).
+    pub theft_caught_base: f32,
+    pub theft_caught_merchant: f32,
+    pub theft_caught_per_witness: f32,
+    /// Affinity a caught thief loses with everyone who knows them.
+    pub theft_caught_affinity: f32,
+    /// Protest: chance that each partner of a couple refused a child
+    /// deliberates whether to protest...
+    pub protest_chance_on_denial: f32,
+    /// ...and that a hungry adult does when the Mense run out of Razioni (at
+    /// most `protest_max_on_shortage` people each time).
+    pub protest_chance_on_shortage: f32,
+    pub protest_max_on_shortage: u32,
+    /// No new protest deliberation for the same NPC for this many days.
+    pub protest_cooldown_days: u64,
+    /// How long a protest gathering lasts.
+    pub protest_hours: u64,
+    /// The administration gives in once `protest_threshold` people protested
+    /// the same grievance within `protest_window_days`: against denied births
+    /// it allows `protest_birth_bonus` more of the beds to be filled
+    /// (on top of `birth_max_bed_occupancy`) for `protest_concession_days`;
+    /// against hunger it hands out emergency rations.
+    pub protest_threshold: u32,
+    pub protest_window_days: u64,
+    pub protest_birth_bonus: f32,
+    pub protest_concession_days: u64,
+    /// Resolved deliberations kept in [`crate::World::recent_deliberations`].
+    pub recent_deliberations_kept: usize,
 
     // --- Event log ---
     /// Most events kept in [`crate::World::events`]: beyond it the oldest are
@@ -227,7 +281,7 @@ impl Default for SimParams {
             couple_affinity: 0.5,
             couple_max_age_gap: 12,
             same_sex_couples: false,
-            birth_chance_per_year: 0.35,
+            birth_chance_per_year: 0.45,
             fertile_min_age: 18,
             fertile_max_age: 42,
             birth_spacing_years: 2,
@@ -235,6 +289,32 @@ impl Default for SimParams {
             birth_min_razioni_per_person: 1.0,
             birth_denied_log_days: 3,
             spare_beds: 0.15,
+
+            deliberation_rate: 1.0,
+            couple_deliberation_hours: 6,
+            child_deliberation_hours: 6,
+            theft_deliberation_hours: 2,
+            protest_deliberation_hours: 3,
+            proposal_retry_days: 3,
+            proposal_refused_days: 12,
+            proposal_refused_affinity: 0.3,
+            theft_temptation_per_hour: 0.1,
+            theft_max_distance: 1,
+            theft_cooldown_days: 6,
+            theft_caught_base: 0.1,
+            theft_caught_merchant: 0.25,
+            theft_caught_per_witness: 0.03,
+            theft_caught_affinity: 0.15,
+            protest_chance_on_denial: 0.5,
+            protest_chance_on_shortage: 0.3,
+            protest_max_on_shortage: 8,
+            protest_cooldown_days: 12,
+            protest_hours: 3,
+            protest_threshold: 3,
+            protest_window_days: 12,
+            protest_birth_bonus: 0.02,
+            protest_concession_days: 24,
+            recent_deliberations_kept: 64,
 
             max_events: default_max_events(),
         }
@@ -260,6 +340,18 @@ impl SimParams {
             return (-self.mortality_base * age).exp();
         }
         (-(self.mortality_base / b) * ((b * age).exp() - 1.0)).exp()
+    }
+
+    /// Game minutes a brain has to answer a deliberation of `kind`.
+    pub fn deliberation_minutes(&self, kind: &crate::DeliberationKind) -> u64 {
+        use crate::DeliberationKind as K;
+        let hours = match kind {
+            K::CoupleProposal { .. } => self.couple_deliberation_hours,
+            K::HaveChild { .. } => self.child_deliberation_hours,
+            K::Theft { .. } => self.theft_deliberation_hours,
+            K::Protest { .. } => self.protest_deliberation_hours,
+        };
+        hours * crate::time::MINUTES_PER_HOUR
     }
 
     pub fn is_night(&self, hour: u32) -> bool {

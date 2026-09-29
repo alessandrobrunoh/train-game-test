@@ -4,6 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::deliberation::{Choice, DeliberationId, DeliberationKind, Grievance, Resolver};
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
 use crate::npc::{Job, Sex};
@@ -115,6 +116,62 @@ pub enum EventKind {
         npc: NpcId,
         name: String,
         item: ItemKind,
+    },
+    /// A deliberation opened (see [`crate::Deliberation`]). Logged only for
+    /// brains that answer deliberations: with the built-in rules alone it is
+    /// resolved in the same minute and only `DeliberationResolved` is logged.
+    DeliberationAsked {
+        id: DeliberationId,
+        npc: NpcId,
+        name: String,
+        kind: DeliberationKind,
+        question: String,
+    },
+    /// `npc` decided: `description` is the chosen option's text.
+    DeliberationResolved {
+        id: DeliberationId,
+        npc: NpcId,
+        name: String,
+        kind: DeliberationKind,
+        choice: Choice,
+        description: String,
+        by: Resolver,
+        /// The brain's confidence (None for the rules).
+        confidence: Option<f32>,
+    },
+    /// `npc` stole `item` at the Mercato `carriage`; if `caught` the item
+    /// stays there and `fine` tokens are paid.
+    Theft {
+        npc: NpcId,
+        name: String,
+        sex: Sex,
+        item: ItemKind,
+        carriage: CarriageId,
+        caught: bool,
+        fine: u32,
+    },
+    /// `npc` asked `helper` for tokens: `tokens` given (0: refused).
+    HelpAsked {
+        npc: NpcId,
+        name: String,
+        helper: NpcId,
+        helper_name: String,
+        tokens: u32,
+    },
+    /// A protest gathering was called in `place`, from `start` to `end`.
+    ProtestCalled {
+        grievance: Grievance,
+        place: CarriageId,
+        start: GameTime,
+        end: GameTime,
+    },
+    /// The administration gave in to `protesters` recent protesters: more
+    /// births allowed until `until` (BirthDenied), or emergency rations for
+    /// the hungry (FoodShortage, `until` is None).
+    AdminConceded {
+        grievance: Grievance,
+        protesters: u32,
+        until: Option<GameTime>,
     },
 }
 
@@ -281,6 +338,95 @@ impl fmt::Display for Event {
             ),
             EventKind::PlayerGave { name, item, .. } => {
                 write!(f, "Hai dato {} a {name}", item.with_article())
+            }
+            EventKind::DeliberationAsked { name, question, .. } => {
+                write!(f, "{name} ci pensa: {question}")
+            }
+            EventKind::DeliberationResolved {
+                name,
+                kind,
+                description,
+                by,
+                confidence,
+                ..
+            } => {
+                write!(f, "{name} ha deciso ({}): {description}", kind.topic())?;
+                match (by, confidence) {
+                    (Resolver::Brain, Some(c)) => write!(f, " [cervello, {:.0}%]", c * 100.0),
+                    (Resolver::Brain, None) => f.write_str(" [cervello]"),
+                    (Resolver::Rules, _) => Ok(()),
+                }
+            }
+            EventKind::Theft {
+                name,
+                sex,
+                item,
+                carriage,
+                caught,
+                fine,
+                ..
+            } => {
+                if *caught {
+                    write!(
+                        f,
+                        "{name} è {} a rubare {} al Mercato (carrozza {carriage}): multa di {fine} gettoni",
+                        sex.pick("stata sorpresa", "stato sorpreso"),
+                        item.with_article()
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{name} ha rubato {} al Mercato (carrozza {carriage}) senza farsi vedere",
+                        item.with_article()
+                    )
+                }
+            }
+            EventKind::HelpAsked {
+                name,
+                helper_name,
+                tokens,
+                ..
+            } => match tokens {
+                0 => write!(
+                    f,
+                    "{helper_name} non aiuta {name}, che gli aveva chiesto qualche gettone"
+                ),
+                1 => write!(f, "{helper_name} aiuta {name} con 1 gettone"),
+                n => write!(f, "{helper_name} aiuta {name} con {n} gettoni"),
+            },
+            EventKind::ProtestCalled {
+                grievance,
+                place,
+                start,
+                end,
+            } => write!(
+                f,
+                "Protesta {} nella carrozza {place}, giorno {} dalle {:02}:{:02} alle {:02}:{:02}",
+                grievance.against(),
+                start.day(),
+                start.hour(),
+                start.minute(),
+                end.hour(),
+                end.minute()
+            ),
+            EventKind::AdminConceded {
+                grievance,
+                protesters,
+                until,
+            } => {
+                write!(
+                    f,
+                    "L'amministrazione cede alle proteste ({protesters} persone): "
+                )?;
+                match (grievance, until) {
+                    (Grievance::BirthDenied, Some(t)) => {
+                        write!(f, "più nascite consentite fino al giorno {}", t.day())
+                    }
+                    (Grievance::BirthDenied, None) => f.write_str("più nascite consentite"),
+                    (Grievance::FoodShortage, _) => {
+                        f.write_str("razioni d'emergenza per chi ha fame")
+                    }
+                }
             }
         }
     }

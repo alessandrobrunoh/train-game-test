@@ -5,12 +5,19 @@
 //! batched into a single [`Brain::decide`] call, so an expensive brain (e.g. a
 //! text encoder scoring `World::npc_context` against each option description)
 //! can run one batched inference per tick.
+//!
+//! Rare life choices go through [deliberations](crate::deliberation) instead:
+//! the world tells the brain about new ones ([`Brain::deliberations_opened`])
+//! and polls for answers ([`Brain::deliberations_resolved`]). Brains that do
+//! not answer deliberations ([`Brain::answers_deliberations`] is false, the
+//! default) leave them to the built-in rules, which then decide at once.
 
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
+use crate::deliberation::{Deliberation, DeliberationAnswer};
 use crate::item::ItemKind;
 use crate::npc::Npc;
 use crate::world::World;
@@ -36,6 +43,28 @@ pub trait Brain {
     /// look at the structured fields can opt out (they then get empty strings).
     fn wants_descriptions(&self) -> bool {
         true
+    }
+
+    /// Whether this brain answers deliberations. If false (the default) the
+    /// built-in rule resolves each deliberation in the same tick it opens
+    /// (no pointless wait); if true, open deliberations wait for
+    /// [`Brain::deliberations_resolved`] until their
+    /// [`Deliberation::deadline`], then the rule decides.
+    fn answers_deliberations(&self) -> bool {
+        false
+    }
+
+    /// Called once per tick with the deliberations opened in it (all of
+    /// them, also when [`Brain::answers_deliberations`] is false), before
+    /// [`Brain::deliberations_resolved`] is polled: a brain can enqueue them
+    /// to an asynchronous model, or answer them right away.
+    fn deliberations_opened(&mut self, _world: &World, _new: &[Deliberation]) {}
+
+    /// Polled every tick: answers ready so far. The world ignores answers to
+    /// unknown or already closed deliberations and out-of-range options
+    /// (counted in [`crate::DeliberationCounters::answers_ignored`]).
+    fn deliberations_resolved(&mut self, _world: &World) -> Vec<DeliberationAnswer> {
+        Vec::new()
     }
 }
 

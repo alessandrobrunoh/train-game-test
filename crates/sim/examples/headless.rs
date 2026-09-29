@@ -7,8 +7,8 @@
 use std::time::Instant;
 
 use sim::{
-    Action, ActionKind, DeathCause, EventKind, ItemKind, LifeStage, MINUTES_PER_DAY, Needs, Stats,
-    UtilityBrain, World,
+    Action, ActionKind, Choice, DeathCause, DeliberationCounters, DeliberationKind, EventKind,
+    ItemKind, LifeStage, MINUTES_PER_DAY, Needs, Stats, UtilityBrain, World,
 };
 
 fn main() {
@@ -172,11 +172,16 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
         "Per anno: popolazione (% delle cuccette), bambini/giovani/adulti/anziani, coppie, nati/morti (di fame)/nascite negate nell'anno, \
          età media, nati sul treno, scorte a fine anno (verdura, razioni), attrezzi e vestiti posseduti, gettoni totali"
     );
+    println!(
+        "Deliberazioni per anno: aperte per tipo (coppia/figlio/furto/protesta), proposte accettate/rifiutate/rinviate, \
+         figli tentati/rimandati, furti (scoperti), aiuti dati/negati, proteste convocate/concessioni"
+    );
     let start = Instant::now();
     let mut min_pop = s.population;
     let mut max_pop = s.population;
     for year in 1..=years {
         let before = world.life.clone();
+        let delib_before = world.deliberation_counters.clone();
         for _ in 0..world.params.days_per_year {
             run_day(world, brain);
             let pop = world.npcs.len();
@@ -208,6 +213,7 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
             s.owned(ItemKind::Vestito),
             s.tokens,
         );
+        print_deliberations(&delib_before, &world.deliberation_counters);
         if s.population == 0 {
             break;
         }
@@ -224,6 +230,16 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
         life.couples_formed_total,
         world.npcs.len(),
     );
+    let d = &world.deliberation_counters;
+    println!(
+        "Deliberazioni: {} aperte ({:.1} al giorno), {} decise dalle regole, {} dal cervello, {} annullate.",
+        d.opened_total(),
+        d.opened_total() as f64 / (years * u64::from(world.params.days_per_year)).max(1) as f64,
+        d.by_rules.iter().sum::<u64>(),
+        d.by_brain.iter().sum::<u64>(),
+        d.cancelled,
+    );
+    print_deliberations(&DeliberationCounters::default(), d);
     println!(
         "Ultimi eventi della vita ({} eventi in totale):",
         world.events_total()
@@ -244,4 +260,51 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
     if let Some(npc) = world.npcs.iter().rev().find(|n| n.partner().is_some()) {
         println!("{}", world.npc_context(npc.id).unwrap_or_default());
     }
+    println!("\nUltima deliberazione di ogni tipo:");
+    for k in 0..DeliberationKind::COUNT {
+        let Some(r) = world
+            .recent_deliberations()
+            .iter()
+            .rev()
+            .find(|r| r.deliberation.kind.index() == k)
+        else {
+            continue;
+        };
+        let d = &r.deliberation;
+        println!(
+            "[{}] {}\n  {}",
+            d.asked,
+            d.question,
+            d.context.replace('\n', "\n  ")
+        );
+        for (i, o) in d.options.iter().enumerate() {
+            let mark = if i == r.choice { "->" } else { "  " };
+            println!("  {mark} {} ({})", o.description, o.choice.key());
+        }
+    }
+}
+
+/// One line of deliberation counts between two snapshots of the counters.
+fn print_deliberations(before: &DeliberationCounters, after: &DeliberationCounters) {
+    let opened = |k: usize| after.opened[k] - before.opened[k];
+    let chosen = |c: Choice| after.chosen(c) - before.chosen(c);
+    let kinds: Vec<String> = (0..DeliberationKind::COUNT)
+        .map(|k| opened(k).to_string())
+        .collect();
+    println!(
+        "      delib {:3} ({}) | coppia {}/{}/{} | figlio {}/{} | furti {} ({} scoperti) aiuti {}/{} | proteste {} concessioni {}",
+        (0..DeliberationKind::COUNT).map(opened).sum::<u64>(),
+        kinds.join("/"),
+        chosen(Choice::Accept),
+        chosen(Choice::Refuse),
+        chosen(Choice::AskForTime),
+        chosen(Choice::TryForChild),
+        chosen(Choice::Wait),
+        after.thefts - before.thefts,
+        after.thefts_caught - before.thefts_caught,
+        after.help_given - before.help_given,
+        after.help_refused - before.help_refused,
+        after.protests_called - before.protests_called,
+        after.concessions - before.concessions,
+    );
 }

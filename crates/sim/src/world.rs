@@ -10,14 +10,18 @@ use serde::{Deserialize, Serialize};
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
 use crate::brain::{Brain, THINK};
 use crate::carriage::{Carriage, CarriageKind, StationKind};
+use crate::deliberation::{
+    Deliberation, DeliberationCounters, Gathering, Grievance, ResolvedDeliberation,
+};
 use crate::event::{DeathCause, Event, EventKind};
 use crate::ids::{CarriageId, NpcId, StationId};
 use crate::item::{ItemKind, Stock};
 use crate::names;
-use crate::npc::{Inventory, Job, LifeStage, Needs, Npc, Relation, RelationKind, Sex};
+use crate::npc::{Inventory, Job, LifeStage, Needs, Npc, Relation, RelationKind, Sex, Traits};
 use crate::params::SimParams;
 use crate::time::GameTime;
 
+mod deliberate;
 mod life;
 
 pub use life::LifeCounters;
@@ -85,6 +89,32 @@ pub struct World {
     /// Edge-trigger for Shortage / Restocked events, indexed by item.
     shortages: [bool; ItemKind::COUNT],
     rng: ChaCha8Rng,
+    /// Open deliberations, sorted by id (see [`World::open_deliberations`]).
+    #[serde(default)]
+    deliberations: Vec<Deliberation>,
+    #[serde(default)]
+    next_deliberation_id: u64,
+    /// Deliberations with a lower id were already passed to the brain.
+    #[serde(default)]
+    notified_until: u64,
+    /// Last resolved deliberations, oldest first.
+    #[serde(default)]
+    recent_deliberations: Vec<ResolvedDeliberation>,
+    /// Deliberation counters since the world was generated.
+    #[serde(default)]
+    pub deliberation_counters: DeliberationCounters,
+    /// Pending proposal / temptation / protest cooldowns.
+    #[serde(default)]
+    cooldowns: Vec<deliberate::CooldownUntil>,
+    /// Protest gatherings not over yet.
+    #[serde(default)]
+    gatherings: Vec<Gathering>,
+    /// Recent protesters (when, about what), for the administration's response.
+    #[serde(default)]
+    protest_tally: Vec<(GameTime, Grievance)>,
+    /// After protests the administration allows more births until then.
+    #[serde(default)]
+    birth_bonus_until: Option<GameTime>,
     /// Scratch buffer reused every tick (see `presence_index`).
     #[serde(skip)]
     presence: Presence,
@@ -303,6 +333,8 @@ impl World {
             }
         }
 
+        // Characters from their own stream, so they don't disturb the rest.
+        let mut trait_rng = ChaCha8Rng::seed_from_u64(seed ^ 0x7EA1_75C0_FFEE);
         let mut npcs = Vec::with_capacity(n_npcs);
         for i in 0..n_npcs {
             let (age, sex) = (ages[i], sexes[i]);
@@ -348,6 +380,7 @@ impl World {
                 action_until: clock + rng.random_range(0..30),
                 starving_minutes: 0,
                 relations: Vec::new(),
+                traits: Traits::random(&mut trait_rng),
             });
         }
 
@@ -481,6 +514,15 @@ impl World {
             last_birth_denied_log: None,
             shortages: [false; ItemKind::COUNT],
             rng,
+            deliberations: Vec::new(),
+            next_deliberation_id: 0,
+            notified_until: 0,
+            recent_deliberations: Vec::new(),
+            deliberation_counters: DeliberationCounters::default(),
+            cooldowns: Vec::new(),
+            gatherings: Vec::new(),
+            protest_tally: Vec::new(),
+            birth_bonus_until: None,
             presence: Presence::default(),
         }
     }
@@ -774,7 +816,11 @@ impl World {
     /// 4. updates needs, starvation and deaths;
     /// 5. hourly/daily bookkeeping (Rottame income, spoilage, clothes wear,
     ///    stipends, shortage events) and, at midnight, the life cycle (aging,
-    ///    deaths, couples, births, workforce: see [`World::life`]).
+    ///    deaths, couples, births, workforce: see [`World::life`]); hourly,
+    ///    temptations to steal;
+    /// 6. deliberations: new ones go to the brain, its answers are applied,
+    ///    the others are resolved by the built-in rule at their deadline (at
+    ///    once if [`Brain::answers_deliberations`] is false).
     pub fn tick(&mut self, brain: &mut dyn Brain) {
         let now = self.clock;
 
@@ -831,8 +877,11 @@ impl World {
                 self.daily_life();
             }
             self.check_shortages();
+            self.end_gatherings();
+            self.temptations();
         }
 
+        self.run_deliberations(brain);
         self.trim_events();
         self.clock = now + 1;
     }
@@ -873,8 +922,27 @@ impl World {
     /// Candidate actions for NPC at index `i` (descriptions left empty).
     /// Only valid options are generated; `Idle` is always the first one.
     fn options_for(&mut self, i: usize, presence: &Presence) -> Vec<ActionOption> {
-        let p = &self.params;
         let now = self.clock;
+        // Protesters only go to the protest and stand there until it ends.
+        if let Some((place, end)) = self.protest_duty(self.npcs[i].id) {
+            let here = self.npcs[i].carriage;
+            let (action, minutes, goal) = if here != place {
+                (
+                    Action::Travel { to: place },
+                    self.travel_minutes(here, place).max(1),
+                    Some(ActionKind::Idle),
+                )
+            } else {
+                (Action::Idle, end.since(now).max(1), None)
+            };
+            return vec![ActionOption {
+                action,
+                minutes,
+                goal,
+                description: String::new(),
+            }];
+        }
+        let p = &self.params;
         let npc = &self.npcs[i];
         let here = npc.carriage;
         let carriage = &self.carriages[here.index()];
@@ -1040,6 +1108,26 @@ impl World {
         let here = &self.carriages[npc.carriage.index()];
         let end = self.clock + option.minutes;
         let minutes = option.minutes;
+        if let Some(g) = self.protest_of(npc.id) {
+            match option.action {
+                Action::Travel { to } => {
+                    return format!(
+                        "va a protestare in {} ({minutes} min)",
+                        self.carriage_label(to)
+                    );
+                }
+                Action::Idle => {
+                    return format!(
+                        "protesta {} in {} fino alle {:02}:{:02}",
+                        g.grievance.against(),
+                        here.label(),
+                        end.hour(),
+                        end.minute()
+                    );
+                }
+                _ => {}
+            }
+        }
         match option.action {
             Action::Idle => format!("resta a oziare per {minutes} minuti"),
             Action::Eat(_) => format!("mangia una razione in {}", here.label()),
@@ -1466,11 +1554,13 @@ impl World {
     }
 
     fn check_shortages(&mut self) {
+        let mut famine = false;
         for item in TRACKED_SHORTAGES {
             let empty = self.available(item) < 1.0;
             let flag = &mut self.shortages[item.index()];
             if empty != *flag {
                 *flag = empty;
+                famine |= empty && item == ItemKind::Razione;
                 let kind = if empty {
                     EventKind::Shortage { item }
                 } else {
@@ -1481,6 +1571,9 @@ impl World {
                     kind,
                 });
             }
+        }
+        if famine {
+            self.food_protests();
         }
     }
 }

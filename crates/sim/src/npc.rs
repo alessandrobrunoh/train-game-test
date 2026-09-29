@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::action::Action;
@@ -201,6 +202,64 @@ pub struct Npc {
     /// dead NPCs are removed.
     #[serde(default)]
     pub relations: Vec<Relation>,
+    /// Persistent character, drawn at birth (partly inherited).
+    #[serde(default)]
+    pub traits: Traits,
+}
+
+/// Character traits in `0..=1`, drawn at birth and never changed. They weigh
+/// the built-in rules of the deliberations (see [`crate::Deliberation`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Traits {
+    /// High: rarely steals.
+    pub honesty: f32,
+    /// High: dares (protests, proposes, steals if dishonest); low: cautious.
+    pub boldness: f32,
+}
+
+impl Default for Traits {
+    fn default() -> Self {
+        Self {
+            honesty: 0.5,
+            boldness: 0.5,
+        }
+    }
+}
+
+impl Traits {
+    /// Random traits, bunched around 0.5 (mean of two uniform draws).
+    pub fn random(rng: &mut impl rand::Rng) -> Traits {
+        let mut draw = || (rng.random::<f32>() + rng.random::<f32>()) / 2.0;
+        Traits {
+            honesty: draw(),
+            boldness: draw(),
+        }
+    }
+
+    /// A child's traits: 60% the parents' average, 40% random.
+    pub fn inherited(a: Traits, b: Traits, rng: &mut impl rand::Rng) -> Traits {
+        let own = Traits::random(rng);
+        let mix = |x: f32, y: f32, r: f32| (0.3 * (x + y) + 0.4 * r).clamp(0.0, 1.0);
+        Traits {
+            honesty: mix(a.honesty, b.honesty, own.honesty),
+            boldness: mix(a.boldness, b.boldness, own.boldness),
+        }
+    }
+
+    /// Short Italian description, e.g. "onesta e prudente".
+    pub fn describe(&self, sex: Sex) -> String {
+        let honesty = match self.honesty {
+            h if h < 0.35 => sex.pick("poco scrupolosa", "poco scrupoloso"),
+            h if h > 0.65 => sex.pick("molto onesta", "molto onesto"),
+            _ => sex.pick("onesta", "onesto"),
+        };
+        let boldness = match self.boldness {
+            b if b < 0.35 => "prudente",
+            b if b > 0.65 => "audace",
+            _ => sex.pick("riflessiva", "riflessivo"),
+        };
+        format!("{honesty} e {boldness}")
+    }
 }
 
 impl Npc {
