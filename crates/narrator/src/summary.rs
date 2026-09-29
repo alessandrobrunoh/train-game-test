@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sim::{
     CarriageKind, DeathCause, EventKind, ItemCategory, ItemKind, Job, LifeStage, MINUTES_PER_DAY,
-    RECIPES, Stats, Trend, World,
+    Stats, Trend, World,
 };
 
 /// Fill (stock / storage capacity on the whole train) under which an item is
@@ -127,7 +127,7 @@ pub struct EconomyLine {
 }
 
 /// What exists already, by name. The guard checks references and duplicates
-/// against it; the Custode (A2) will resolve these names to stable keys.
+/// against it; the Custode resolves these names to ids.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
     #[serde(rename = "oggetti")]
@@ -150,40 +150,47 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// The catalog of `sim` as it is today (static tables; A2 makes them
-    /// grow during the game).
+    /// The catalog a new world starts with (the builtin rows).
     pub fn of_sim() -> Catalog {
-        let items = ItemKind::ALL.iter().map(|i| i.name().to_string()).collect();
-        let item_aliases = ItemKind::ALL
-            .iter()
+        Catalog::of(&sim::Catalog::builtin())
+    }
+
+    /// What exists in a world's live catalog ([`World::catalog`]): the
+    /// builtin items, recipes and jobs and those the Custode added.
+    pub fn of(cat: &sim::Catalog) -> Catalog {
+        let items = cat.kinds().map(|i| i.name().to_string()).collect();
+        let item_aliases = cat
+            .kinds()
             .filter(|i| i.plural() != i.name())
             .map(|i| (i.plural().to_string(), i.name().to_string()))
             .collect();
-        let recipes = RECIPES
-            .iter()
-            .map(|r| {
+        let recipes = cat
+            .recipe_ids()
+            .map(|id| {
+                let r = cat.recipe(id);
                 let inputs: Vec<&str> = r.inputs.iter().map(|i| i.item.name()).collect();
                 let from = if inputs.is_empty() {
                     "dal nulla".to_string()
                 } else {
                     inputs.join(" + ")
                 };
-                let job = r.maker().map_or("giocatore", Job::name);
+                let job = cat.maker(id).map_or("giocatore", Job::name);
                 (
                     r.name.to_string(),
                     format!("{from} → {} ({job})", r.output.name()),
                 )
             })
             .collect();
-        let recipe_shapes = RECIPES
+        let recipe_shapes = cat
+            .recipes()
             .iter()
             .map(|r| {
                 let inputs = r.inputs.iter().map(|i| i.item.name().to_string()).collect();
                 (r.name.to_string(), r.output.name().to_string(), inputs)
             })
             .collect();
-        let jobs = Job::ALL
-            .iter()
+        let jobs = cat
+            .job_kinds()
             .map(|j| (j.name().to_string(), j.workplace_kind().name().to_string()))
             .collect();
         let carriage_kinds = CarriageKind::ALL
@@ -219,8 +226,11 @@ impl WorldSummary {
             .iter()
             .map(|&s| (stage_name(s).to_string(), stats.stage(s) as u32))
             .collect();
-        let mut by_job: BTreeMap<String, u32> =
-            Job::ALL.iter().map(|j| (j.name().to_string(), 0)).collect();
+        let mut by_job: BTreeMap<String, u32> = world
+            .catalog()
+            .job_kinds()
+            .map(|j| (j.name().to_string(), 0))
+            .collect();
         for npc in world.npcs.iter().filter(|n| n.stage() == LifeStage::Adulto) {
             let key = npc.job.map_or("nessuno", Job::name);
             *by_job.entry(key.to_string()).or_default() += 1;
@@ -228,13 +238,14 @@ impl WorldSummary {
 
         // Stock and shortages.
         let total = world.total_stock();
-        let mut stock = Vec::with_capacity(ItemKind::COUNT);
+        let mut stock = Vec::with_capacity(world.catalog().item_count());
         let mut shortages = Vec::new();
-        for item in ItemKind::ALL {
+        for def in world.catalog().items() {
+            let item = def.kind;
             let cap: f32 = world
                 .carriages
                 .iter()
-                .map(|c| world.params.storage_cap(c.kind, item).max(0.0))
+                .map(|c| world.storage_cap(c.kind, item).max(0.0))
                 .sum();
             let have = total.get(item).max(0.0);
             let fill = if cap > 0.0 {
@@ -244,7 +255,7 @@ impl WorldSummary {
             };
             // Intermediates (metallo, tessuto…) are used as soon as they are
             // made: an empty store is normal, not a shortage.
-            let intermediate = item.def().category == ItemCategory::Intermediate;
+            let intermediate = def.category == ItemCategory::Intermediate;
             if cap > 0.0 && fill < SHORTAGE_FILL && !intermediate {
                 shortages.push(item.name().to_string());
             }
@@ -272,7 +283,11 @@ impl WorldSummary {
         let market = prices
             .into_iter()
             .map(|(i, (sum, n, trend))| PriceLine {
-                name: ItemKind::ALL[i].name().to_string(),
+                name: world
+                    .catalog()
+                    .kind_at(i)
+                    .map_or("?", ItemKind::name)
+                    .to_string(),
                 price: (sum as f64 / f64::from(n.max(1))).round() as u32,
                 trend: match trend.signum() {
                     1 => "sale",
@@ -345,7 +360,7 @@ impl WorldSummary {
             event_counts,
             events,
             carriages,
-            catalog: Catalog::of_sim(),
+            catalog: Catalog::of(world.catalog()),
         }
     }
 
@@ -407,7 +422,7 @@ mod tests {
         let back: WorldSummary = serde_json::from_str(&a.to_json()).unwrap();
         assert_eq!(back.to_json(), a.to_json());
         assert!(a.population.total > 0);
-        assert_eq!(a.stock.len(), ItemKind::COUNT);
+        assert_eq!(a.stock.len(), ItemKind::BUILTIN_COUNT);
     }
 
     #[test]
@@ -430,7 +445,7 @@ mod tests {
         assert!(c.items.iter().any(|i| i == "verdura"));
         assert!(c.jobs.contains_key("contadino"));
         assert!(c.carriage_kinds.iter().any(|k| k == "Mercato"));
-        assert_eq!(c.recipes.len(), RECIPES.len());
+        assert_eq!(c.recipes.len(), sim::RECIPES.len());
         assert!(
             c.item_aliases
                 .iter()

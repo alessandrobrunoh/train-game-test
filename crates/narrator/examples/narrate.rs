@@ -5,8 +5,11 @@
 //!  [--replay FILE] [--record FILE] [--seed S] [--carriages C] [--npcs P]`
 //!
 //! Prints every proposal in Italian with its verdict, then latency (mean and
-//! p95), tokens, acceptance and repeated names. The proposals are NOT applied
-//! to the world: that needs the Custode (A2).
+//! p95), tokens, acceptance and repeated names. Every accepted draft goes to
+//! the Custode (`World::schedule`, at the next full hour): at the end the
+//! world runs `--after` more days (default 3) and the example prints what
+//! became real (items made and carried, workers of the new jobs, the
+//! statistics' values) or why the Custode refused it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,7 +22,7 @@ use narrator::{
     Exchange, Narrator, NarratorConfig, NarratorOutcome, Requested, Verdict, WorldSummary,
 };
 use serde::{Deserialize, Serialize};
-use sim::{MINUTES_PER_DAY, UtilityBrain, World};
+use sim::{GameTime, MINUTES_PER_DAY, MINUTES_PER_HOUR, Seller, UtilityBrain, World};
 
 /// Longest wait for one day's outcome (two calls and the client's retries).
 const WAIT: Duration = Duration::from_secs(300);
@@ -37,6 +40,7 @@ struct RunLog {
 
 struct Args {
     days: u64,
+    after: u64,
     mock: bool,
     replay: Option<String>,
     record: Option<String>,
@@ -48,6 +52,7 @@ struct Args {
 fn args() -> Args {
     let mut a = Args {
         days: 5,
+        after: 3,
         mock: false,
         replay: None,
         record: None,
@@ -60,6 +65,7 @@ fn args() -> Args {
         let mut value = || raw.next().unwrap_or_else(|| usage(&flag));
         match flag.as_str() {
             "--days" => a.days = value().parse().unwrap_or_else(|_| usage("--days")),
+            "--after" => a.after = value().parse().unwrap_or_else(|_| usage("--after")),
             "--seed" => a.seed = value().parse().unwrap_or_else(|_| usage("--seed")),
             "--carriages" => a.carriages = value().parse().unwrap_or_else(|_| usage("--carriages")),
             "--npcs" => a.npcs = value().parse().unwrap_or_else(|_| usage("--npcs")),
@@ -74,7 +80,7 @@ fn args() -> Args {
 
 fn usage(flag: &str) -> ! {
     eprintln!(
-        "Argomento non valido: {flag}\nUso: narrate [--days N] [--mock] [--replay FILE] [--record FILE] [--seed S] [--carriages C] [--npcs P]"
+        "Argomento non valido: {flag}\nUso: narrate [--days N] [--after N] [--mock] [--replay FILE] [--record FILE] [--seed S] [--carriages C] [--npcs P]"
     );
     std::process::exit(2);
 }
@@ -160,8 +166,8 @@ fn main() {
         }
     };
     println!(
-        "Treno: {} carrozze, {} NPC, seed {}, {} giorni. Le proposte NON vengono applicate al mondo: serve il Custode (A2).\n",
-        a.carriages, a.npcs, a.seed, a.days
+        "Treno: {} carrozze, {} NPC, seed {}, {} giorni (+{} per vedere cosa succede). Le bozze accettate vanno al Custode all'ora piena.\n",
+        a.carriages, a.npcs, a.seed, a.days, a.after
     );
 
     let mut world = World::generate(a.seed, a.carriages, a.npcs);
@@ -191,10 +197,23 @@ fn main() {
             continue;
         };
         print_outcome(&o);
+        if let Verdict::Accepted(d) = &o.verdict {
+            let at = next_full_hour(world.clock);
+            world.schedule(d.clone(), at);
+            println!(
+                "   → al Custode alle {:02}:00 del giorno {}\n",
+                at.hour(),
+                at.day()
+            );
+        }
         outcomes.push(o);
+    }
+    for _ in 0..a.after {
+        run_day(&mut world, &mut brain);
     }
 
     print_stats(&narrator, &outcomes);
+    print_world(&world);
     if let Some(path) = &a.record {
         let log = RunLog {
             seed: a.seed,
@@ -388,5 +407,116 @@ fn print_stats(narrator: &Narrator, outcomes: &[NarratorOutcome]) {
     for r in rejected_first {
         println!("  - {}", r.chars().take(200).collect::<String>());
     }
-    println!("Nessuna proposta è stata applicata al mondo (serve il Custode, A2).");
+}
+
+fn next_full_hour(t: GameTime) -> GameTime {
+    GameTime((t.minutes() / MINUTES_PER_HOUR + 1) * MINUTES_PER_HOUR)
+}
+
+/// What the Custode did with every accepted draft, and what it became.
+fn print_world(world: &World) {
+    println!(
+        "\n══ Il Custode (giorno {}, ore {:02}:{:02})",
+        world.clock.day(),
+        world.clock.hour(),
+        world.clock.minute()
+    );
+    let decisions = world.decisions();
+    let applied = decisions.iter().filter(|d| d.result.is_ok()).count();
+    println!(
+        "Decisioni: {} ({applied} entrate nel mondo, {} respinte), in attesa: {}",
+        decisions.len(),
+        decisions.len() - applied,
+        world.pending().len()
+    );
+    let cat = world.catalog();
+    for d in decisions {
+        let when = format!(
+            "giorno {} ore {:02}:{:02}",
+            d.at.day(),
+            d.at.hour(),
+            d.at.minute()
+        );
+        match &d.result {
+            Err(why) => println!("- «{}» RESPINTA ({when}): {why}", d.draft.proposal.name()),
+            Ok(a) => {
+                println!(
+                    "- «{}» ENTRATA ({when}): {}",
+                    d.draft.proposal.name(),
+                    a.summary
+                );
+                if let Some(item) = a.item {
+                    let def = cat.item(item);
+                    let carried: u32 = world
+                        .npcs
+                        .iter()
+                        .map(|n| n.inventory.items.count(item))
+                        .sum();
+                    let listed: u32 = world
+                        .listings()
+                        .iter()
+                        .filter(|l| l.item == item)
+                        .map(|l| l.qty)
+                        .sum();
+                    let by_npcs: u32 = world
+                        .listings()
+                        .iter()
+                        .filter(|l| l.item == item && matches!(l.seller, Seller::Npc(_)))
+                        .map(|l| l.qty)
+                        .sum();
+                    println!(
+                        "    oggetto «{}» ({}, valore {}, pila {}{}): fatti {:.1}, in magazzino {:.0}, portati da NPC {carried}, sui banchi {listed} ({by_npcs} di NPC)",
+                        item.name(),
+                        item.plural(),
+                        def.base_value,
+                        item.stack_size(),
+                        def.appearance
+                            .as_ref()
+                            .map_or(String::new(), |l| format!(", icona {}", l.key())),
+                        world.economy.counters.made(item),
+                        world.total_stock().get(item),
+                    );
+                }
+                if let Some(r) = a.recipe
+                    && a.item.is_none()
+                {
+                    let def = cat.recipe(r);
+                    println!(
+                        "    ricetta «{}»: {} fatti finora (tutte le ricette)",
+                        def.name,
+                        world.economy.counters.made(def.output)
+                    );
+                }
+                if let Some(job) = a.job {
+                    let workers = world.npcs.iter().filter(|n| n.job == Some(job)).count();
+                    let minutes = world.economy.counters.work_minutes.get(job.index());
+                    println!(
+                        "    lavoro «{}» in {}: {workers} lavoratori, {minutes} minuti di lavoro, {:.0}% a vuoto",
+                        job.name(),
+                        job.workplace_kind(),
+                        100.0 * world.economy.counters.wasted_share(job)
+                    );
+                }
+                if let Some(key) = &a.statistic
+                    && let Some(stat) = world.statistics().get(key)
+                {
+                    let book = world.statistics().book();
+                    let value = book.read(&stat.name, world).value();
+                    let samples = world.statistics().history(key).count();
+                    println!(
+                        "    statistica «{}»: ora {}, {samples} campioni orari",
+                        stat.name,
+                        value.map_or("—".to_string(), |v| stat.format(v))
+                    );
+                }
+            }
+        }
+    }
+    println!(
+        "Catalogo: {} oggetti, {} ricette, {} lavori; moneta totale {}",
+        cat.item_count(),
+        cat.recipes().len(),
+        cat.job_count(),
+        world.money_supply()
+    );
 }

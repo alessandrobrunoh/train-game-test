@@ -1,16 +1,16 @@
-//! Provisional local validator of the Narratore's drafts.
+//! Local check of the Narratore's drafts, before the Custode.
 //!
-//! **Stand-in for the Custode.** The real check belongs to the Custode in
-//! `sim` (step A2), which knows the live catalogs and decides what enters the
-//! world. Until then [`precheck`] rejects the answers that are obviously
-//! unusable (shape, names, references, numbers), with a readable Italian
-//! reason that the Narratore sends back to the model for its one retry.
+//! [`precheck`] rejects the answers that are obviously unusable (shape,
+//! lengths, Italian names, closed lists, references to what exists, jobs
+//! where there are no work stations), with a readable Italian reason that
+//! the Narratore sends back to the model for its one retry. The meaning
+//! (values against ingredients, loops of recipes, storage) is the Custode's
+//! (`World::review` in `sim`), at the minute the draft is applied.
 //!
-//! Names are compared the way the Custode will resolve them to keys: case,
-//! accents, apostrophes and extra spaces don't matter ([`normalize`]).
+//! Names are compared the way the Custode resolves them: case, accents,
+//! apostrophes and extra spaces don't matter ([`normalize`]).
 
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
 
 use crate::appearance::{Appearance, COLOURS, DETAILS, SHAPES};
 use crate::panel::{Action, ELEMENT_KINDS, Element, MAX_ELEMENTS, Panel};
@@ -30,41 +30,17 @@ pub const MAX_MAKES: usize = 4;
 /// Name of the example in the system prompt: copying it is not a novelty.
 pub const EXAMPLE_NAME: &str = "Scialle di stracci";
 
-/// Why a draft was rejected, in Italian (sent back to the model).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Rejection(pub String);
-
-impl fmt::Display for Rejection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+/// Why a draft was rejected, in Italian (sent back to the model): the
+/// Custode's own type.
+pub use sim::Rejection;
 
 fn reject<T>(reason: impl Into<String>) -> Result<T, Rejection> {
     Err(Rejection(reason.into()))
 }
 
 /// The key of a name: lowercase, without accents and apostrophes, single
-/// spaces. "Tè", "te" and " TE " are the same name.
-pub fn normalize(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for c in name.trim().chars().flat_map(char::to_lowercase) {
-        let c = match c {
-            'à' | 'á' | 'â' | 'ä' => 'a',
-            'è' | 'é' | 'ê' | 'ë' => 'e',
-            'ì' | 'í' | 'î' | 'ï' => 'i',
-            'ò' | 'ó' | 'ô' | 'ö' => 'o',
-            'ù' | 'ú' | 'û' | 'ü' => 'u',
-            '\'' | '’' | '-' | '_' => ' ',
-            c => c,
-        };
-        if c == ' ' && (out.is_empty() || out.ends_with(' ')) {
-            continue;
-        }
-        out.push(c);
-    }
-    out.trim_end().to_string()
-}
+/// spaces (the Custode's own rule).
+pub use sim::custode::normalize;
 
 /// What names exist: the catalog plus the novelties accepted so far.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -279,13 +255,28 @@ fn novelty(proposal: &Proposal, known: &Known, max_effects: usize) -> Result<(),
             description,
             workplace_kind,
             makes,
+            service,
         } => {
             new_name(name, known)?;
             text("la descrizione", description, 10, 240)?;
             carriage(workplace_kind, known)?;
-            if makes.is_empty() || makes.len() > MAX_MAKES {
+            if let Some(kind) = sim::custode::sources::carriage_kind(workplace_kind)
+                && !kind
+                    .def()
+                    .stations
+                    .iter()
+                    .any(|r| matches!(r.count, sim::defs::StationCount::Workers { .. }))
+            {
                 return reject(format!(
-                    "un lavoro deve produrre da 1 a {MAX_MAKES} oggetti esistenti"
+                    "in un {kind} non c'è una postazione di lavoro: scegli Serra, Mensa, \
+                     Officina o Mercato"
+                ));
+            }
+            let serves = service.is_some() && makes.is_empty();
+            if !serves && (makes.is_empty() || makes.len() > MAX_MAKES) {
+                return reject(format!(
+                    "un lavoro deve produrre da 1 a {MAX_MAKES} oggetti esistenti, oppure \
+                     produrre niente e dare un «servizio» (sazieta, energia o socialita)"
                 ));
             }
             for m in makes {

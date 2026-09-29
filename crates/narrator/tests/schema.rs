@@ -294,10 +294,10 @@ fn sources_read_the_world() {
         src(r#"{"prezzo": "attrezzo"}"#).eval(&world),
         cheapest as f32
     );
-    // A name that doesn't exist yet waits for the Custode.
+    // A name the world doesn't have (yet) reads as pending.
     let pending = src(r#"{"scorta": "Borraccia"}"#).read(&world, None);
     assert!(matches!(&pending, Reading::Pending(what) if what.contains("Borraccia")));
-    assert!(pending.why().unwrap().contains("in attesa del Custode"));
+    assert!(pending.why().unwrap().contains("non ancora nel mondo"));
     assert!(src(r#"{"scorta": "Borraccia"}"#).eval(&world).is_nan());
     // Reading never changes the world.
     let before = postcard_like(&world);
@@ -311,7 +311,11 @@ fn sources_read_the_world() {
 fn postcard_like(world: &World) -> String {
     format!(
         "{:?}{:?}{}",
-        world.carriages.iter().map(|c| c.stock).collect::<Vec<_>>(),
+        world
+            .carriages
+            .iter()
+            .map(|c| c.stock.clone())
+            .collect::<Vec<_>>(),
         world
             .npcs
             .iter()

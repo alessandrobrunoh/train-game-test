@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::appearance::{COLOURS, DETAILS, SHAPES};
-use crate::guard::{EXAMPLE_NAME, Known, MAX_EFFECTS, Rejection, precheck};
+use crate::guard::{EXAMPLE_NAME, Known, MAX_EFFECTS, Rejection, normalize, precheck};
 use crate::proposal::{Draft, Proposal};
 use crate::summary::WorldSummary;
 
@@ -87,7 +87,7 @@ pub enum Requested {
 /// How a day's request ended.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Verdict {
-    /// Passed the precheck; waits for the Custode (A2) to be applied.
+    /// Passed the precheck: goes to the Custode (`World::schedule`).
     Accepted(Draft),
     /// Still invalid after the retry. `draft` is the last answer when it
     /// parsed (the precheck refused it).
@@ -255,6 +255,23 @@ impl Narrator {
             self.remember(day, &draft);
         }
         self.last_day = last_day;
+    }
+
+    /// The Custode refused the novelty called `name`, with `reason`: it no
+    /// longer counts as existing for the precheck, and the next prompts say
+    /// it was refused (so the model learns why).
+    pub fn refused(&mut self, name: &str, reason: &str) {
+        let key = normalize(name);
+        self.accepted.retain(|p| normalize(p.name()) != key);
+        for n in self
+            .novelties
+            .iter_mut()
+            .filter(|n| normalize(&n.name) == key)
+        {
+            if !n.why.starts_with("RESPINTA") {
+                n.why = format!("RESPINTA dal Custode: {}", short(reason, WHY_CHARS));
+            }
+        }
     }
 
     /// Mean latency of the answered calls so far.
@@ -556,13 +573,14 @@ Il tuo compito: guarda lo stato del treno e proponi UNA sola novità che risolva
 Tipi di novità:
 - "oggetto": un oggetto nuovo, fatto da un lavoro esistente con oggetti esistenti.
 - "ricetta": un modo nuovo di produrre un oggetto esistente.
-- "lavoro": un mestiere nuovo in un tipo di carrozza esistente, che produce oggetti esistenti.
+- "lavoro": un mestiere nuovo in una Serra, Mensa, Officina o Mercato (i Dormitori non hanno postazioni di lavoro): produce oggetti che lì si fanno già, oppure non produce niente e dà un "servizio" (sazieta, energia o socialita) a chi gli sta intorno, come una guardia o un medico.
 - "evento": un fatto che succede una volta e cambia le scorte o i bisogni (da 1 a {max_effects} effetti).
 - "statistica": un numero nuovo, calcolato dal treno, per una tensione che nessun numero misura.
 
 Regole:
 - Nomi in italiano, brevi (da 2 a 32 caratteri, al massimo 4 parole, solo lettere), mai uguali a un nome del catalogo o a una novità già proposta. Non copiare l'esempio.
 - Oggetti, lavori e carrozze si citano con il loro nome esatto del catalogo (o di una novità già accettata).
+- Il Custode rifiuta ciò che non ha senso: un oggetto che vale più di 3 volte i suoi ingredienti più 15 gettoni, un oggetto senza ingredienti che non sia una materia prima coltivata dai contadini, una ricetta che con un giro di ricette rende più di quanto costa, un ingrediente che nessuna carrozza conserva.
 - Numeri interi: "valore" 1-200 gettoni, "pila" 1-50, "qta" 1-10, "minuti" 10-480, "delta" di una scorta tra -50 e 50 (mai 0). Il "delta" di un bisogno è un decimale tra -0.3 e 0.3 (mai 0; positivo = meglio).
 - "motivo": una o due frasi sul bisogno o la tensione del treno a cui rispondi. "descrizione": una o due frasi. Motivo e descrizione al massimo 200 caratteri, un pannello di solito 2-4 elementi.
 - Rispondi SOLO con un oggetto JSON compatto, senza spazi superflui, senza testo prima o dopo e senza commenti.
@@ -570,7 +588,7 @@ Regole:
 Formato: {{"motivo": string, "novita": NOVITA, "interfaccia"?: PANNELLO}}, dove NOVITA è uno di:
 {{"tipo": "oggetto", "nome": string, "descrizione": string, "categoria": "materia_prima" | "semilavorato" | "consumabile" | "durevole", "valore": int, "pila": int, "ingredienti": [{{"oggetto": string, "qta": int}}], "lavoro": string, "aspetto": {{"forma": FORMA, "colore": COLORE, "dettaglio"?: DETTAGLIO}}}}
 {{"tipo": "ricetta", "nome": string, "prodotto": string, "qta": int, "ingredienti": [{{"oggetto": string, "qta": int}}], "lavoro": string, "minuti": int}}
-{{"tipo": "lavoro", "nome": string, "descrizione": string, "carrozza": string, "produce": [string]}}
+{{"tipo": "lavoro", "nome": string, "descrizione": string, "carrozza": string, "produce": [string], "servizio"?: "sazieta" | "energia" | "socialita"}} ("produce" vuoto solo con "servizio")
 {{"tipo": "evento", "titolo": string, "descrizione": string, "effetti": [EFFETTO]}}
 {{"tipo": "statistica", ...}}: come nell'esempio in fondo ("unita" e "soglie" facoltative; ogni soglia ha "sotto" o "sopra").
 EFFETTO è uno di:

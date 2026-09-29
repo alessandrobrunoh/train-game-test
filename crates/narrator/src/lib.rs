@@ -4,15 +4,18 @@
 //! answers a current need or tension of the train.
 //!
 //! **The AI proposes, the engine decides.** `sim` stays deterministic and
-//! AI-free: this crate only reads it. Proposals are drafts: the Custode in
-//! `sim` (step A2) will validate them against the live catalogs and apply
-//! them to the world at a fixed game minute. Until then nothing is applied.
+//! AI-free: this crate only reads it. An accepted draft goes to the Custode
+//! in `sim` (`World::schedule`, `World::review`, `World::apply`), which
+//! checks it against the world's live catalogs and makes it real at a fixed
+//! game minute, or refuses it with a reason.
 //!
 //! - [`WorldSummary`]: a compact snapshot of the world, the prompt context.
-//! - [`Draft`] / [`Proposal`] / [`Effect`]: what the model answers (draft
-//!   types; the real ones come from the Custode). Everything refers to items,
-//!   recipes and jobs **by name**: the Custode resolves names to stable keys.
-//! - [`guard::precheck`]: a provisional local check, the Custode's stand-in,
+//! - [`Draft`] / [`Proposal`] / [`Effect`]: what the model answers, the
+//!   Custode's own types (`sim::custode`, re-exported with [`panel`],
+//!   [`sources`], [`statistic`] and [`appearance`]). Everything refers to
+//!   items, recipes and jobs **by name**: the Custode resolves names to ids.
+//! - [`guard::precheck`]: the shape of an answer (lengths, names, closed
+//!   lists, references to what exists) checked before the Custode sees it,
 //!   with an Italian reason the model gets back for its one retry.
 //! - [`Panel`] (`interfaccia`): custom UI attached to a novelty, as
 //!   declarative data the game renders; values and lists come from the
@@ -30,8 +33,8 @@
 //! ([`Narrator::take_recording`]) and every exchange is logged with its
 //! verdict, latency and tokens ([`Narrator::exchanges`]). That log is for
 //! measurement and for replaying LLM answers offline with [`llm::Replay`];
-//! it is not the canonical game history: `World::apply` (A2) will record
-//! each applied proposal inside the World, so a save alone replays the game.
+//! it is not the canonical game history: the World records every decision of
+//! the Custode (`World::decisions`), so a save alone replays the game.
 
 pub mod appearance;
 pub mod guard;
