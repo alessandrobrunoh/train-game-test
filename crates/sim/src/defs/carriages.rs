@@ -11,6 +11,9 @@ pub struct CarriageDef {
     pub kind: CarriageKind,
     /// Display name of the kind: "Dormitorio".
     pub name: &'static str,
+    /// Storeys: 1, or 2 with stairs (the gangways to the next carriages are
+    /// on the ground floor).
+    pub floors: u8,
     /// Proper names given to the carriages of this kind, in order; later
     /// ones are called "<kind> <n>".
     pub names: &'static [&'static str],
@@ -57,6 +60,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
     CarriageDef {
         kind: CarriageKind::Dormitorio,
         name: "Dormitorio",
+        floors: 2,
         names: names::DORM_NAMES,
         stations: &[StationRule {
             kind: StationKind::Bed,
@@ -69,6 +73,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
     CarriageDef {
         kind: CarriageKind::Mensa,
         name: "Mensa",
+        floors: 1,
         names: names::MENSA_NAMES,
         stations: &[
             StationRule {
@@ -94,6 +99,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
     CarriageDef {
         kind: CarriageKind::Serra,
         name: "Serra",
+        floors: 1,
         names: names::SERRA_NAMES,
         stations: &[StationRule {
             kind: StationKind::GrowBed,
@@ -112,6 +118,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
     CarriageDef {
         kind: CarriageKind::Officina,
         name: "Officina",
+        floors: 1,
         names: names::OFFICINA_NAMES,
         stations: &[StationRule {
             kind: StationKind::Workbench,
@@ -144,6 +151,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
     CarriageDef {
         kind: CarriageKind::Mercato,
         name: "Mercato",
+        floors: 1,
         names: names::MERCATO_NAMES,
         stations: &[StationRule {
             kind: StationKind::Counter,

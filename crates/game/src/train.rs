@@ -30,6 +30,12 @@ pub const DOOR_HEIGHT: f32 = 48.0;
 pub const CARRIAGE_PITCH: f32 = CARRIAGE_LENGTH + GANGWAY;
 /// Quota della superficie del pavimento.
 pub const FLOOR_Y: f32 = 0.0;
+/// Altezza di un piano: interno più il solaio sopra.
+pub const STOREY: f32 = INTERIOR_HEIGHT + WALL;
+/// Scala a pioli delle carrozze a più piani: bordo sinistro (x locale) e
+/// larghezza. Sopra la scala il solaio ha un foro della stessa larghezza.
+pub const STAIRS_LEFT: f32 = WALL + 6.0;
+pub const STAIRS_WIDTH: f32 = 16.0;
 
 // Profondità (z) dei vari strati.
 const Z_BACKGROUND: f32 = -10.0;
@@ -65,13 +71,58 @@ pub struct TrainLayout {
     pub carriages: Vec<CarriageKind>,
     /// Rettangoli solidi (pavimenti, soffitti, pareti) in coordinate mondo.
     pub solids: Vec<Rect>,
+    /// Piattaforme attraversabili dal basso: i fori del solaio sopra le scale
+    /// (ci si cammina sopra, ma si passa salendo o scendendo la scala).
+    pub platforms: Vec<Rect>,
+    /// Scale a pioli, dal pavimento di un piano alla superficie del successivo.
+    pub ladders: Vec<Rect>,
 }
 
 impl TrainLayout {
     pub fn new(carriages: Vec<CarriageKind>) -> Self {
         let count = carriages.len();
-        let solids = (0..count).flat_map(|i| carriage_solids(i, count)).collect();
-        Self { carriages, solids }
+        let mut layout = Self {
+            carriages,
+            solids: Vec::new(),
+            platforms: Vec::new(),
+            ladders: Vec::new(),
+        };
+        for i in 0..count {
+            let floors = layout.floors(i);
+            layout.solids.extend(carriage_solids(i, count, floors));
+            for f in 1..floors {
+                let (x0, x1) = Self::stairs_x(i);
+                let top = floor_y(f);
+                layout.platforms.push(Rect::new(x0, top - WALL, x1, top));
+                layout.ladders.push(Rect::new(x0, floor_y(f - 1), x1, top));
+            }
+        }
+        layout
+    }
+
+    /// Piani della carrozza `index` (1 se non esiste).
+    pub fn floors(&self, index: usize) -> usize {
+        self.carriages
+            .get(index)
+            .map_or(1, |kind| usize::from(kind.def().floors.max(1)))
+    }
+
+    /// Estremi x (mondo) della scala e del foro nel solaio della carrozza `index`.
+    pub fn stairs_x(index: usize) -> (f32, f32) {
+        let x0 = Self::carriage_left(index) + STAIRS_LEFT;
+        (x0, x0 + STAIRS_WIDTH)
+    }
+
+    /// La scala che il rettangolo centrato in `center` (semidimensioni `half`)
+    /// ha davanti: il suo centro sta nella larghezza della scala e i piedi
+    /// fra la base e la cima.
+    pub fn ladder_at(&self, center: Vec2, half: Vec2) -> Option<Rect> {
+        let feet = center.y - half.y;
+        self.ladders.iter().copied().find(|l| {
+            (l.min.x..=l.max.x).contains(&center.x)
+                && feet >= l.min.y - 0.5
+                && feet <= l.max.y + 0.5
+        })
     }
 
     /// Layout delle carrozze del mondo simulato.
@@ -112,10 +163,15 @@ impl TrainLayout {
     }
 }
 
-/// Rettangoli solidi (pavimento, soffitto, pareti di testata e soffietto alla
-/// sua destra) della carrozza `index`, in coordinate mondo. La grafica è in
-/// `env_art.rs` e ricalca questi rettangoli.
-fn carriage_solids(index: usize, count: usize) -> Vec<Rect> {
+/// Quota del pavimento del piano `floor` (0 = terra).
+pub fn floor_y(floor: usize) -> f32 {
+    FLOOR_Y + floor as f32 * STOREY
+}
+
+/// Rettangoli solidi (pavimento, solai, soffitto, pareti di testata e
+/// soffietto alla sua destra) della carrozza `index` con `floors` piani, in
+/// coordinate mondo. La grafica è in `env_art.rs` e ricalca questi rettangoli.
+fn carriage_solids(index: usize, count: usize, floors: usize) -> Vec<Rect> {
     let x0 = TrainLayout::carriage_left(index);
     let x1 = x0 + CARRIAGE_LENGTH;
     let floor = FLOOR_Y;
@@ -124,15 +180,27 @@ fn carriage_solids(index: usize, count: usize) -> Vec<Rect> {
     let is_last = index + 1 == count;
 
     let mut solids = vec![
-        // Pavimento e soffitto
+        // Pavimento e soffitto dell'ultimo piano
         Rect::new(x0, floor - WALL, x1, floor),
-        Rect::new(x0, ceil, x1, ceil + WALL),
+        Rect::new(x0, floor_y(floors) - WALL, x1, floor_y(floors)),
     ];
+    // Solai tra i piani, col foro sopra la scala.
+    let (sx0, sx1) = TrainLayout::stairs_x(index);
+    for f in 1..floors {
+        let top = floor_y(f);
+        solids.push(Rect::new(x0, top - WALL, sx0, top));
+        solids.push(Rect::new(sx1, top - WALL, x1, top));
+    }
     // Pareti di testata: piene alle estremità del treno, altrimenti solo
-    // l'architrave sopra il vano porta.
+    // l'architrave sopra il vano porta. Ai piani alti sono sempre piene.
     let (left_bottom, right_bottom) = end_wall_bottoms(is_first, is_last);
     solids.push(Rect::new(x0, left_bottom, x0 + WALL, ceil));
     solids.push(Rect::new(x1 - WALL, right_bottom, x1, ceil));
+    for f in 1..floors {
+        let (bottom, top) = (floor_y(f), floor_y(f) + INTERIOR_HEIGHT);
+        solids.push(Rect::new(x0, bottom, x0 + WALL, top));
+        solids.push(Rect::new(x1 - WALL, bottom, x1, top));
+    }
     // Pedana e architrave del soffietto verso la carrozza successiva.
     if !is_last {
         let g1 = x1 + GANGWAY;
@@ -274,8 +342,24 @@ fn spawn_carriage_entities(
         let interior = art.get(images.as_deref_mut(), ArtKey::Interior(kind), || {
             env_art::interior(kind)
         });
-        let body = art.get(images.as_deref_mut(), ArtKey::Body(kind), || {
-            env_art::body(kind)
+        let floors = layout.floors(index);
+        let rise = (floors - 1) as f32 * STOREY;
+        let body = art.get(
+            images.as_deref_mut(),
+            ArtKey::Body {
+                kind,
+                floors: floors as u8,
+            },
+            || env_art::body(kind, floors),
+        );
+        let ladder =
+            (floors > 1).then(|| art.get(images.as_deref_mut(), ArtKey::Ladder, env_art::ladder));
+        let blind_end = (floors > 1).then(|| {
+            art.get(
+                images.as_deref_mut(),
+                ArtKey::EndWall { door: false },
+                || env_art::end_wall(false),
+            )
         });
         let (left_bottom, right_bottom) = end_wall_bottoms(index == 0, index + 1 == count);
         let mut ends = Vec::new();
@@ -300,24 +384,66 @@ fn spawn_carriage_entities(
             ))
             .with_children(|parent| {
                 let mid = CARRIAGE_LENGTH / 2.0;
-                // Parete di fondo con i finestrini e aloni delle lampade.
-                parent.spawn((
-                    InteriorArt,
-                    art_sprite(interior, Vec2::new(CARRIAGE_LENGTH, INTERIOR_HEIGHT)),
-                    Transform::from_xyz(mid, INTERIOR_HEIGHT / 2.0, Z_BACKGROUND),
-                ));
-                for x in env_art::LAMP_XS {
-                    let mut sprite =
-                        art_sprite(glow.clone(), Vec2::new(env_art::GLOW_W, env_art::GLOW_H));
-                    sprite.color = Color::WHITE.with_alpha(strength * 0.4);
+                // Parete di fondo con i finestrini e aloni delle lampade, per piano.
+                for f in 0..floors {
+                    let base = floor_y(f) - FLOOR_Y;
                     parent.spawn((
-                        LampGlow { strength },
-                        sprite,
-                        Transform::from_xyz(x as f32, env_art::LAMP_Y - 12.0, Z_GLOW),
+                        InteriorArt,
+                        art_sprite(
+                            interior.clone(),
+                            Vec2::new(CARRIAGE_LENGTH, INTERIOR_HEIGHT),
+                        ),
+                        Transform::from_xyz(mid, base + INTERIOR_HEIGHT / 2.0, Z_BACKGROUND),
                     ));
+                    for x in env_art::LAMP_XS {
+                        let mut sprite =
+                            art_sprite(glow.clone(), Vec2::new(env_art::GLOW_W, env_art::GLOW_H));
+                        sprite.color = Color::WHITE.with_alpha(strength * 0.4);
+                        parent.spawn((
+                            LampGlow { strength },
+                            sprite,
+                            Transform::from_xyz(x as f32, base + env_art::LAMP_Y - 12.0, Z_GLOW),
+                        ));
+                    }
                 }
-                // Tetto, pavimento e telaio.
-                let body_h = env_art::ROOF_TOP - env_art::BODY_BOTTOM;
+                // Scale a pioli tra i piani (davanti alla parete, dietro ai personaggi).
+                if let Some(ladder) = &ladder {
+                    for f in 1..floors {
+                        let (bottom, top) = (floor_y(f - 1) - FLOOR_Y, floor_y(f) - FLOOR_Y);
+                        parent.spawn((
+                            ExteriorArt,
+                            art_sprite(ladder.clone(), Vec2::new(STAIRS_WIDTH, top - bottom)),
+                            Transform::from_xyz(
+                                STAIRS_LEFT + STAIRS_WIDTH / 2.0,
+                                (bottom + top) / 2.0,
+                                Z_DECOR,
+                            ),
+                        ));
+                    }
+                }
+                // Pareti cieche dei piani alti.
+                if let Some(end) = &blind_end {
+                    for f in 1..floors {
+                        let base = floor_y(f) - FLOOR_Y;
+                        for right in [false, true] {
+                            let mut sprite =
+                                art_sprite(end.clone(), Vec2::new(WALL, INTERIOR_HEIGHT));
+                            sprite.flip_x = right;
+                            let x = if right {
+                                CARRIAGE_LENGTH - WALL / 2.0
+                            } else {
+                                WALL / 2.0
+                            };
+                            parent.spawn((
+                                ExteriorArt,
+                                sprite,
+                                Transform::from_xyz(x, base + INTERIOR_HEIGHT / 2.0, Z_STRUCTURE),
+                            ));
+                        }
+                    }
+                }
+                // Tetto, solai, pavimento e telaio.
+                let body_h = env_art::ROOF_TOP + rise - env_art::BODY_BOTTOM;
                 parent.spawn((
                     ExteriorArt,
                     art_sprite(body, Vec2::new(CARRIAGE_LENGTH, body_h)),
@@ -390,7 +516,7 @@ fn spawn_carriage_entities(
                         offset: Vec2::new(4.0, -4.0),
                         color: LABEL_SHADOW,
                     },
-                    Transform::from_xyz(mid, env_art::ROOF_TOP + 9.0, Z_LABEL)
+                    Transform::from_xyz(mid, env_art::ROOF_TOP + rise + 9.0, Z_LABEL)
                         .with_scale(Vec3::splat(0.25)),
                 ));
             });

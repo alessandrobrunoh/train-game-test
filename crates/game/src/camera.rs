@@ -41,16 +41,57 @@ const EDGE_MARGIN: f32 = 16.0;
 /// castello non fa muovere l'inquadratura in verticale.
 const NPC_EYE_HEIGHT: f32 = 12.0;
 
+/// Vista allargata (tasto Z, prototipo delle carrozze a due piani): mostra
+/// entrambi i piani invece di seguire quello del giocatore.
+const WIDE_VIEWPORT_HEIGHT: f32 = 300.0;
+/// Quota su cui si centra la vista allargata: il mezzo di una carrozza a due piani.
+const WIDE_CENTER_Y: f32 = 110.0;
+
+/// Se la vista è allargata (tasto Z).
+#[derive(Resource, Debug, Default)]
+pub struct WideView(pub bool);
+
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         // `Update` gira dopo `RunFixedMainLoop`, quindi il Transform del
         // giocatore è già interpolato per questo frame.
-        app.add_systems(Startup, spawn_camera).add_systems(
-            Update,
-            (update_follow, follow_target).chain().after(SimTickSet),
-        );
+        app.init_resource::<WideView>()
+            .add_systems(Startup, spawn_camera)
+            .add_systems(
+                Update,
+                (
+                    update_follow,
+                    toggle_wide_view,
+                    apply_wide_view,
+                    follow_target,
+                )
+                    .chain()
+                    .after(SimTickSet),
+            );
+    }
+}
+
+/// Z alterna la vista che segue il piano del giocatore e quella allargata.
+fn toggle_wide_view(keys: Res<ButtonInput<KeyCode>>, mut wide: ResMut<WideView>) {
+    if keys.just_pressed(KeyCode::KeyZ) {
+        wide.0 = !wide.0;
+    }
+}
+
+fn apply_wide_view(wide: Res<WideView>, mut projection: Single<&mut Projection, With<Camera2d>>) {
+    if !wide.is_changed() {
+        return;
+    }
+    if let Projection::Orthographic(ortho) = &mut **projection {
+        ortho.scaling_mode = ScalingMode::FixedVertical {
+            viewport_height: if wide.0 {
+                WIDE_VIEWPORT_HEIGHT
+            } else {
+                VIEWPORT_HEIGHT
+            },
+        };
     }
 }
 
@@ -154,6 +195,7 @@ pub(crate) fn follow_target(
     follow: Res<FollowNpc>,
     selected: Res<SelectedNpc>,
     index: Res<NpcSpriteIndex>,
+    wide: Res<WideView>,
     window: Single<&Window, With<PrimaryWindow>>,
     player: Single<&Transform, (With<Player>, Without<Camera2d>)>,
     sprites: Query<&Transform, (With<NpcSprite>, Without<Camera2d>)>,
@@ -197,6 +239,11 @@ pub(crate) fn follow_target(
     };
 
     // Estremi esterni del treno (facce esterne delle testate).
+    let focus = if wide.0 {
+        Vec2::new(focus.x, WIDE_CENTER_Y)
+    } else {
+        focus
+    };
     let (inner_left, inner_right) = layout.inner_bounds();
     let target = Vec2::new(
         clamp_to_train(

@@ -15,7 +15,9 @@ use bevy::prelude::*;
 use sim::{CarriageKind, ItemKind};
 
 use crate::art::{CLEAR, Canvas, Rgba};
-use crate::train::{CARRIAGE_LENGTH, DOOR_HEIGHT, GANGWAY, INTERIOR_HEIGHT, WALL};
+use crate::train::{
+    CARRIAGE_LENGTH, DOOR_HEIGHT, GANGWAY, INTERIOR_HEIGHT, STAIRS_LEFT, STAIRS_WIDTH, STOREY, WALL,
+};
 
 // --- Colori e disegno ---------------------------------------------------------
 
@@ -162,7 +164,11 @@ pub fn text3x5(text: &str, color: Rgba) -> Canvas {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ArtKey {
     Interior(CarriageKind),
-    Body(CarriageKind),
+    Body {
+        kind: CarriageKind,
+        floors: u8,
+    },
+    Ladder,
     EndWall {
         door: bool,
     },
@@ -784,14 +790,47 @@ fn mercato_decor(c: &mut Canvas, s: &WallStyle) {
 /// Tetto, pavimento e telaio di una carrozza (senza le pareti di testata):
 /// un'immagine larga quanto la carrozza da [`BODY_BOTTOM`] a [`ROOF_TOP`],
 /// trasparente dove c'è l'interno.
-pub fn body(kind: CarriageKind) -> Canvas {
+pub fn body(kind: CarriageKind, floors: usize) -> Canvas {
     let s = wall_style(kind);
     let w = CARRIAGE_LENGTH as i32;
     let oy = -BODY_BOTTOM as i32;
-    let mut c = Canvas::new(w as u32, (ROOF_TOP - BODY_BOTTOM) as u32);
-    let ceil = INTERIOR_HEIGHT as i32 + oy;
+    let rise = (floors.max(1) - 1) as i32 * STOREY as i32;
+    let mut c = Canvas::new(w as u32, (ROOF_TOP - BODY_BOTTOM) as u32 + rise as u32);
+    let ceil = INTERIOR_HEIGHT as i32 + rise + oy;
     let steel = rgb(96, 100, 110);
     let steel_dark = rgb(58, 60, 68);
+
+    // Solai tra i piani: soffitto del piano sotto, pavimento di quello sopra,
+    // col foro della scala.
+    for f in 1..floors.max(1) as i32 {
+        let top = oy + f * STOREY as i32;
+        let slab = top - WALL as i32;
+        rect(&mut c, 0, slab, w, WALL as i32, steel);
+        rect(&mut c, 0, slab, w, 2, steel_dark);
+        rect(&mut c, 0, slab + 1, w, 1, shade(steel_dark, 1.2));
+        for x in (4..w).step_by(8) {
+            rivet(&mut c, x, slab + 4, steel);
+        }
+        floor_surface(&mut c, kind, &s, top);
+        let (hole, hole_w) = (STAIRS_LEFT as i32, STAIRS_WIDTH as i32);
+        rect(&mut c, hole, slab, hole_w, WALL as i32, CLEAR);
+        // Bordo del foro a strisce di pericolo.
+        for x in [hole - 1, hole + hole_w] {
+            for y in slab..top {
+                let yellow = (y / 2) % 2 == 0;
+                px(
+                    &mut c,
+                    x,
+                    y,
+                    if yellow {
+                        rgb(214, 170, 40)
+                    } else {
+                        rgb(30, 30, 30)
+                    },
+                );
+            }
+        }
+    }
 
     // Soffitto (visto da dentro) e fiancata del tetto.
     rect(&mut c, 0, ceil, w, 8, steel);
@@ -851,6 +890,23 @@ pub fn body(kind: CarriageKind) -> Canvas {
     rect(&mut c, 112, 1, 32, 1, rgb(44, 48, 54));
     for x in [118, 138] {
         rect(&mut c, x, 1, 1, floor - 3, rgb(44, 48, 54));
+    }
+    c
+}
+
+/// Scala a pioli alta un piano, larga [`STAIRS_WIDTH`]: due montanti e i pioli.
+pub fn ladder() -> Canvas {
+    let (w, h) = (STAIRS_WIDTH as i32, STOREY as i32);
+    let mut c = Canvas::new(w as u32, h as u32);
+    let rail = rgb(120, 96, 64);
+    let rung = rgb(150, 122, 82);
+    for x in [2, w - 4] {
+        rect(&mut c, x, 0, 2, h, rail);
+        rect(&mut c, x, 0, 1, h, shade(rail, 1.3));
+    }
+    for y in (4..h).step_by(8) {
+        rect(&mut c, 4, y, w - 8, 2, rung);
+        rect(&mut c, 4, y + 1, w - 8, 1, shade(rung, 1.25));
     }
     c
 }
@@ -1206,7 +1262,7 @@ mod tests {
     #[test]
     fn body_is_hollow_where_the_interior_is() {
         for kind in CarriageKind::ALL {
-            let c = body(kind);
+            let c = body(kind, 1);
             assert_eq!(c.width, CARRIAGE_LENGTH as u32);
             assert_eq!(c.height, (ROOF_TOP - BODY_BOTTOM) as u32);
             let oy = -BODY_BOTTOM as i32;
@@ -1215,6 +1271,27 @@ mod tests {
             assert_eq!(get(&c, 160, oy - 1)[3], 255);
             assert_eq!(get(&c, 160, oy + INTERIOR_HEIGHT as i32 + 3)[3], 255);
         }
+    }
+
+    #[test]
+    fn two_floor_body_has_a_slab_with_a_stairwell() {
+        let c = body(CarriageKind::Dormitorio, 2);
+        let storey = STOREY as i32;
+        assert_eq!(c.height, (ROOF_TOP - BODY_BOTTOM) as u32 + storey as u32);
+        let oy = -BODY_BOTTOM as i32;
+        let slab = oy + storey - 4;
+        // Both storeys are hollow, the slab between them is solid...
+        assert_eq!(get(&c, 160, oy + 50), CLEAR);
+        assert_eq!(get(&c, 160, oy + storey + 50), CLEAR);
+        assert_eq!(get(&c, 160, slab)[3], 255);
+        // ...except above the ladder.
+        let hole = (STAIRS_LEFT + STAIRS_WIDTH / 2.0) as i32;
+        assert_eq!(get(&c, hole, slab), CLEAR);
+        // The roof sits one storey higher.
+        assert_eq!(
+            get(&c, 160, oy + storey + INTERIOR_HEIGHT as i32 + 3)[3],
+            255
+        );
     }
 
     #[test]

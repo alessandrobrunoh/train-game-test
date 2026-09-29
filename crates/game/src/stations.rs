@@ -24,7 +24,9 @@ use crate::prop_art;
 use crate::saves::WorldRebuildSet;
 use crate::state::{Sim, WorldReplaced};
 use crate::storage::{has_storage, storage_range};
-use crate::train::{CARRIAGE_LENGTH, FLOOR_Y, INTERIOR_HEIGHT, TrainLayout, WALL};
+use crate::train::{
+    CARRIAGE_LENGTH, FLOOR_Y, INTERIOR_HEIGHT, STAIRS_LEFT, STAIRS_WIDTH, TrainLayout, WALL,
+};
 
 /// Distanza verticale tra i piani di un letto a castello.
 pub const LEVEL_HEIGHT: f32 = 20.0;
@@ -296,7 +298,11 @@ impl StationLayout {
             .carriages
             .iter()
             .map(|c| {
-                let range = station_range(has_storage(&world.params, c.kind));
+                let mut range = station_range(has_storage(&world.params, c.kind));
+                if c.kind.def().floors > 1 {
+                    // La scala per il piano di sopra occupa l'inizio della carrozza.
+                    range.0 = range.0.max(STAIRS_LEFT + STAIRS_WIDTH + GROUP_GAP);
+                }
                 layout_carriage(&c.stations, range)
             })
             .collect();
