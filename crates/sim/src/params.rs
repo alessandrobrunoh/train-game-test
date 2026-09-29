@@ -39,7 +39,8 @@ pub struct SimParams {
     pub socialize_max: u64,
     pub idle_min: u64,
     pub idle_max: u64,
-    /// Travel time per carriage crossed.
+    /// Travel time per carriage crossed (5 min: at 1x speed an NPC walks a
+    /// carriage in 5 real seconds instead of sprinting through it).
     pub travel_minutes_per_carriage: u64,
     /// Night sleep ends at this hour plus up to `wake_jitter_minutes`.
     pub wake_hour: u32,
@@ -235,7 +236,7 @@ impl Default for SimParams {
             socialize_max: 50,
             idle_min: 10,
             idle_max: 30,
-            travel_minutes_per_carriage: 2,
+            travel_minutes_per_carriage: 5,
             wake_hour: 6,
             wake_jitter_minutes: 60,
             night_start_hour: 22,
