@@ -64,6 +64,12 @@ Tutte le altre fasi aggiungono tipi, e oggi ogni tipo è un `match` sparso nel c
 
 ## Fase 1: spazio (stanze, piani) e movimento reale
 
+> **Fatta in versione semplificata (2026-09-29).** La posizione è carrozza + **piano** (`Npc::floor`, `Station::floor`), non ancora una stanza con un proprietario: le stanze vere arrivano con la Fase 4 (la cabina del giocatore).
+> - I Dormitori hanno due piani (`CarriageDef::floors`), con i letti divisi fra i due (`StationRule::spread`). Ognuno torna ogni notte nel suo letto (`Carriage::free_station_for`), così si dorme su entrambi i piani.
+> - Chi parte da un piano alto scende prima la scala (`SimParams::stairs_minutes`, 2 minuti); i passaggi tra carrozze sono al piano terra. Si chiacchiera solo con chi è sullo stesso piano (`World::same_place`).
+> - Nel gioco gli NPC vanno alla scala, salgono o scendono e poi raggiungono il posto. Il giocatore usa la scala con W/S. La camera segue il piano; Z mostra entrambi i piani.
+> - Il prototipo ha scelto la camera che segue il piano come vista normale (decisione aperta 4).
+
 ### 1.1 Stanze e piani nella sim [S]
 - Una carrozza contiene delle **stanze**:
   ```rust
