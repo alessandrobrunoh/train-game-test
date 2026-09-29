@@ -3,7 +3,8 @@
 //! Money is a closed loop: the tokens in circulation are those in the NPCs'
 //! pockets plus the administration's [`Economy::treasury`], and their sum
 //! ([`World::money_supply`]) only changes when the player (who lives outside
-//! the sim) buys something ([`World::player_buy`], money in).
+//! the sim) buys something ([`World::player_buy`], money in) or sells
+//! something to a Mercato ([`World::player_sell`], money out).
 //!
 //! - Out of the treasury: wages (per minute of work, at
 //!   [`crate::SimParams::wage_per_hour`]) and stipends for who has no job
@@ -88,6 +89,8 @@ pub struct EconomyCounters {
     /// savings tax, estates without heirs.
     pub purchases: u64,
     pub player_purchases: u64,
+    /// Tokens out of the treasury to the player, for what it sold.
+    pub player_sales: u64,
     pub fines: u64,
     pub taxes: u64,
     pub estates: u64,
@@ -96,11 +99,14 @@ pub struct EconomyCounters {
     pub inherited: u64,
     /// Midnights with austerity.
     pub austerity_days: u64,
+    /// Units made by the NPC workers, per item ([`ItemKind::index`]).
+    pub made: [Tally; ItemKind::COUNT],
 }
 
 impl EconomyCounters {
     /// Books `made` units of `item` out of a `potential` output.
     pub(crate) fn book_made(&mut self, item: ItemKind, made: f32, potential: f32) {
+        self.made[item.index()].add(made);
         match item {
             ItemKind::Verdura => {
                 self.verdura_grown.add(made);
@@ -109,8 +115,21 @@ impl EconomyCounters {
             ItemKind::Razione => self.razioni_cooked.add(made),
             ItemKind::Attrezzo => self.attrezzi_crafted.add(made),
             ItemKind::Vestito => self.vestiti_crafted.add(made),
-            ItemKind::Rottame => {}
+            ItemKind::Rottame
+            | ItemKind::Cotone
+            | ItemKind::Erbe
+            | ItemKind::Metallo
+            | ItemKind::Tessuto
+            | ItemKind::Te
+            | ItemKind::Coperta
+            | ItemKind::Lampada
+            | ItemKind::Giocattolo => {}
         }
+    }
+
+    /// Units of `item` made by the NPC workers so far.
+    pub fn made(&self, item: ItemKind) -> f64 {
+        self.made[item.index()].get()
     }
 
     /// Share of `job`'s work that produced nothing, in `0..=1`.
@@ -215,7 +234,8 @@ impl Economy {
 
 impl World {
     /// All tokens in the sim: the treasury plus every NPC's. Constant except
-    /// for player purchases ([`World::player_buy`]), which bring tokens in.
+    /// for player purchases ([`World::player_buy`]), which bring tokens in,
+    /// and sales ([`World::player_sell`]), which take them out.
     pub fn money_supply(&self) -> u64 {
         self.economy.treasury
             + self

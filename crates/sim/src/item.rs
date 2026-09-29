@@ -4,7 +4,8 @@
 //! [`Stock`] (carriage storage); only whole units can be eaten or sold, so a
 //! renderer should show [`Stock::count`]. Durable items (Attrezzi, Vestiti)
 //! owned by an NPC live in [`crate::Inventory`] with a durability instead.
-//! Per-kind properties are in the catalog [`crate::defs::ITEMS`].
+//! Per-kind properties are in the catalog [`crate::defs::ITEMS`], and how
+//! each item is made in [`crate::defs::RECIPES`].
 
 use std::fmt;
 
@@ -22,18 +23,42 @@ pub enum ItemKind {
     Rottame,
     /// Tool made by Operai from Rottame: boosts Contadini and Operai, wears with work.
     Attrezzo,
-    /// Clothes made by Operai from Rottame: slow down tiredness, wear daily.
+    /// Clothes sewn by Operai from Tessuto: slow down tiredness, wear daily.
     Vestito,
+    /// Raw fibre grown by Contadini in the Serre: woven into Tessuto.
+    Cotone,
+    /// Herbs grown by Contadini in the Serre: brewed into Tè.
+    Erbe,
+    /// Worked metal, cast by Operai from Rottame: for Attrezzi, Lampade, Giocattoli.
+    Metallo,
+    /// Cloth woven by Operai from Cotone: for Vestiti, Coperte, Giocattoli.
+    Tessuto,
+    /// A pot of tea brewed by Cuochi from Erbe, served with the meals.
+    Te,
+    /// Blanket: kept in the Dormitori, residents sleep better.
+    Coperta,
+    /// Lamp: kept in the Dormitori, residents at home feel less lonely.
+    Lampada,
+    /// Toy: kept in the Dormitori, children at home feel less lonely.
+    Giocattolo,
 }
 
 impl ItemKind {
-    pub const COUNT: usize = 5;
+    pub const COUNT: usize = 13;
     pub const ALL: [ItemKind; Self::COUNT] = [
         ItemKind::Verdura,
         ItemKind::Razione,
         ItemKind::Rottame,
         ItemKind::Attrezzo,
         ItemKind::Vestito,
+        ItemKind::Cotone,
+        ItemKind::Erbe,
+        ItemKind::Metallo,
+        ItemKind::Tessuto,
+        ItemKind::Te,
+        ItemKind::Coperta,
+        ItemKind::Lampada,
+        ItemKind::Giocattolo,
     ];
 
     /// Position in [`ItemKind::ALL`] (and in per-item arrays).

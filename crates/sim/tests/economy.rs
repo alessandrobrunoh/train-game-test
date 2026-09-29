@@ -254,7 +254,8 @@ fn austerity_pays_everyone_the_same_share() {
 fn pay_level_follows_the_treasury_within_bounds() {
     let (mut w, mut brain) = world(quiet());
     let market = first_of(&w, CarriageKind::Mercato);
-    // Price of an Attrezzo on a full shelf: base value times the pay level.
+    // Price of an Attrezzo on a full shelf: base value plus transport from
+    // the nearest Officina that makes it, times the pay level.
     let full_price = |w: &mut World| {
         let cap = w.params.market_goods_cap;
         w.carriages[market.index()]
@@ -262,7 +263,9 @@ fn pay_level_follows_the_treasury_within_bounds() {
             .set(ItemKind::Attrezzo, cap);
         w.price(market, ItemKind::Attrezzo).unwrap()
     };
-    let base = ItemKind::Attrezzo.base_value();
+    let (_, distance) = w.nearest_producer(market, ItemKind::Attrezzo).unwrap();
+    let transport = (w.params.transport_per_carriage * distance as f32).round() as u32;
+    let base = ItemKind::Attrezzo.base_value() + transport;
     assert_eq!(full_price(&mut w), base);
     // A flush treasury: pay (and prices) go up a step a day, up to the cap.
     let extra = 10 * w.economy.treasury;
@@ -294,7 +297,7 @@ fn pay_level_follows_the_treasury_within_bounds() {
         past_midnight(&mut w, &mut brain);
     }
     assert_eq!(w.economy.pay_level, w.params.pay_level_min);
-    assert_eq!(full_price(&mut w), base.div_ceil(2));
+    assert_eq!(full_price(&mut w), (base as f32 / 2.0).round() as u32);
     // Logged once each way: rate limited, and only for big moves.
     let cut = count(&w, |k| {
         matches!(k, EventKind::PayChanged { raised: false, .. })

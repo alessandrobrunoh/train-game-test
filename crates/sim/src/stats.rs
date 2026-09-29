@@ -79,6 +79,11 @@ impl Stats {
         };
         let mut actions = [0; ActionKind::ALL.len()];
         let mut owned = [0; ItemKind::COUNT];
+        // Only a few kinds can be owned: look those up once.
+        let ownable: Vec<ItemKind> = ItemKind::ALL
+            .into_iter()
+            .filter(|i| i.has_durability())
+            .collect();
         let mut tokens = 0;
         let mut stages = [0; LifeStage::ALL.len()];
         let mut partnered = 0;
@@ -100,7 +105,7 @@ impl Stats {
             sum.social += npc.needs.social;
             actions[npc.action.kind() as usize] += 1;
             tokens += u64::from(npc.inventory.tokens);
-            for item in ItemKind::ALL {
+            for &item in &ownable {
                 if npc.inventory.has(item) {
                     owned[item.index()] += 1;
                 }

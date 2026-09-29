@@ -90,8 +90,10 @@ pub struct SimParams {
     pub attrezzi_per_craft_minute: f32,
     /// Vestiti an Operaio can make per minute of work (×`tool_output_bonus`).
     pub vestiti_per_craft_minute: f32,
-    pub rottame_per_attrezzo: f32,
-    pub rottame_per_vestito: f32,
+    /// Metallo (cast from Rottame) used by one Attrezzo.
+    pub metallo_per_attrezzo: f32,
+    /// Tessuto (woven from Cotone) used by one Vestito.
+    pub tessuto_per_vestito: f32,
     /// Finished goods a Mercante can bring from the Officine per minute of work.
     pub goods_per_trade_minute: f32,
     /// Contadini are staffed so that the Serre stay about this full (share
@@ -101,6 +103,38 @@ pub struct SimParams {
     pub verdura_target_fill: f32,
     /// Farm quota multiplier per unit of fill below the target (clamped to `0.6..=1.5`).
     pub farm_staffing_gain: f32,
+    /// Contadini grow Cotone and Erbe only while their Serra holds at least
+    /// this share of its Verdura storage (below it, Verdura only)...
+    pub verdura_keep_fill: f32,
+    /// ...and Cuochi brew Tè only while their Mensa holds at least this
+    /// share of its Razioni storage (see [`crate::Work::MakeStaple`]).
+    pub razioni_keep_fill: f32,
+
+    // --- Comfort goods (see `defs::Amenity`) ---
+    /// Tè drunk with each meal at a Mensa that has it (a pot serves a few
+    /// people), and what it gives: energy and sociality.
+    pub te_per_meal: f32,
+    pub te_energy_boost: f32,
+    pub te_social_boost: f32,
+    /// Coperte, Lampade and Giocattoli the administration hands out to each
+    /// Dormitorio every midnight (from the Officine), per resident (per
+    /// child for the Giocattoli). Their benefit grows with how many of
+    /// these the Dormitorio holds (at most 1).
+    pub coperte_per_resident: f32,
+    pub lampade_per_resident: f32,
+    pub giocattoli_per_child: f32,
+    /// With full coverage: sleep in the Dormitorio restores this much more
+    /// energy (×(1 + bonus))...
+    pub coperta_sleep_bonus: f32,
+    /// ...residents awake at home lose this share less sociality...
+    pub lampada_social_relief: f32,
+    /// ...and so do children awake at home, on top of it.
+    pub giocattolo_social_relief: f32,
+    /// Share of the Coperte / Lampade / Giocattoli of a Dormitorio worn out
+    /// every midnight.
+    pub coperta_wear_per_day: f32,
+    pub lampada_wear_per_day: f32,
+    pub giocattolo_wear_per_day: f32,
 
     // --- Durable goods ---
     /// Output multiplier for Contadini and Operai who own an Attrezzo.
@@ -120,6 +154,18 @@ pub struct SimParams {
     pub workshop_goods_cap: f32,
     /// Attrezzi / Vestiti a Mercato can hold (each).
     pub market_goods_cap: f32,
+    /// Cotone / Erbe a Serra can hold (each).
+    pub crops_storage_cap: f32,
+    /// Metallo / Tessuto an Officina can hold (each).
+    pub workshop_parts_cap: f32,
+    /// Tè a Mensa can hold.
+    pub te_storage_cap: f32,
+    /// Coperte / Lampade / Giocattoli a Dormitorio can hold.
+    pub dorm_coperte_cap: f32,
+    pub dorm_lampade_cap: f32,
+    pub dorm_giocattoli_cap: f32,
+    /// Fraction of stored Erbe that wilts every midnight.
+    pub erbe_spoilage_per_day: f32,
     /// Fraction of stored Verdura that spoils every midnight.
     pub verdura_spoilage_per_day: f32,
     /// Fraction of stored Razioni that spoils every midnight.
@@ -149,9 +195,29 @@ pub struct SimParams {
     pub savings_tax_rate: f32,
     /// At most one austerity / pay change event every this many days.
     pub economy_log_days: u64,
-    /// Mercato price = base value × (1 + markup × scarcity), where scarcity
-    /// is `1 - stock / market_goods_cap` in that Mercato.
+    /// Mercato price = (base value + transport) × (1 + markup × scarcity),
+    /// where scarcity is `1 - stock / market_goods_cap` in that Mercato (see
+    /// [`crate::World::price`]).
     pub scarcity_markup: f32,
+    /// Transport in the Mercato price: tokens (at pay level 1) per carriage
+    /// between the Mercato and the nearest carriage specialized in the item.
+    pub transport_per_carriage: f32,
+    /// The Mercati buy from the player at this share of their selling price
+    /// ([`crate::World::player_sell`]).
+    pub player_sell_share: f32,
+    /// Daily Mercato price samples kept ([`crate::World::price_history`]).
+    pub price_history_days: usize,
+
+    // --- Specialties (see `World::specialties`) ---
+    /// Generation: chance that a carriage whose kind has several recipes
+    /// specializes in two of them instead of one.
+    pub second_specialty_chance: f32,
+    /// Output multiplier for a specialty of a carriage that has a choice
+    /// (several recipes)...
+    pub specialty_output_bonus: f32,
+    /// ...and for its other recipes, made only when none of its specialties
+    /// can be (storage full, inputs missing).
+    pub off_specialty_output: f32,
     /// Duration of a purchase.
     pub buy_minutes: u64,
 
@@ -330,11 +396,26 @@ impl Default for SimParams {
             rottame_per_carriage_hour: 0.3,
             attrezzi_per_craft_minute: 1.0 / 90.0,
             vestiti_per_craft_minute: 1.0 / 60.0,
-            rottame_per_attrezzo: 2.0,
-            rottame_per_vestito: 1.0,
+            metallo_per_attrezzo: 2.0,
+            tessuto_per_vestito: 1.0,
             goods_per_trade_minute: 0.05,
             verdura_target_fill: 0.3,
             farm_staffing_gain: 1.5,
+            verdura_keep_fill: 0.2,
+            razioni_keep_fill: 0.5,
+
+            te_per_meal: 0.15,
+            te_energy_boost: 0.03,
+            te_social_boost: 0.02,
+            coperte_per_resident: 1.0,
+            lampade_per_resident: 0.25,
+            giocattoli_per_child: 1.0,
+            coperta_sleep_bonus: 0.15,
+            lampada_social_relief: 0.15,
+            giocattolo_social_relief: 0.25,
+            coperta_wear_per_day: 0.02,
+            lampada_wear_per_day: 0.01,
+            giocattolo_wear_per_day: 0.03,
 
             tool_output_bonus: 1.5,
             tool_wear_per_work_minute: 1.0 / (12.0 * 420.0),
@@ -346,6 +427,13 @@ impl Default for SimParams {
             rottame_storage_cap: 150.0,
             workshop_goods_cap: 40.0,
             market_goods_cap: 30.0,
+            crops_storage_cap: 60.0,
+            workshop_parts_cap: 40.0,
+            te_storage_cap: 60.0,
+            dorm_coperte_cap: 100.0,
+            dorm_lampade_cap: 30.0,
+            dorm_giocattoli_cap: 40.0,
+            erbe_spoilage_per_day: 0.05,
             verdura_spoilage_per_day: 0.08,
             razioni_spoilage_per_day: 0.05,
 
@@ -360,6 +448,13 @@ impl Default for SimParams {
             savings_tax_rate: 0.1,
             economy_log_days: 3,
             scarcity_markup: 0.5,
+            transport_per_carriage: 1.0,
+            player_sell_share: 0.6,
+            price_history_days: 60,
+
+            second_specialty_chance: 0.35,
+            specialty_output_bonus: 1.25,
+            off_specialty_output: 0.5,
             buy_minutes: 15,
 
             starvation_minutes: 3 * 24 * 60,
@@ -496,12 +591,17 @@ impl SimParams {
         self.meal_window(1, shift)
     }
 
-    /// How much of `item` a carriage of `kind` can store (0 = not stored there).
+    /// How much of `item` a carriage of `kind` can store (0 = not stored
+    /// there): from the carriage table or, for the newer items, the item's
+    /// own [`crate::defs::Store`] rows.
     pub fn storage_cap(&self, kind: CarriageKind, item: ItemKind) -> f32 {
-        kind.def()
-            .storage
+        if let Some(s) = kind.def().storage.iter().find(|s| s.item == item) {
+            return (s.cap)(self);
+        }
+        item.def()
+            .stores
             .iter()
-            .find(|s| s.item == item)
+            .find(|s| s.carriage == kind)
             .map_or(0.0, |s| (s.cap)(self))
     }
 

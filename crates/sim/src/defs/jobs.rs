@@ -27,9 +27,18 @@ pub enum Work {
     /// Makes the recipe's output into the workplace storage, taking its
     /// input (if any) from the recipe's source.
     Make(&'static RecipeDef),
-    /// Makes one of the recipes, whose output is scarcest on the train
-    /// first; inputs come from the workplace storage.
+    /// Makes one of the recipes: the one whose output is scarcest on the
+    /// train first (lowest share of its storage in the workplaces and
+    /// outlets), falling back to the next if it can't be made.
     MakeScarcest(&'static [RecipeDef]),
+    /// Makes the first recipe (the staple) while its output fills less than
+    /// `keep` of the workplace storage; above that, like
+    /// [`Work::MakeScarcest`] over all of them. Food first: the surplus
+    /// labour makes the rest.
+    MakeStaple {
+        recipes: &'static [RecipeDef],
+        keep: fn(&SimParams) -> f32,
+    },
     /// Brings the items sold at the Mercati from the nearest carriages of
     /// `from` to the workplace, the item it has least of first.
     Trade {
@@ -43,7 +52,7 @@ impl Work {
     pub fn recipes(&self) -> &'static [RecipeDef] {
         match self {
             Work::Make(recipe) => std::slice::from_ref(*recipe),
-            Work::MakeScarcest(recipes) => recipes,
+            Work::MakeScarcest(recipes) | Work::MakeStaple { recipes, .. } => recipes,
             Work::Trade { .. } => &[],
         }
     }
@@ -57,7 +66,10 @@ pub static JOBS: [JobDef; Job::COUNT] = [
         station: StationKind::GrowBed,
         shift: (7, 16),
         uses_tool: true,
-        work: Work::Make(&recipes::VERDURA),
+        work: Work::MakeStaple {
+            recipes: &[recipes::VERDURA, recipes::COTONE, recipes::ERBE],
+            keep: |p| p.verdura_keep_fill,
+        },
     },
     JobDef {
         job: Job::Cuoco,
@@ -66,7 +78,10 @@ pub static JOBS: [JobDef; Job::COUNT] = [
         station: StationKind::Stove,
         shift: (6, 15),
         uses_tool: false,
-        work: Work::Make(&recipes::RAZIONE),
+        work: Work::MakeStaple {
+            recipes: &[recipes::RAZIONE, recipes::TE],
+            keep: |p| p.razioni_keep_fill,
+        },
     },
     JobDef {
         job: Job::Operaio,
@@ -75,7 +90,15 @@ pub static JOBS: [JobDef; Job::COUNT] = [
         station: StationKind::Workbench,
         shift: (8, 17),
         uses_tool: true,
-        work: Work::MakeScarcest(&[recipes::ATTREZZO, recipes::VESTITO]),
+        work: Work::MakeScarcest(&[
+            recipes::ATTREZZO,
+            recipes::VESTITO,
+            recipes::COPERTA,
+            recipes::LAMPADA,
+            recipes::GIOCATTOLO,
+            recipes::METALLO,
+            recipes::TESSUTO,
+        ]),
     },
     JobDef {
         job: Job::Mercante,

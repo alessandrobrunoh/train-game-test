@@ -572,8 +572,21 @@ fn fifty_years_stay_balanced_with_turnover() {
     let beds = w.total_beds();
     let money = w.money_supply();
     let mut tokens_per_adult = Vec::new();
+    // Mercato shelves (Mercato × item sold) seen empty at noon, of all seen.
+    let markets = w.markets();
+    let (mut shelves, mut empty_shelves) = (0usize, 0usize);
     for _ in 0..50 {
-        w.run(&mut brain, 12 * DAY);
+        // A year from 06:00 to 06:00, looking at the shelves at noon.
+        for _ in 0..w.params.days_per_year {
+            w.run(&mut brain, 6 * 60);
+            for &m in &markets {
+                for item in ItemKind::SOLD {
+                    shelves += 1;
+                    empty_shelves += usize::from(w.carriages[m.index()].stock.count(item) == 0);
+                }
+            }
+            w.run(&mut brain, DAY - 6 * 60);
+        }
         let pop = w.npcs.len();
         assert!(
             pop * 10 >= beds * 7 && pop <= beds,
@@ -600,6 +613,12 @@ fn fifty_years_stay_balanced_with_turnover() {
         (last / first - 1.0).abs() < 0.3,
         "tokens per adult drift from {first} to {last}"
     );
+    // Mercati rarely run out, and keep a price history.
+    assert!(
+        empty_shelves * 50 <= shelves,
+        "{empty_shelves} of {shelves} shelves empty at noon"
+    );
+    assert_eq!(w.price_history().len(), w.params.price_history_days);
     let c = &w.economy.counters;
     assert_eq!(c.austerity_days, 0, "{c:?}");
     let (grown, capped) = (c.verdura_grown.get(), c.verdura_capped.get());

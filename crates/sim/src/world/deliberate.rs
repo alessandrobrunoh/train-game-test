@@ -662,8 +662,14 @@ impl World {
                         .filter(|m| {
                             let c = &self.carriages[m.index()];
                             c.stock.count(item) >= 1
-                                && price_at(&self.params, self.economy.pay_level, c, item)
-                                    .is_some_and(|price| price > npc.inventory.tokens)
+                                && price_at(
+                                    &self.params,
+                                    self.economy.pay_level,
+                                    &self.market,
+                                    c,
+                                    item,
+                                )
+                                .is_some_and(|price| price > npc.inventory.tokens)
                         })
                         .min_by_key(|m| (m.distance(npc.carriage), m.0))
                         .map(|&m| (item, m))
@@ -1037,7 +1043,8 @@ impl World {
             return;
         }
         let level = self.economy.pay_level;
-        let price = price_at(&self.params, level, c, item).unwrap_or(item.base_value());
+        let price =
+            price_at(&self.params, level, &self.market, c, item).unwrap_or(item.base_value());
         let thief = self.npcs[i].id;
         let guard = self.merchant_on_duty(market).is_some();
         let witnesses = self

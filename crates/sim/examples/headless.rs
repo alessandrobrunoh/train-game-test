@@ -8,9 +8,9 @@
 use std::time::Instant;
 
 use sim::{
-    Action, ActionKind, Choice, ConversationCounters, DeathCause, DeliberationCounters,
-    DeliberationKind, EventKind, ItemKind, LifeStage, MINUTES_PER_DAY, Needs, Stats, Tally, Tone,
-    Topic, UtilityBrain, World,
+    Action, ActionKind, CarriageKind, Choice, Comfort, ConversationCounters, DeathCause,
+    DeliberationCounters, DeliberationKind, EventKind, ItemKind, LifeStage, MINUTES_PER_DAY, Needs,
+    Stats, Tally, Tone, Topic, UtilityBrain, World,
 };
 
 fn main() {
@@ -118,7 +118,7 @@ fn main() {
             })
             .collect();
         println!(
-            "G{day:2} | pop {:3} | saz {:.2} en {:.2} soc {:.2} | pasti {:.1} | verd {:4.0} raz {:4.0} rott {:3.0} | attr {:2}/{:3} vest {:2}/{:3} | comprati {:2}a {:2}v rotti {:2}a {:2}v | gettoni {:5} | {} | {}",
+            "G{day:2} | pop {:3} | saz {:.2} en {:.2} soc {:.2} | pasti {:.1} | verd {:4.0} raz {:4.0} rott {:3.0} | {} | attr {:2}/{:3} vest {:2}/{:3} | comprati {:2}a {:2}v rotti {:2}a {:2}v | gettoni {:5} | {} | {}",
             s.population,
             needs.hunger / samples,
             needs.energy / samples,
@@ -127,6 +127,7 @@ fn main() {
             s.stored.get(ItemKind::Verdura),
             s.stored.get(ItemKind::Razione),
             s.stored.get(ItemKind::Rottame),
+            new_items(&world),
             s.on_sale.count(a),
             s.owned(a),
             s.on_sale.count(v),
@@ -146,6 +147,7 @@ fn main() {
         "\nSimulati {days} giorni in {elapsed:.1?}. Morti: {deaths}, popolazione finale: {}",
         world.npcs.len()
     );
+    print_items(&world, days);
     println!("Ultimi eventi ({} in totale):", world.events_total());
     for e in world.events.iter().rev().take(10).rev() {
         println!("  {e}");
@@ -159,6 +161,50 @@ fn main() {
         days,
     );
     print_samples(&world);
+}
+
+/// Stock of the items added with the crafting (Fase 3), and the average
+/// comfort of the Dormitori (coverage of Coperte, Lampade, Giocattoli).
+fn new_items(world: &World) -> String {
+    let s = world.total_stock();
+    let dorms: Vec<Comfort> = world
+        .carriages
+        .iter()
+        .filter(|c| c.kind == CarriageKind::Dormitorio)
+        .map(|c| world.comfort(c.id))
+        .collect();
+    let n = dorms.len().max(1) as f32;
+    let avg = |f: fn(&Comfort) -> f32| dorms.iter().map(f).sum::<f32>() / n;
+    format!(
+        "cot {:3.0} erb {:3.0} met {:3.0} tes {:3.0} tè {:3.0} cop {:3.0} lam {:3.0} gio {:3.0} | comodità {:.0}/{:.0}/{:.0}%",
+        s.get(ItemKind::Cotone),
+        s.get(ItemKind::Erbe),
+        s.get(ItemKind::Metallo),
+        s.get(ItemKind::Tessuto),
+        s.get(ItemKind::Te),
+        s.get(ItemKind::Coperta),
+        s.get(ItemKind::Lampada),
+        s.get(ItemKind::Giocattolo),
+        100.0 * avg(|c| c.bedding),
+        100.0 * avg(|c| c.light),
+        100.0 * avg(|c| c.toys),
+    )
+}
+
+/// Per item: stock at the end, units made by the workers per day, value.
+fn print_items(world: &World, days: u64) {
+    println!("\nOggetti: scorte finali (in carrozza), prodotti al giorno dagli NPC, valore base");
+    let stock = world.total_stock();
+    let c = &world.economy.counters;
+    for item in ItemKind::ALL {
+        println!(
+            "  {:<11} {:6.0}   {:6.1}/g   {:3} gettoni",
+            item.name(),
+            stock.get(item),
+            c.made(item) / days.max(1) as f64,
+            item.base_value(),
+        );
+    }
 }
 
 /// Compact daily line: conversations, share two-sided, share tense.
@@ -214,31 +260,59 @@ fn print_conversations(before: &ConversationCounters, after: &ConversationCounte
     );
 }
 
-/// Up to 5 recent conversations with different topics, with their lines.
+/// Up to 12 recent conversations with different topics and tones (and one
+/// with a child, if any), with their lines.
 fn print_samples(world: &World) {
     let name = |id: sim::NpcId| {
         world
             .npc(id)
             .map_or_else(|| format!("#{}", id.0), |n| n.name.clone())
     };
-    println!("\nAlcune conversazioni recenti:");
-    let mut shown: Vec<Topic> = Vec::new();
-    for c in world.recent_conversations().iter().rev() {
-        if shown.len() >= 5 || shown.contains(&c.topic) || c.lines.len() < 3 {
-            continue;
+    let age = |id: sim::NpcId| world.npc(id).map_or(0, |n| n.age);
+    let kid = |c: &sim::Conversation| age(c.a).min(age(c.b)) < 14;
+    let recent: Vec<&sim::Conversation> = world
+        .recent_conversations()
+        .iter()
+        .rev()
+        .filter(|c| c.lines.len() >= 3)
+        .collect();
+    // Different (topic, tone) pairs first, then different topics, then a child.
+    let mut chosen: Vec<&sim::Conversation> = Vec::new();
+    for c in &recent {
+        if chosen.len() < 11
+            && !chosen
+                .iter()
+                .any(|x| (x.topic, x.tone) == (c.topic, c.tone))
+        {
+            chosen.push(c);
         }
-        shown.push(c.topic);
+    }
+    for c in &recent {
+        if chosen.len() < 11 && !chosen.iter().any(|x| x.id == c.id) {
+            chosen.push(c);
+        }
+    }
+    if let Some(c) = recent
+        .iter()
+        .find(|c| kid(c) && !chosen.iter().any(|x| x.id == c.id))
+    {
+        chosen.push(c);
+    }
+    println!("\nAlcune conversazioni recenti:");
+    for c in chosen {
         let about = c
             .about
             .map(|id| format!(", su {}", name(id)))
             .unwrap_or_default();
         println!(
-            "[{} → {:02}:{:02}] {} e {}: {} ({}{about})",
+            "[{} → {:02}:{:02}] {} ({}) e {} ({}): {} ({}{about})",
             c.since,
             c.until.hour(),
             c.until.minute(),
             name(c.a),
+            age(c.a),
             name(c.b),
+            age(c.b),
             c.topic.name(),
             c.tone.name(),
         );

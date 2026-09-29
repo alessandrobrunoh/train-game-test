@@ -112,6 +112,13 @@ pub enum EventKind {
         price: u32,
         carriage: CarriageId,
     },
+    /// The player sold one `item` for `price` tokens to the Mercato
+    /// `carriage` (see [`crate::World::player_sell`]).
+    PlayerSold {
+        item: ItemKind,
+        price: u32,
+        carriage: CarriageId,
+    },
     /// The player gave one `item` to an NPC (see [`crate::World::player_give`]).
     PlayerGave {
         npc: NpcId,
@@ -361,6 +368,15 @@ impl fmt::Display for Event {
             } => write!(
                 f,
                 "Hai comprato {} per {price} gettoni (carrozza {carriage})",
+                item.with_article()
+            ),
+            EventKind::PlayerSold {
+                item,
+                price,
+                carriage,
+            } => write!(
+                f,
+                "Hai venduto {} per {price} gettoni (carrozza {carriage})",
                 item.with_article()
             ),
             EventKind::PlayerGave { name, item, .. } => {

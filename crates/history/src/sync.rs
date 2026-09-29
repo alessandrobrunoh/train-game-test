@@ -275,6 +275,11 @@ pub(crate) fn columns(kind: &EventKind) -> Columns {
             item,
             price,
             carriage,
+        }
+        | EventKind::PlayerSold {
+            item,
+            price,
+            carriage,
         } => {
             c.item = Some(item);
             c.amount = Some(1);
@@ -349,6 +354,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::ItemBroke { .. } => "ItemBroke",
         EventKind::PlayerTook { .. } => "PlayerTook",
         EventKind::PlayerBought { .. } => "PlayerBought",
+        EventKind::PlayerSold { .. } => "PlayerSold",
         EventKind::PlayerGave { .. } => "PlayerGave",
         EventKind::DeliberationAsked { .. } => "DeliberationAsked",
         EventKind::DeliberationResolved { .. } => "DeliberationResolved",
@@ -370,6 +376,14 @@ pub(crate) fn item_name(item: ItemKind) -> &'static str {
         ItemKind::Rottame => "Rottame",
         ItemKind::Attrezzo => "Attrezzo",
         ItemKind::Vestito => "Vestito",
+        ItemKind::Cotone => "Cotone",
+        ItemKind::Erbe => "Erbe",
+        ItemKind::Metallo => "Metallo",
+        ItemKind::Tessuto => "Tessuto",
+        ItemKind::Te => "Te",
+        ItemKind::Coperta => "Coperta",
+        ItemKind::Lampada => "Lampada",
+        ItemKind::Giocattolo => "Giocattolo",
     }
 }
 

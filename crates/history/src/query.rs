@@ -138,14 +138,14 @@ pub struct YearSnapshotRow {
 /// What the player did, summed by kind and item.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlayerTotal {
-    /// `"PlayerTook"`, `"PlayerBought"` or `"PlayerGave"`.
+    /// `"PlayerTook"`, `"PlayerBought"`, `"PlayerSold"` or `"PlayerGave"`.
     pub kind: String,
     pub item: Option<ItemKind>,
     /// Number of events.
     pub times: u64,
     /// Units of the item.
     pub units: u64,
-    /// Tokens spent.
+    /// Tokens spent (bought) or earned (sold).
     pub tokens: u64,
 }
 
@@ -166,7 +166,7 @@ const PERSON_COLS: &str =
     "id, name, sex, born, died, death_cause, death_age, mother, father, founder";
 const EVENT_COLS: &str = "seq, time, kind, npc, other, carriage, item, amount, price, text, data";
 /// Event kinds caused by the player.
-const PLAYER_KINDS: &str = "('PlayerTook', 'PlayerBought', 'PlayerGave')";
+const PLAYER_KINDS: &str = "('PlayerTook', 'PlayerBought', 'PlayerSold', 'PlayerGave')";
 
 fn person_row(r: &Row) -> rusqlite::Result<PersonRow> {
     Ok(PersonRow {

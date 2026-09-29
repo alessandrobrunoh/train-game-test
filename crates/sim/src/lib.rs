@@ -12,10 +12,19 @@
 //!   Mensa; eating takes one Razione. Meals are free for everyone. People
 //!   eat in meal shifts ([`Npc::meal_shift`]); in a full Mensa they queue for
 //!   a seat ([`Action::Wait`]); see [`World::mensa_occupancy`].
-//! - Goods: the train sheds Rottame into the Officine every hour; Operai turn
-//!   it into Attrezzi or Vestiti (whichever is scarcer on the train); Mercanti
-//!   bring them to their Mercato, where NPCs buy them with the tokens earned
-//!   as wages.
+//! - Goods: the train sheds Rottame into the Officine every hour; with food
+//!   well stocked, Contadini also grow Cotone and Erbe. Operai cast Rottame
+//!   into Metallo and weave Cotone into Tessuto, then make Attrezzi,
+//!   Vestiti, Coperte, Lampade and Giocattoli (their carriage's specialties
+//!   first, then whatever is scarcest on the train); Mercanti bring Attrezzi
+//!   and Vestiti to their Mercato, where NPCs buy them with the tokens earned
+//!   as wages. A Mercato price grows with the distance from the nearest
+//!   carriage specialized in the item ([`World::market_quotes`]).
+//! - Comfort: Cuochi brew Tè from Erbe, drunk with the meals; every
+//!   midnight the Officine hand out Coperte, Lampade and Giocattoli to the
+//!   Dormitori, where they help sleep and keep residents company.
+//! - Recipes ([`defs::RECIPES`]) are shared by NPC workers and the player
+//!   ([`World::player_craft`]).
 //! - Money is a closed loop ([`Economy`]): wages and stipends are paid every
 //!   midnight from the administration's treasury; purchases, fines, a tax on
 //!   large savings and estates without heirs go back to it. Pay and prices
@@ -71,7 +80,9 @@ pub mod world;
 pub use action::{Action, ActionKind, ActionOption, DecisionRequest};
 pub use brain::{Brain, RandomBrain, THINK, UtilityBrain, UtilityWeights};
 pub use carriage::{Carriage, CarriageKind, Station, StationKind};
-pub use defs::{CarriageDef, ItemDef, ItemUse, JobDef, RecipeDef, Work};
+pub use defs::{
+    Amenity, CarriageDef, ItemCategory, ItemDef, ItemUse, JobDef, RECIPES, RecipeDef, Work,
+};
 pub use deliberation::{
     Choice, Deliberation, DeliberationAnswer, DeliberationCounters, DeliberationId,
     DeliberationKind, DeliberationOption, Gathering, Grievance, ResolvedDeliberation, Resolver,
@@ -89,5 +100,8 @@ pub use params::SimParams;
 pub use personality::{Personality, Temper};
 pub use stats::Stats;
 pub use time::{GameTime, MINUTES_PER_DAY, MINUTES_PER_HOUR};
-pub use world::{BuyError, Economy, EconomyCounters, GiveError, LifeCounters, Tally, World};
+pub use world::{
+    BuyError, Comfort, CraftError, Economy, EconomyCounters, GiveError, LifeCounters, Tally, World,
+};
+pub use world::{Market, MarketQuote, PriceSample, SellError, TREND_DAYS, Trend, mercato_price};
 pub use world::{MensaOccupancy, MensaRole};
