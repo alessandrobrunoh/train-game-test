@@ -105,6 +105,16 @@ pub struct UtilityWeights {
     /// Lingering (idling, chatting) in a crowded Mensa scores this less.
     #[serde(default = "default_crowd_penalty")]
     pub crowd_penalty: f32,
+    /// Buying a comfort good the NPC's Dormitorio lacks (see `World::npc_wants`).
+    #[serde(default = "default_buy_comfort")]
+    pub buy_comfort: f32,
+    /// Buying food at a stall, times the eating score (paying for what the
+    /// Mensa gives for free).
+    #[serde(default = "default_buy_food")]
+    pub buy_food: f32,
+    /// A trip to a Mercato to sell at the stalls (see `World::wants_to_sell`).
+    #[serde(default = "default_sell")]
+    pub sell: f32,
     /// Uniform noise added to each score (`0..noise`).
     pub noise: f32,
 }
@@ -132,6 +142,9 @@ impl Default for UtilityWeights {
             idle: 0.15,
             travel_cost_per_minute: 0.01,
             crowd_penalty: default_crowd_penalty(),
+            buy_comfort: default_buy_comfort(),
+            buy_food: default_buy_food(),
+            sell: default_sell(),
             noise: 0.08,
         }
     }
@@ -139,6 +152,18 @@ impl Default for UtilityWeights {
 
 fn default_crowd_penalty() -> f32 {
     0.4
+}
+
+fn default_buy_comfort() -> f32 {
+    0.3
+}
+
+fn default_buy_food() -> f32 {
+    0.8
+}
+
+fn default_sell() -> f32 {
+    0.35
 }
 
 /// Fast rule-based brain: scores every option from needs, time of day and job
@@ -192,7 +217,7 @@ impl UtilityBrain {
                 };
                 goal + home - (minutes + wait) * self.weights.travel_cost_per_minute
             }
-            Action::Buy(item) => self.buy_score(npc, item),
+            Action::Buy(item) => self.buy_score(world, npc, item),
             Action::Socialize(other) => {
                 let w = &self.weights;
                 let tie = npc.relation(other).map_or(0.0, |r| {
@@ -213,16 +238,21 @@ impl UtilityBrain {
         }
     }
 
-    /// Need-driven desire to buy `item`, weighted by how many tokens the NPC has.
-    fn buy_score(&self, npc: &Npc, item: ItemKind) -> f32 {
+    /// Need-driven desire to buy `item` ([`World::npc_wants`]), weighted by
+    /// how many tokens the NPC has; food by how hungry it is.
+    fn buy_score(&self, world: &World, npc: &Npc, item: ItemKind) -> f32 {
         let w = &self.weights;
-        if !npc.wants(item) {
+        if !world.npc_wants(npc, item) {
             return -1.0;
         }
         let base = match item.def().usage {
             ItemUse::Tool => w.buy_tool,
             ItemUse::Clothes => w.buy_clothes,
-            ItemUse::Food | ItemUse::Material => return -1.0,
+            ItemUse::Material => w.buy_comfort,
+            ItemUse::Food => {
+                let u = 1.0 - npc.needs.hunger;
+                return w.buy_food * w.eat * u * u;
+            }
         };
         let comfortable = w.comfortable_savings * item.base_value() as f32;
         let wealth = if comfortable > 0.0 {
@@ -275,10 +305,20 @@ impl UtilityBrain {
                 w.socialize * u + if evening { w.evening_social_bonus } else { 0.0 }
             }
             // Travelling to shop: the best thing the NPC could buy there.
-            ActionKind::Buy => ItemKind::SOLD
-                .into_iter()
-                .map(|item| self.buy_score(npc, item))
-                .fold(-1.0, f32::max),
+            // A trip to a Mercato: to buy what it needs (not food, bought
+            // only where it is), or to sell at the stalls.
+            ActionKind::Buy => {
+                let sell = if world.wants_to_sell(npc) {
+                    w.sell
+                } else {
+                    -1.0
+                };
+                ItemKind::ALL
+                    .into_iter()
+                    .filter(|item| item.def().usage != ItemUse::Food)
+                    .map(|item| self.buy_score(world, npc, item))
+                    .fold(sell, f32::max)
+            }
             ActionKind::Idle | ActionKind::Travel => w.idle,
             // Queuing for a seat here: eating, minus the expected wait.
             ActionKind::Wait => {

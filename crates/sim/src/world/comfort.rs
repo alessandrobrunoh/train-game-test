@@ -88,7 +88,7 @@ fn coverage(stock: f32, target: f32) -> f32 {
 
 impl World {
     /// Residents and children per carriage (by home), indexed like `carriages`.
-    fn households(&self) -> (Vec<usize>, Vec<usize>) {
+    pub(super) fn households(&self) -> (Vec<usize>, Vec<usize>) {
         let mut residents = vec![0; self.carriages.len()];
         let mut children = vec![0; self.carriages.len()];
         for npc in &self.npcs {
@@ -133,6 +133,18 @@ impl World {
     /// Units of `item` the administration wants in `carriage` (a
     /// Dormitorio, for its comfort goods; 0 otherwise), capped by its storage.
     pub fn furnishing_target(&self, carriage: CarriageId, item: ItemKind) -> f32 {
+        let (residents, children) = self.households();
+        self.furnishing_target_of(carriage, item, &residents, &children)
+    }
+
+    /// [`World::furnishing_target`] given [`World::households`].
+    pub(super) fn furnishing_target_of(
+        &self,
+        carriage: CarriageId,
+        item: ItemKind,
+        residents: &[usize],
+        children: &[usize],
+    ) -> f32 {
         let Some(c) = self.carriage(carriage) else {
             return 0.0;
         };
@@ -140,7 +152,6 @@ impl World {
         {
             return 0.0;
         }
-        let (residents, children) = self.households();
         let (r, k) = (residents[carriage.index()], children[carriage.index()]);
         target(&self.params, item, r, k).min(self.params.storage_cap(c.kind, item))
     }

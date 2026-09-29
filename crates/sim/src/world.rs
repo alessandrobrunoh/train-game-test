@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
 use crate::brain::{Brain, THINK};
 use crate::carriage::{Carriage, CarriageKind, Owner, StationKind};
-use crate::defs::{RecipeDef, StationCount};
+use crate::defs::{ItemUse, RecipeDef, StationCount};
 use crate::deliberation::{
     Deliberation, DeliberationCounters, Gathering, Grievance, ResolvedDeliberation,
 };
@@ -35,6 +35,7 @@ mod life;
 mod market;
 mod mensa;
 mod player;
+mod stalls;
 
 pub use chat::KNOWN_MARKET_REACH;
 pub use comfort::Comfort;
@@ -46,6 +47,10 @@ pub use mensa::{MensaOccupancy, MensaRole};
 pub use player::{
     GIFT_AFFINITY, GREET_AFFINITY, GREET_COOLDOWN_MINUTES, GREET_MINUTES, PRICE_PER_AFFINITY,
     PURCHASE_AFFINITY, THEFT_SEEN_AFFINITY,
+};
+pub use stalls::{
+    Buyer, Listing, ListingId, MarketOffer, Offer, OfferSource, STALL_LOG_KEPT, Seller, StallError,
+    StallEvent, StallRecord, StallSale, TradeCounters,
 };
 
 /// Expected minutes of actual work per worker per day, used to size the
@@ -67,6 +72,14 @@ const GENERATED_FRIENDS: usize = 2;
 /// Generation: starting tokens of workers and of everyone else.
 const STARTING_TOKENS_WORKER: std::ops::Range<u32> = 30..120;
 const STARTING_TOKENS_JOBLESS: std::ops::Range<u32> = 5..45;
+
+/// Seed of the stalls' own RNG stream (xored with the world seed).
+const TRADE_SEED: u64 = 0x57A1_1B0B_7E11;
+
+/// The stalls' RNG stream of a world saved before it existed.
+fn default_trade_rng() -> ChaCha8Rng {
+    ChaCha8Rng::seed_from_u64(TRADE_SEED)
+}
 
 /// Repeating carriage pattern, head to tail. 20 carriages give 6 Dormitori,
 /// 4 Mense, 4 Serre, 4 Officine and 2 Mercati.
@@ -110,6 +123,10 @@ pub struct World {
     /// Edge-trigger for Shortage / Restocked events, indexed by item.
     shortages: [bool; ItemKind::COUNT],
     rng: ChaCha8Rng,
+    /// Randomness of the stalls and of the NPCs' belongings (see
+    /// `stalls.rs`), a stream of its own so that it leaves the rest alone.
+    #[serde(default = "default_trade_rng")]
+    trade_rng: ChaCha8Rng,
     /// Open deliberations, sorted by id (see [`World::open_deliberations`]).
     #[serde(default)]
     deliberations: Vec<Deliberation>,
@@ -437,11 +454,7 @@ impl World {
                     energy: rng.random_range(0.8..1.0),
                     social: rng.random_range(0.5..1.0),
                 },
-                inventory: Inventory {
-                    tokens,
-                    tool,
-                    clothes,
-                },
+                inventory: Inventory::new(tokens, tool, clothes),
                 action: Action::Idle,
                 action_since: clock,
                 action_until: clock + rng.random_range(0..30),
@@ -615,6 +628,7 @@ impl World {
             last_birth_denied_log: None,
             shortages: [false; ItemKind::COUNT],
             rng,
+            trade_rng: ChaCha8Rng::seed_from_u64(seed ^ TRADE_SEED),
             deliberations: Vec::new(),
             next_deliberation_id: 0,
             notified_until: 0,
@@ -743,6 +757,19 @@ impl World {
         let clothes = match inv.clothes {
             Some(d) => format!("un vestito {} ({:.0}%)", wear(d), d * 100.0),
             None => "nessun vestito caldo".to_string(),
+        };
+        let clothes = match inv.items.items().as_slice() {
+            [] => clothes,
+            carried => {
+                let list: Vec<String> = carried
+                    .iter()
+                    .map(|&(item, n)| match n {
+                        1 => item.with_article().to_string(),
+                        n => format!("{n} {}", item.plural()),
+                    })
+                    .collect();
+                format!("{clothes}; porta con sé {}", list.join(", "))
+            }
         };
         let family = self.family_context(npc);
         Some(format!(
@@ -946,6 +973,7 @@ impl World {
             self.check_shortages();
             self.end_gatherings();
             self.temptations();
+            self.stalls_hour();
         }
 
         self.run_deliberations(brain);
@@ -1043,13 +1071,23 @@ impl World {
                 && c.has_free(StationKind::Table)
         };
         let can_sleep_at = |c: &Carriage| c.has_free(StationKind::Bed);
-        let wants_something = ItemKind::SOLD.iter().any(|&item| npc.wants(item));
         let (level, market) = (self.economy.pay_level, &self.market);
+        // What the NPC would buy (catalog-driven, see `stalls.rs`); food is
+        // only bought where it already is, nobody walks to a stall to eat.
+        let mut wanted = [None; ItemKind::COUNT];
+        let mut n_wanted = 0;
+        for item in ItemKind::ALL {
+            if stalls::wants_item(p, level, market, npc, item) {
+                wanted[n_wanted] = Some(item);
+                n_wanted += 1;
+            }
+        }
+        let wanted = &wanted[..n_wanted];
+        let wants_something = !wanted.is_empty();
         let can_shop_at = |c: &Carriage| {
-            wants_something
-                && ItemKind::SOLD
-                    .iter()
-                    .any(|&item| can_buy_at(p, level, market, now, npc, c, item))
+            wanted.iter().flatten().any(|&item| {
+                item.def().usage != ItemUse::Food && can_buy_at(p, level, market, now, npc, c, item)
+            })
         };
 
         push(
@@ -1102,11 +1140,9 @@ impl World {
             push(Action::Work(station), minutes, None);
         }
 
-        if wants_something {
-            for item in ItemKind::SOLD {
-                if can_buy_at(p, level, market, now, npc, carriage, item) {
-                    push(Action::Buy(item), p.buy_minutes, None);
-                }
+        for &item in wanted.iter().flatten() {
+            if can_buy_at(p, level, market, now, npc, carriage, item) {
+                push(Action::Buy(item), p.buy_minutes, None);
             }
         }
 
@@ -1184,6 +1220,14 @@ impl World {
         if wants_something
             && !can_shop_at(carriage)
             && let Some(to) = nearest(&can_shop_at)
+        {
+            push(Action::Travel { to }, travel(to), Some(ActionKind::Buy));
+        }
+        // Goods to sell and a reason to (see `World::wants_to_sell`): to the
+        // nearest Mercato's stalls, a low-priority errand.
+        if carriage.kind != CarriageKind::Mercato
+            && self.wants_to_sell(npc)
+            && let Some(to) = self.nearest_market(here)
         {
             push(Action::Travel { to }, travel(to), Some(ActionKind::Buy));
         }
@@ -1278,9 +1322,19 @@ impl World {
                 )
             }
             Action::Buy(item) => {
-                let price = self.price(here.id, item).unwrap_or(0);
+                let level = self.economy.pay_level;
+                let offer =
+                    stalls::best_offer(&self.params, level, &self.market, here, item, npc.id);
+                let price = offer.map_or(0, |(price, _)| price);
+                let from = match offer {
+                    Some((_, stalls::Source::Listing(k))) => {
+                        let seller = self.market.listings[k].seller;
+                        format!(" al banco di {}", self.seller_name(seller))
+                    }
+                    _ => String::new(),
+                };
                 format!(
-                    "compra {} in {} per {price} gettoni (ne ha {})",
+                    "compra {}{from} in {} per {price} gettoni (ne ha {})",
                     item.with_article(),
                     here.label(),
                     npc.inventory.tokens
@@ -1290,11 +1344,23 @@ impl World {
             Action::Travel { to } => {
                 let dest = self.carriage(to);
                 let shopping = dest.and_then(|c| {
-                    ItemKind::SOLD.into_iter().find(|&item| {
+                    ItemKind::ALL.into_iter().find(|&item| {
                         let level = self.economy.pay_level;
-                        can_buy_at(&self.params, level, &self.market, self.clock, npc, c, item)
+                        item.def().usage != ItemUse::Food
+                            && stalls::wants_item(&self.params, level, &self.market, npc, item)
+                            && can_buy_at(
+                                &self.params,
+                                level,
+                                &self.market,
+                                self.clock,
+                                npc,
+                                c,
+                                item,
+                            )
                     })
                 });
+                let selling = dest.is_some_and(|c| c.kind == CarriageKind::Mercato)
+                    && self.wants_to_sell(npc);
                 let why = match option.goal {
                     Some(ActionKind::Eat) => " per mangiare".to_string(),
                     Some(ActionKind::Sleep) if to == npc.home => {
@@ -1305,6 +1371,7 @@ impl World {
                     Some(ActionKind::Socialize) => " per fare due chiacchiere".to_string(),
                     Some(ActionKind::Buy) => match shopping {
                         Some(item) => format!(" per comprare {}", item.with_article()),
+                        None if selling => " per vendere qualcosa ai banchi".to_string(),
                         None => " per fare acquisti".to_string(),
                     },
                     _ => String::new(),
@@ -1332,7 +1399,9 @@ impl World {
                     } else {
                         1.0
                     };
-                    self.produce(job, here, minutes as f32, bonus);
+                    if let Some((item, made)) = self.produce(job, here, minutes as f32, bonus) {
+                        self.keep_own_share(i, here, item, made);
+                    }
                     if job.uses_tool() {
                         let wear = minutes as f32 * self.params.tool_wear_per_work_minute;
                         self.wear_item(i, ItemKind::Attrezzo, wear);
@@ -1365,6 +1434,8 @@ impl World {
             Action::Eat(_) | Action::Sleep(_) | Action::Buy(_) | Action::Idle | Action::Wait => {}
         }
         self.npcs[i].action = Action::Idle;
+        // Stalls and home (see `stalls.rs`).
+        self.after_action(i);
     }
 
     /// Lowers the durability of NPC `i`'s `item`; removes it (with an event)
@@ -1388,6 +1459,8 @@ impl World {
                     item,
                 },
             });
+            // A spare one carried along goes on at once.
+            self.equip_spares(i);
         }
     }
 
@@ -1429,7 +1502,7 @@ impl World {
                 self.serve_tea(i);
             }
             Action::Wait => self.joined_queue(here),
-            Action::Buy(item) => self.buy(i, item),
+            Action::Buy(item) => self.npc_buy(i, item),
             _ => {}
         }
         let npc = &mut self.npcs[i];
@@ -1438,9 +1511,9 @@ impl World {
         npc.action_until = now + minutes;
     }
 
-    /// NPC `i` pays for one `item` at its (Mercato) carriage and owns a new one.
-    /// The tokens go to the treasury.
-    fn buy(&mut self, i: usize, item: ItemKind) {
+    /// NPC `i` pays for one `item` from the shelf of its (Mercato) carriage
+    /// and owns a new one. The tokens go to the treasury.
+    fn buy_from_shelf(&mut self, i: usize, item: ItemKind) {
         let here = self.npcs[i].carriage;
         let price = self.price(here, item).unwrap_or(0);
         self.carriages[here.index()].stock.take(item, 1.0);
@@ -1448,8 +1521,14 @@ impl World {
         // Validated before: the NPC can pay.
         let price = price.min(npc.inventory.tokens);
         npc.inventory.tokens -= price;
-        if let Some(slot) = npc.inventory.slot_mut(item) {
-            *slot = Some(1.0);
+        match npc.inventory.slot_mut(item) {
+            Some(slot) if slot.is_none() => *slot = Some(1.0),
+            // Something else the shelf may deal in one day: carried along.
+            _ => {
+                if npc.inventory.items.add(item, 1) == 1 {
+                    self.market.trade.into_pool += 1;
+                }
+            }
         }
         self.economy.treasury += u64::from(price);
         self.economy.counters.purchases += u64::from(price);
@@ -1716,8 +1795,8 @@ fn price_at(
 }
 
 /// Whether `npc` can buy `item` at `c` at time `now` (pay level `level`): a
-/// Mercato with a whole unit in stock, the NPC wants it and can pay (the
-/// Mercati close at night).
+/// Mercato with a whole unit on its shelf or stalls, the NPC wants it and can
+/// pay the cheapest offer (the Mercati close at night).
 fn can_buy_at(
     p: &SimParams,
     level: f32,
@@ -1728,9 +1807,9 @@ fn can_buy_at(
     item: ItemKind,
 ) -> bool {
     !p.is_night(now.hour())
-        && npc.wants(item)
-        && c.stock.count(item) >= 1
-        && price_at(p, level, market, c, item).is_some_and(|price| price <= npc.inventory.tokens)
+        && stalls::wants_item(p, level, market, npc, item)
+        && stalls::best_offer(p, level, market, c, item, npc.id)
+            .is_some_and(|(price, _)| price <= npc.inventory.tokens)
 }
 
 /// " (al piano di sopra)" for an upper floor, nothing for the ground floor.

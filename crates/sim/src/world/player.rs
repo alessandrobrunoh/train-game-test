@@ -188,8 +188,11 @@ impl World {
     /// accepts it ([`Npc::accepts_gift`], and it does not distrust the
     /// player). Food feeds (a Razione like a meal, raw Verdura half as
     /// much); a pot of Tè gives twice what a cup at a meal does; an Attrezzo
-    /// or Vestito arrives new. The NPC likes the player more. On error
-    /// nothing changes and the player keeps the item.
+    /// or Vestito arrives new. Other goods worth at least
+    /// [`crate::SimParams::gift_keep_min_value`] (materials, comfort goods)
+    /// are kept in its [`crate::Inventory::items`], if there is room, to sell
+    /// or bring home. The NPC likes the player more. On error nothing
+    /// changes and the player keeps the item.
     pub fn player_give(&mut self, npc: NpcId, item: ItemKind) -> Result<(), GiveError> {
         let i = self.npc_index(npc).ok_or(GiveError::NoSuchNpc)?;
         if !self.player.inventory.has(item, 1) {
@@ -198,10 +201,16 @@ impl World {
         if self.npcs[i].regard() == Regard::Wary {
             return Err(GiveError::Distrust);
         }
-        if !self.npcs[i].accepts_gift(item) {
+        let keep = !self.npcs[i].accepts_gift(item) && self.keeps_gift(i, item);
+        if !self.npcs[i].accepts_gift(item) && !keep {
             return Err(GiveError::NotWanted);
         }
-        self.gift_effect(i, item);
+        if keep {
+            // Something it does not use: kept, to sell (see `stalls.rs`).
+            self.keep_gift(i, item);
+        } else {
+            self.gift_effect(i, item);
+        }
         let name = self.npcs[i].name.clone();
         self.player.inventory.remove(item, 1);
         let gain = if item.def().usage.is_owned() {

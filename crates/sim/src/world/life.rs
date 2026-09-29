@@ -263,6 +263,8 @@ impl World {
         for other in &mut self.npcs {
             other.relations.retain(|r| r.other != npc.id);
         }
+        // Belongings: home's storage, listings to the Mercato (`stalls.rs`).
+        self.estate_goods(&npc);
         self.forget_deliberations_of(npc.id);
         self.drop_conversation_of(npc.id);
     }
@@ -583,11 +585,7 @@ impl World {
             job: None,
             workplace: None,
             needs: Needs::default(),
-            inventory: Inventory {
-                tokens: 0,
-                tool: None,
-                clothes: Some(1.0),
-            },
+            inventory: Inventory::new(0, None, Some(1.0)),
             action: Action::Idle,
             action_since: now,
             action_until: now,

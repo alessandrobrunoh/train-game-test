@@ -145,8 +145,16 @@ impl World {
 
     /// Effect of `minutes` of work by a `job` in carriage `here`; `bonus`
     /// multiplies the output (tool). Booked in [`super::EconomyCounters`],
-    /// with the share of the work that produced nothing.
-    pub(super) fn produce(&mut self, job: Job, here: CarriageId, minutes: f32, bonus: f32) {
+    /// with the share of the work that produced nothing. Returns what was
+    /// made and how much, if anything (moving goods makes nothing).
+    pub(super) fn produce(
+        &mut self,
+        job: Job,
+        here: CarriageId,
+        minutes: f32,
+        bonus: f32,
+    ) -> Option<(ItemKind, f32)> {
+        let mut output = None;
         let wasted = match &job.def().work {
             Work::Trade { from, rate } => {
                 let potential = minutes * rate(&self.params);
@@ -180,6 +188,9 @@ impl World {
                 match booked {
                     Some((item, made, potential)) => {
                         self.economy.counters.book_made(item, made, potential);
+                        if made > 0.0 {
+                            output = Some((item, made));
+                        }
                         1.0 - share(made, potential)
                     }
                     None => 1.0,
@@ -187,6 +198,7 @@ impl World {
             }
         };
         self.book_work(job, minutes, wasted);
+        output
     }
 
     /// The recipes of `work` in the order a worker in `here` tries them.

@@ -37,6 +37,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+use super::stalls::{Listing, StallRecord, TradeCounters};
 use super::{World, price_at};
 use crate::carriage::{Carriage, CarriageKind};
 use crate::event::EventKind;
@@ -69,6 +70,24 @@ pub struct Market {
     producers: Vec<u16>,
     /// Daily price samples, oldest first.
     history: VecDeque<PriceSample>,
+    /// Open stall listings, oldest first (see `stalls.rs`).
+    pub(super) listings: Vec<Listing>,
+    /// Id of the next listing.
+    pub(super) next_listing: u32,
+    /// The chronicle of the stalls, oldest first.
+    pub(super) stall_log: VecDeque<StallRecord>,
+    /// Records dropped from the front of `stall_log` so far.
+    pub(super) stall_log_dropped: u64,
+    /// Stall and belongings counters.
+    pub(super) trade: TradeCounters,
+    /// (Dormitorio, comfort good) pairs short of the target, refreshed hourly.
+    pub(super) short_goods: Vec<(CarriageId, ItemKind)>,
+    /// Units on the stalls per carriage and item (`carriage *
+    /// ItemKind::COUNT + item`), rebuilt whenever a listing changes (see
+    /// `Market::recount_stalls`); empty after loading until then, when the
+    /// listings are scanned instead.
+    #[serde(skip)]
+    pub(super) stall_count: Vec<u32>,
 }
 
 impl Market {
@@ -76,11 +95,40 @@ impl Market {
     pub(super) fn new(carriages: &[Carriage], specialties: Vec<Vec<ItemKind>>) -> Market {
         let mut market = Market {
             specialties,
-            producers: Vec::new(),
-            history: VecDeque::new(),
+            ..Market::default()
         };
         market.locate_producers(carriages);
         market
+    }
+
+    /// Rebuilds [`Market::stall_count`] for a train of `carriages`.
+    pub(super) fn recount_stalls(&mut self, carriages: usize) {
+        self.stall_count.clear();
+        self.stall_count.resize(carriages * ItemKind::COUNT, 0);
+        for l in &self.listings {
+            if let Some(n) = self
+                .stall_count
+                .get_mut(l.market.index() * ItemKind::COUNT + l.item.index())
+            {
+                *n += l.qty;
+            }
+        }
+    }
+
+    /// Units of `item` on the stalls of the Mercato `at`.
+    pub(super) fn stall_units(&self, at: CarriageId, item: ItemKind) -> u32 {
+        match self
+            .stall_count
+            .get(at.index() * ItemKind::COUNT + item.index())
+        {
+            Some(&n) => n,
+            None => self
+                .listings
+                .iter()
+                .filter(|l| l.market == at && l.item == item)
+                .map(|l| l.qty)
+                .sum(),
+        }
     }
 
     pub(super) fn specialties_of(&self, carriage: CarriageId) -> &[ItemKind] {
@@ -335,8 +383,10 @@ impl World {
 
     /// The Mercato nearest to `from` (towards the head on a tie).
     pub fn nearest_market(&self, from: CarriageId) -> Option<CarriageId> {
-        self.markets()
-            .into_iter()
+        self.carriages
+            .iter()
+            .filter(|c| c.kind == CarriageKind::Mercato)
+            .map(|c| c.id)
             .min_by_key(|m| (m.distance(from), m.0))
     }
 

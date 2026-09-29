@@ -112,7 +112,8 @@ pub use event::{BirthDenial, DeathCause, Event, EventKind};
 pub use ids::{CarriageId, NpcId, StationId};
 pub use item::{ItemKind, Stock};
 pub use npc::{
-    Inventory, Job, LifeStage, MAX_RELATIONS, Needs, Npc, Relation, RelationKind, Sex, Traits,
+    Inventory, Job, LifeStage, MAX_RELATIONS, NPC_ITEM_SLOTS, Needs, Npc, Relation, RelationKind,
+    Sex, Traits,
 };
 pub use params::SimParams;
 pub use personality::{Personality, Temper};
@@ -125,6 +126,10 @@ pub use stats::Stats;
 pub use time::{GameTime, MINUTES_PER_DAY, MINUTES_PER_HOUR};
 pub use world::{
     BuyError, Comfort, CraftError, Economy, EconomyCounters, GiveError, LifeCounters, Tally, World,
+};
+pub use world::{
+    Buyer, Listing, ListingId, MarketOffer, Offer, OfferSource, STALL_LOG_KEPT, Seller, StallError,
+    StallEvent, StallRecord, StallSale, TradeCounters,
 };
 pub use world::{
     GIFT_AFFINITY, GREET_AFFINITY, GREET_COOLDOWN_MINUTES, GREET_MINUTES, PRICE_PER_AFFINITY,

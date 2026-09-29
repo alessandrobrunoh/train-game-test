@@ -10,7 +10,7 @@ use std::time::Instant;
 use sim::{
     Action, ActionKind, CarriageKind, Choice, Comfort, ConversationCounters, DeathCause,
     DeliberationCounters, DeliberationKind, EventKind, ItemKind, LifeStage, MINUTES_PER_DAY, Needs,
-    Stats, Tally, Tone, Topic, UtilityBrain, World,
+    Seller, StallEvent, Stats, Tally, Tone, Topic, TradeCounters, UtilityBrain, World,
 };
 
 fn main() {
@@ -364,6 +364,7 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
         let econ_before = world.economy.counters.clone();
         let delib_before = world.deliberation_counters.clone();
         let talk_before = world.conversation_counters.clone();
+        let trade_before = world.trade_counters().clone();
         for _ in 0..world.params.days_per_year {
             run_day(world, brain);
             let pop = world.npcs.len();
@@ -411,6 +412,7 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
             100.0 * lost / grown.max(1.0),
             c.austerity_days - econ_before.austerity_days,
         );
+        print_stalls(world, &trade_before, u64::from(world.params.days_per_year));
         print_deliberations(&delib_before, &world.deliberation_counters);
         print_conversations(
             &talk_before,
@@ -443,6 +445,30 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
         d.cancelled,
     );
     print_deliberations(&DeliberationCounters::default(), d);
+    let t = world.trade_counters();
+    println!(
+        "Banchi: {} vendite ({} tra NPC), {} pezzi per {} gettoni; {} annunci; tenuti dal lavoro {}, regali tenuti {}, mangiati {}, indossati {}, portati a casa {}, eredità in magazzino {}, lasciati al Mercato {}. Ultimi scambi:",
+        t.trades,
+        t.npc_trades,
+        t.sold_units,
+        t.sold_tokens,
+        t.listings,
+        t.own_share_units,
+        t.gifts_kept,
+        t.eaten_units,
+        t.equipped_units,
+        t.furnished_units,
+        t.estate_units,
+        t.to_mercato_units,
+    );
+    let sales: Vec<_> = world
+        .stall_log()
+        .iter()
+        .filter(|r| matches!(r.event, StallEvent::SoldAtStall { .. }))
+        .collect();
+    for r in &sales[sales.len().saturating_sub(6)..] {
+        println!("  {r}");
+    }
     println!(
         "Ultimi eventi della vita ({} eventi in totale):",
         world.events_total()
@@ -492,6 +518,51 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
         years * u64::from(world.params.days_per_year),
     );
     print_samples(world);
+}
+
+/// One line about the stalls: trades per day since `before`, NPCs carrying
+/// items, open listings and their asking prices over the quotes.
+fn print_stalls(world: &World, before: &TradeCounters, days: u64) {
+    let t = world.trade_counters();
+    let days = days.max(1) as f64;
+    let carrying = world
+        .npcs
+        .iter()
+        .filter(|n| !n.inventory.items.is_empty())
+        .count();
+    let (mut open, mut ratio, mut priced, mut mercato) = (0usize, 0.0f64, 0usize, 0u32);
+    for l in world.listings() {
+        if l.seller == Seller::Mercato {
+            mercato += l.qty;
+            continue;
+        }
+        open += 1;
+        if let Some(q) = world.quote(l.market, l.item) {
+            ratio += f64::from(l.price_each) / f64::from(q.max(1));
+            priced += 1;
+        }
+    }
+    let sold = t.sold_units - before.sold_units;
+    let tokens = t.sold_tokens - before.sold_tokens;
+    println!(
+        "      banchi: {:4.1} vendite/g ({:4.1} tra NPC) {:4.1} pezzi/g a {:4.1} gettoni l'uno | annunci {:4.1}/g, scaduti {:4.1} pezzi/g | aperti {:3} (prezzo/quota {:.2}, del Mercato {} pezzi) | NPC con oggetti {:3.0}% | tenuti dal lavoro {:4.1}/g mangiati {:3.1}/g",
+        (t.trades - before.trades) as f64 / days,
+        (t.npc_trades - before.npc_trades) as f64 / days,
+        sold as f64 / days,
+        tokens as f64 / sold.max(1) as f64,
+        (t.listings - before.listings) as f64 / days,
+        (t.expired_units - before.expired_units) as f64 / days,
+        open,
+        if priced > 0 {
+            ratio / priced as f64
+        } else {
+            0.0
+        },
+        mercato,
+        100.0 * carrying as f64 / world.npcs.len().max(1) as f64,
+        (t.own_share_units - before.own_share_units) as f64 / days,
+        (t.eaten_units - before.eaten_units) as f64 / days,
+    );
 }
 
 /// One line of deliberation counts between two snapshots of the counters.

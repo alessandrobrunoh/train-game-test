@@ -158,9 +158,10 @@ impl World {
     /// What in the player's inventory NPC `npc` would accept as a gift, in
     /// slot order (empty if it distrusts the player).
     pub fn chat_gift_options(&self, npc: NpcId) -> Vec<ItemKind> {
-        let Some(n) = self.npc(npc) else {
+        let Some(i) = self.npc_index(npc) else {
             return Vec::new();
         };
+        let n = &self.npcs[i];
         if Band::of(n.player.as_ref()) == Band::Low {
             return Vec::new();
         }
@@ -169,7 +170,7 @@ impl World {
             .items()
             .into_iter()
             .map(|(item, _)| item)
-            .filter(|&item| n.accepts_gift(item))
+            .filter(|&item| n.accepts_gift(item) || self.keeps_gift(i, item))
             .collect()
     }
 

@@ -11,7 +11,7 @@ use crate::defs::ItemUse;
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
 use crate::personality::Personality;
-use crate::player::{PlayerTie, Regard};
+use crate::player::{PlayerTie, Regard, SlotInventory};
 use crate::time::{GameTime, MINUTES_PER_DAY};
 
 /// Needs in `0..=1`, where 1 means fully satisfied.
@@ -135,10 +135,10 @@ impl fmt::Display for Job {
     }
 }
 
-/// What an NPC owns. Meals are free (eaten at a Mensa), so bulk items never
-/// sit in personal inventories: only tokens and at most one Attrezzo and one
-/// Vestito, each with a durability in `(0, 1]` (removed when it reaches 0).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// What an NPC owns: tokens, the Attrezzo and Vestito it uses (each with a
+/// durability in `(0, 1]`, removed when it reaches 0) and a few slots of
+/// things it carries ([`Inventory::items`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Inventory {
     /// Wage tokens earned by working, spent at the Mercati.
     pub tokens: u32,
@@ -146,9 +146,45 @@ pub struct Inventory {
     pub tool: Option<f32>,
     /// Durability of the owned Vestito, if any.
     pub clothes: Option<f32>,
+    /// What the NPC carries, [`NPC_ITEM_SLOTS`] slots of any item from the
+    /// catalog (new, whole units): a share of its own work, gifts from the
+    /// player, purchases at the stalls. It eats its own food when hungry,
+    /// brings comfort goods home and sells the rest at the Mercati's stalls
+    /// (see `world/stalls.rs`). The equipped [`Inventory::tool`] and
+    /// [`Inventory::clothes`] are not in here.
+    #[serde(default = "npc_items")]
+    pub items: SlotInventory,
+}
+
+/// Slots of an NPC's [`Inventory::items`].
+pub const NPC_ITEM_SLOTS: usize = 6;
+
+fn npc_items() -> SlotInventory {
+    SlotInventory::new(NPC_ITEM_SLOTS)
+}
+
+impl Default for Inventory {
+    fn default() -> Self {
+        Self {
+            tokens: 0,
+            tool: None,
+            clothes: None,
+            items: npc_items(),
+        }
+    }
 }
 
 impl Inventory {
+    /// Tokens, tool and clothes with empty [`Inventory::items`].
+    pub fn new(tokens: u32, tool: Option<f32>, clothes: Option<f32>) -> Inventory {
+        Inventory {
+            tokens,
+            tool,
+            clothes,
+            items: npc_items(),
+        }
+    }
+
     /// Durability of the owned unit of `item` (only Attrezzo and Vestito can be owned).
     pub fn durability(&self, item: ItemKind) -> Option<f32> {
         match item.def().usage {

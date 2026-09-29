@@ -210,6 +210,41 @@ pub struct SimParams {
     /// Daily Mercato price samples kept ([`crate::World::price_history`]).
     pub price_history_days: usize,
 
+    // --- Stalls and NPC belongings (see `world/stalls.rs`) ---
+    /// Share of a worker's output it keeps for itself (whole units, drawn
+    /// so that this share is kept on average), into its
+    /// [`crate::Inventory::items`]...
+    pub own_share: f32,
+    /// ...as long as it holds fewer than this many units of that item.
+    pub own_share_max_units: u32,
+    /// Unsold stall listings go back to their seller after this many days.
+    pub listing_days: u64,
+    /// Most open listings per seller (NPC or player).
+    pub max_listings_per_seller: usize,
+    /// NPC asking prices: the quote times `1 + stall_greed × (1 − 2 × honesty)`
+    /// (±this share for the least / most honest)...
+    pub stall_greed: f32,
+    /// ...and this much less for the kind ([`crate::Temper::Gentile`]).
+    pub stall_kind_discount: f32,
+    /// NPCs go to a Mercato to sell what they don't need when they hold
+    /// fewer tokens than this (times the pay level)...
+    pub sell_below_tokens: u32,
+    /// ...or when what they could sell is worth at least this much (at the
+    /// quotes, times the pay level). Otherwise they only list it when they
+    /// happen to be at a Mercato.
+    pub sell_surplus_value: u32,
+    /// NPCs hungrier than this (hunger below it) eat their own food...
+    pub eat_own_food_hunger: f32,
+    /// ...and, at a Mercato, buy food at the stalls if they have tokens
+    /// (the Mense stay the main way to eat).
+    pub stall_food_hunger: f32,
+    /// Adults with at least this many tokens (times the pay level) buy a
+    /// comfort good their Dormitorio lacks and bring it home.
+    pub comfort_buy_min_tokens: u32,
+    /// Non-food gifts from the player that the NPC does not use (materials,
+    /// comfort goods) are kept to sell if their base value is at least this.
+    pub gift_keep_min_value: u32,
+
     // --- Specialties (see `World::specialties`) ---
     /// Generation: chance that a carriage whose kind has several recipes
     /// specializes in two of them instead of one.
@@ -454,6 +489,19 @@ impl Default for SimParams {
             transport_per_carriage: 1.0,
             player_sell_share: 0.6,
             price_history_days: 60,
+
+            own_share: 0.03,
+            own_share_max_units: 3,
+            listing_days: 3,
+            max_listings_per_seller: 4,
+            stall_greed: 0.2,
+            stall_kind_discount: 0.1,
+            sell_below_tokens: 40,
+            sell_surplus_value: 20,
+            eat_own_food_hunger: 0.25,
+            stall_food_hunger: 0.35,
+            comfort_buy_min_tokens: 90,
+            gift_keep_min_value: 3,
 
             second_specialty_chance: 0.35,
             specialty_output_bonus: 1.25,
