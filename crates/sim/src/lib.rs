@@ -46,7 +46,7 @@ pub mod time;
 pub mod world;
 
 pub use action::{Action, ActionKind, ActionOption, DecisionRequest};
-pub use brain::{Brain, RandomBrain, UtilityBrain, UtilityWeights};
+pub use brain::{Brain, RandomBrain, THINK, UtilityBrain, UtilityWeights};
 pub use carriage::{Carriage, CarriageKind, Station, StationKind};
 pub use event::{BirthDenial, DeathCause, Event, EventKind};
 pub use ids::{CarriageId, NpcId, StationId};

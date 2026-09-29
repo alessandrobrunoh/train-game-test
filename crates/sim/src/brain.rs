@@ -15,10 +15,21 @@ use crate::item::ItemKind;
 use crate::npc::Npc;
 use crate::world::World;
 
+/// Special choice for [`Brain::decide`]: "still thinking". The NPC idles for
+/// [`Brain::think_minutes`] and then asks again. Meant for brains whose answer
+/// arrives later (e.g. a model running on another thread).
+pub const THINK: usize = usize::MAX - 1;
+
 pub trait Brain {
     /// Returns the chosen option index for each request, in the same order.
-    /// Out-of-range indices (or a short vector) make the NPC idle briefly.
+    /// Out-of-range indices (or a short vector) make the NPC idle briefly;
+    /// [`THINK`] makes it idle for [`Brain::think_minutes`].
     fn decide(&mut self, world: &World, requests: &[DecisionRequest]) -> Vec<usize>;
+
+    /// How long (game minutes) an NPC waits when [`Brain::decide`] answers [`THINK`].
+    fn think_minutes(&self) -> u64 {
+        5
+    }
 
     /// Whether [`ActionOption::description`] must be filled in. Formatting the
     /// descriptions is the most expensive part of a tick, so brains that only
@@ -106,6 +117,19 @@ impl UtilityBrain {
         Self {
             weights: UtilityWeights::default(),
             rng: ChaCha8Rng::seed_from_u64(seed),
+        }
+    }
+
+    /// Deterministic scores (without noise) of all options of a request, in
+    /// order; empty if the NPC doesn't exist.
+    pub fn scores(&self, world: &World, request: &DecisionRequest) -> Vec<f32> {
+        match world.npc(request.npc) {
+            Some(npc) => request
+                .options
+                .iter()
+                .map(|o| self.score(world, npc, o))
+                .collect(),
+            None => Vec::new(),
         }
     }
 

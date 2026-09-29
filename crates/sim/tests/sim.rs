@@ -231,6 +231,62 @@ fn invalid_choices_fall_back_to_idle() {
     assert!(w.npcs.iter().all(|n| n.action == Action::Idle));
 }
 
+/// Always "still thinking", with a custom wait.
+struct Thinker;
+
+impl Brain for Thinker {
+    fn decide(&mut self, _: &World, requests: &[DecisionRequest]) -> Vec<usize> {
+        vec![sim::THINK; requests.len()]
+    }
+
+    fn think_minutes(&self) -> u64 {
+        7
+    }
+}
+
+#[test]
+fn thinking_npcs_idle_for_the_think_minutes_and_ask_again() {
+    let (mut w, _) = world();
+    let start = w.clock;
+    let thinking: Vec<NpcId> = w
+        .npcs
+        .iter()
+        .filter(|n| n.action_until <= start)
+        .map(|n| n.id)
+        .collect();
+    w.tick(&mut Thinker);
+    assert!(!thinking.is_empty());
+    for &id in &thinking {
+        let npc = w.npc(id).unwrap();
+        assert_eq!(npc.action, Action::Idle);
+        assert_eq!(npc.action_until, start + 7);
+    }
+    // They decide (and think) again after exactly 7 minutes.
+    w.run(&mut Thinker, 8);
+    for &id in &thinking {
+        assert_eq!(w.npc(id).unwrap().action_since, start + 7);
+    }
+}
+
+#[test]
+fn utility_scores_match_score_per_option() {
+    let (mut w, brain) = world();
+    let id = w.npcs[0].id;
+    let options = w.options(id);
+    let request = DecisionRequest {
+        npc: id,
+        options: options.clone(),
+    };
+    let npc = w.npc(id).unwrap();
+    let expected: Vec<f32> = options.iter().map(|o| brain.score(&w, npc, o)).collect();
+    assert_eq!(brain.scores(&w, &request), expected);
+    let missing = DecisionRequest {
+        npc: NpcId(u32::MAX),
+        options,
+    };
+    assert!(brain.scores(&w, &missing).is_empty());
+}
+
 /// Checks the batching contract: one call per tick, each NPC at most once.
 struct BatchCheck {
     inner: UtilityBrain,

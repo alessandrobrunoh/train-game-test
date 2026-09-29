@@ -8,7 +8,7 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
-use crate::brain::Brain;
+use crate::brain::{Brain, THINK};
 use crate::carriage::{Carriage, CarriageKind, StationKind};
 use crate::event::{DeathCause, Event, EventKind};
 use crate::ids::{CarriageId, NpcId, StationId};
@@ -767,7 +767,8 @@ impl World {
 
     /// Advances the simulation by one minute:
     /// 1. finishes actions that end now (effects on completion);
-    /// 2. collects one [`DecisionRequest`] per idle NPC and asks the brain once;
+    /// 2. collects one [`DecisionRequest`] per idle NPC and asks the brain once
+    ///    (a [`THINK`] answer makes the NPC idle for [`Brain::think_minutes`]);
     /// 3. starts the chosen actions (re-validated: if a station filled up or an
     ///    item sold out in the meantime the NPC idles briefly and decides again);
     /// 4. updates needs, starvation and deaths;
@@ -802,8 +803,18 @@ impl World {
                 }
             }
             let choices = brain.decide(self, &requests);
+            let think = ActionOption {
+                action: Action::Idle,
+                minutes: brain.think_minutes().max(1),
+                goal: None,
+                description: String::new(),
+            };
             for (k, (&i, req)) in deciding.iter().zip(requests).enumerate() {
-                let option = choices.get(k).and_then(|&c| req.options.get(c));
+                let option = match choices.get(k) {
+                    Some(&THINK) => Some(&think),
+                    Some(&c) => req.options.get(c),
+                    None => None,
+                };
                 self.start_action(i, option);
             }
             self.presence = presence;
