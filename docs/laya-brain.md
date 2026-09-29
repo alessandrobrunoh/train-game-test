@@ -225,7 +225,7 @@ Il trait attuale restituisce `Vec<usize>` in modo sincrono, mentre Laya risponde
   - **[I]** È una crescita esplosiva con un'API molto instabile: ci sono stati cambi di default anche nelle ultime release.
 - **Qualità zero-shot:**
   - Sulla suite typed-decisions i checkpoint base stanno **sotto la baseline "classe di maggioranza"**: 0.362 e 0.352 contro 0.461. Il 0.766 pubblicizzato è del checkpoint fine-tuned.
-  - Per il nostro dominio servirà quasi certamente un **fine-tuning**: il notebook Kaggle su 2×T4 impiega circa 4–5 h per 30k domande.
+  - Per il nostro dominio servirà quasi certamente un **fine-tuning**: il notebook Kaggle su 2×T4 impiega circa 4–5 h per 30k domande. La pipeline è nel §10.
   - **[I]** In alternativa si può addestrare solo una testa leggera su encoder congelato, come fa [stuntd](https://github.com/bladedevoff/stuntd), usando come etichette le decisioni di UtilityBrain o di un LLM "insegnante".
 - **Calibrazione:** le affermazioni di calibrazione valgono *dopo* il fit delle temperature sul proprio dominio. Il multilingual non è calibrato. Nella config inglese c'è una temperatura `choice:11+` = 0.10, che quindi rende le probabilità più estreme invece di ammorbidirle; va tenuto presente se si usano molte opzioni.
 - **Bias noti:** etichette `noul`, bias di posizione su `score`, negazioni, collasso del checkpoint inglese fuori dall'inglese con alta confidenza (Khmer: 0.000 di accuratezza con 0.952 di confidenza).
@@ -329,7 +329,7 @@ Cosa misura:
 - (b) accordo con `UtilityBrain` su 300 decisioni vere di una partita;
 - confidenza media e istogramma, decisioni al secondo.
 
-I modelli vedono solo le top-5 opzioni per utilità. Il contesto è solo italiano: `npc_context` non ha una variante inglese, quindi il confronto con il checkpoint inglese resta da fare.
+I modelli vedono solo le top-5 opzioni per utilità. `--model-dir DIR` (o `LAYA_MODEL_DIR`) valuta una checkpoint locale, per esempio una messa a punto (§10). Il contesto è solo italiano: `npc_context` non ha una variante inglese, quindi il confronto con il checkpoint inglese resta da fare.
 
 Risultati del 2026-09-29: seme 1, top-5, contesto italiano. Laya è `laya-multilingual` zero-shot, in release su CPU (feature `laya`, F32, senza Accelerate/Metal).
 
@@ -448,3 +448,84 @@ Cosa si vede:
   - le ultime 20 decisioni: nome cliccabile, tipo, scelta, chi ha deciso e confidenza.
 - **Notifiche** per proposte accettate (una sola, non anche "si sono messi insieme"), ladri sorpresi, proteste convocate e concessioni dell'amministrazione. Seguono i filtri del registro.
 - **Storia**: nelle biografie le deliberazioni si leggono dal punto di vista della persona ("Proposta di coppia: accetta… (con Laya, 72%)", "Marta risponde alla sua proposta: …"). Le domande ("ci pensa") si nascondono con "solo i fatti della vita".
+
+## 10. Fine-tuning (M9)
+
+Lo zero-shot non basta (§9): ~40% sui casi ovvi, sia per le azioni sia per le deliberazioni. La pipeline qui sotto rende il fine-tuning ripetibile su una GPU gratuita e ne rimette il risultato nel gioco. Istruzioni passo passo, per Kaggle e Colab, in [`tools/laya-finetune/README.md`](../tools/laya-finetune/README.md).
+
+```
+export_dataset (Mac, ~20 s)  →  train/val/test.jsonl  →  finetune.py (Kaggle/Colab T4)  →  laya-traingame-ft/  →  LAYA_MODEL_DIR / laya_eval --model-dir
+```
+
+### Riferimenti upstream [V]
+- Laya, commit `9d955671415fc19f069b9cc998928075c1f255ec` (v0.3.21, lo stesso del port Rust). Il fine-tuning ufficiale è **solo un notebook**: [`notebooks/laya_finetune_typed_decisions_2xT4_kaggle.ipynb`](https://github.com/NandhaKishorM/laya/blob/9d955671415fc19f069b9cc998928075c1f255ec/notebooks/laya_finetune_typed_decisions_2xT4_kaggle.ipynb), descritto in [`docs/finetune.md`](https://github.com/NandhaKishorM/laya/blob/9d955671415fc19f069b9cc998928075c1f255ec/docs/finetune.md). Non c'è un comando `laya train` né un modulo di training nel pacchetto.
+- **Formato dei dati:** i casi di `LocalLLaMA/typed-decisions` hanno `state`, `questions` (`{id: {type, instructions, criteria}}`) e `gold` (`{id: {label, probabilities}}`), e la distribuzione dell'insegnante è il bersaglio. Il preprocessing chiama `laya.common.build_sequence` e produce item `{ids, markers, qtype, target, label}`.
+- **Ricetta RLCD** (`train_ddp.py` nel notebook):
+  - soft cross-entropy sulla distribuzione;
+  - policy gradient GRPO-style: 4 campioni di logit rumorosi, rumore 0.4 → 0.1, ricompensa `proper_reward` con sferica 0.75 e RPS 1.0;
+  - AdamW, learning rate 2.5e-5 per l'encoder e 1e-4 per la testa, cosine, fp16, clip 1.0, 4 epoche.
+- **Calibrazione:** una temperatura per tipo, fittata su una fetta tenuta **fuori** dal training (≤ 400 righe o il 10%, seme 20260922). Si scrive in `rl_agent_config.json`, **togliendo** i `temperature_by_options` ereditati.
+- **Salvataggio:** `model.safetensors` in F16, `encoder/`, `tokenizer/` e `rl_agent_config.json`: lo stesso layout del repository HF, quindi quello di `ModelSource::Dir`.
+- **Tempi upstream:** 2×T4, modello inglese large, circa 30k domande × 4 epoche, **4–5 h**. `laya-multilingual` stesso è stato allenato per 4.97 h su una GPU (`rl_agent_config.json`, sezione `training`). L'esempio "browser agent" di upstream allena il 322M su una GPU da 16 GB in circa 1 h ([`docs/finetune_browser_agent.md`](https://github.com/NandhaKishorM/laya/blob/9d955671415fc19f069b9cc998928075c1f255ec/docs/finetune_browser_agent.md)).
+- **Pesi di partenza:** `convaiinnovations/laya-multilingual` @ `e4e9ddf21a7b1903b7acffd8814ad4307bf63a67`, lo SHA "reviewed" di `laya/revisions.py` e lo stesso di `download.rs`.
+
+### Dataset (`src/dataset.rs`, `examples/export_dataset.rs`)
+```
+cargo run -p sim-laya --release --example export_dataset -- --out laya-dataset \
+    --seeds 10..49 --years 3 --max-rows 20000 --kinds actions,deliberations --labels greedy
+```
+- **Contenuto**, una riga per domanda `choice`, nel formato dei casi `typed-decisions`. Lo schema completo, con una riga d'esempio, è nel README del kit. I criteri sono una **lista** di descrizioni: è la forma senza lettere, come `OptionLabels::Plain` nel gioco. La riga porta anche `kind`, `source`, `case`, `seed`, `split` e `option_tags`.
+  - **Azioni:** un campione uniforme (reservoir) delle decisioni di `UtilityBrain` in partite da 300 NPC, con la stessa domanda di `LayaBrain` (top-5 per utilità). L'insegnante è `softmax(utilità / 0.05)`: con i default la sua confidenza media è 0.80.
+  - **Deliberazioni:** l'insegnante è la distribuzione della regola del `sim`. Frequenza ×3, proteste più probabili, dormitori "pieni" nei semi dispari.
+  - **Casi ovvi** di `eval.rs` e `eval/deliberations.rs`, con distribuzione uniforme sulle risposte giuste, ripetuti 2 volte nel train.
+- **Etichette:** `--labels greedy` usa l'opzione più probabile, `--labels sample` un'estrazione, come fa il `sim` con la regola. `gold.probabilities` resta sempre la distribuzione.
+- **Pulizia:**
+  - duplicati tolti;
+  - un'opzione con la stessa descrizione di una migliore si toglie dalla domanda. Il `sim` offre a volte due volte "va in Dormitorio … per fare due chiacchiere" (una per amico): 2606 opzioni tolte nell'esportazione di default;
+  - al più il 35% di una categoria di etichetta per seme, altrimenti "ozia" sarebbe metà delle azioni.
+- **Split per seme**, così nessun mondo sta in due split. I semi 1–3, usati da `laya_eval --seed 1`, sono esclusi di default.
+- **Ordine delle opzioni mescolato** riga per riga, con l'etichetta rimappata: le top-k arrivano ordinate per utilità, e Laya ha un bias di posizione. Con i default l'etichetta cade in posizione 0–4 nel 24/25/21/16/15% dei casi. Non è uniforme perché le righe con 2–4 opzioni non hanno le posizioni alte.
+- **Numeri con i default** (misurati il 2026-09-29): 40 semi × 36 giorni, 15.7 M decisioni e 2590 deliberazioni viste, **26 494 righe** in 17 s (41 MB).
+
+  | Split | Semi | Righe | Azioni (partita / ovvie) | Deliberazioni (partita / ovvie) |
+  |---|---|---|---|---|
+  | Train | 32 | 21 614 | 16 000 / 1 280 | 2 138 / 2 196 |
+  | Val | 4 | 2 453 | 2 000 / 80 | 239 / 134 |
+  | Test | 4 | 2 427 | 2 000 / 80 | 213 / 134 |
+
+  I token stimati sono circa 270 per riga, al massimo circa 370.
+- `tests/dataset.rs` rilegge ogni riga con `serde_json` e controlla:
+  - lo schema: chiavi, criteri unici, etichetta tra i criteri, probabilità che sommano a 1;
+  - gli id unici e ogni seme in un solo split;
+  - il mescolamento e il determinismo;
+  - che le etichette `sample` non siano sempre avide.
+
+### Training (`tools/laya-finetune/finetune.py`)
+- Riprende il ciclo RLCD del notebook su **una** GPU, con le funzioni della libreria `laya` fissata allo stesso commit: `build_model`, `build_sequence`, `proper_reward`.
+- `--mode full` (default) allena encoder e testa. `--mode head` congela l'encoder, come l'alternativa "testa leggera" del §6.
+- Tiene l'epoca migliore in validazione.
+- **Temperature:** una per `choice` e una per bucket (`choice:2`, `choice:3-5`) fittate sulla validazione, con la cross-entropy verso l'insegnante minimizzata su log T in [0.5, 5], cioè i limiti di Laya e di `clamp_temperature`. Scritte in `rl_agent_config.json` al posto di quelle ereditate.
+- **Valutazione sul test**, per la base zero-shot e per la checkpoint nuova:
+  - misure: accuratezza sull'etichetta, accuratezza morbida, ECE, NLL e Brier;
+  - gruppi: per tipo, per origine, per caso ovvio e per posizione dell'etichetta.
+- **Controlli sulla checkpoint:** il layout (gli stessi file di `CheckpointFiles::in_dir`, gli stessi tensori della base), la parità con `laya.load` e lo zip da scaricare.
+- Le parti senza torch sono coperte da `tools/laya-finetune/test_finetune_data.py`: lettura del dataset, fit delle temperature, ECE e controllo del layout, provato anche sulla checkpoint sintetica `testdata/tiny`.
+- **[I] Tempi** su una T4 per circa 26k righe × 3 epoche: circa 45–90 min in `full`, circa 20–40 min in `head`. Lo script stampa una stima dopo 20 lotti. Costo zero su Kaggle (circa 30 h GPU a settimana) o Colab gratuito.
+- **Non verificato qui:** `finetune.py` non è mai stato eseguito con torch né su GPU. È controllato solo con `py_compile`, i test stdlib e il confronto delle API con il commit upstream.
+
+### Rimetterla nel gioco
+```
+cargo run -p sim-laya --release --features metal,accelerate --example laya_eval -- --model-dir ~/laya-traingame-ft
+LAYA_MODEL_DIR=~/laya-traingame-ft cargo run -p game --release --features laya-metal
+```
+- `loader::load_real_model_from(dir)` carica una cartella locale. `load_real_model`, cioè il gioco, usa `LAYA_MODEL_DIR` se impostata. `laya_eval --model-dir` ha la precedenza sulla variabile.
+- Le temperature fittate si applicano da sole (`AgentConfig::temperature`: prima il bucket, poi il tipo).
+- Soglie e peso della regola del gioco (0.5/0.6, `GAME_PRIOR_WEIGHT` 0.5) erano scelti per lo zero-shot: vanno rivisti con la tabella delle soglie di `laya_eval`.
+
+### Cosa aspettarsi [I]
+- **Il guadagno è ignoto finché non si fa girare.** Upstream passa da 0.36 a 0.77 su typed-decisions, ma là le etichette vengono da un insegnante LLM. Qui l'insegnante è `UtilityBrain` o la regola: il meglio che Laya può fare è **imitarli**, cioè accordo alto su (b), più lentamente di loro. Per fare *meglio* delle regole servono etichette migliori nello stesso formato (a mano, o da un LLM), che l'esportatore può affiancare.
+- **I casi ovvi (a) di `laya_eval` usano gli stessi modelli di situazione dei casi ovvi del train**, anche se i mondi (semi) sono diversi. Un salto su (a) va letto come "ha imparato quei casi". Le misure più oneste sono l'accordo (b) e il test split di `finetune.py`.
+- **Da controllare dopo il training:**
+  - l'accuratezza piatta per posizione dell'etichetta;
+  - l'ECE bassa dopo la calibrazione;
+  - i tipi dove lo zero-shot crollava: mangia 0%, compra 0%, furto 3%, protesta 0%.

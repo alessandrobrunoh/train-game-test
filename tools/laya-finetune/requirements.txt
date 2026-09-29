@@ -1,0 +1,8 @@
+# Dipendenze di finetune.py (su Kaggle/Colab PyTorch con CUDA è già installato: non reinstallarlo).
+# Laya fissato al commit usato come riferimento dal port Rust (crates/sim-laya/src/laya/mod.rs);
+# è la versione 0.3.21. In alternativa, senza git: laya==0.3.21
+laya @ git+https://github.com/NandhaKishorM/laya@9d955671415fc19f069b9cc998928075c1f255ec
+transformers>=4.48.0
+safetensors>=0.4.0
+huggingface_hub>=0.20.0
+numpy>=1.20.0

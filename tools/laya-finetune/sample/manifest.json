@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "generator": "crates/sim-laya/examples/export_dataset.rs",
+  "question_id": "decision",
+  "question_type": "choice",
+  "kinds": [
+    "action",
+    "deliberation"
+  ],
+  "labels": "greedy",
+  "teacher_temperature": 0.05,
+  "top_k": 5,
+  "days_per_seed": 2,
+  "max_rows_per_kind": 90,
+  "obvious_per_kind": 1,
+  "obvious_delib_per_kind": 1,
+  "obvious_repeat_train": 2,
+  "deliberation_rate": 3,
+  "world": {
+    "carriages": 20,
+    "npcs": 300
+  },
+  "eval_seeds_excluded": true,
+  "duplicates_removed": 0,
+  "skipped": 8,
+  "max_label_share": 0.35,
+  "splits": {
+    "train": {
+      "file": "train.jsonl",
+      "rows": 9,
+      "seeds": [
+        10
+      ]
+    },
+    "val": {
+      "file": "val.jsonl",
+      "rows": 9,
+      "seeds": [
+        11
+      ]
+    },
+    "test": {
+      "file": "test.jsonl",
+      "rows": 8,
+      "seeds": [
+        12
+      ]
+    }
+  },
+  "note": "sottoinsieme di un'esportazione piccola (--seeds 10..12 --days 2), solo per i test e per provare finetune.py --check-data"
+}

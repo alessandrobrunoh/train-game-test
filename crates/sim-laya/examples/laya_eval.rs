@@ -8,7 +8,17 @@
 //!
 //! Opzioni: `--per-kind N` (scenari ovvi per tipo, 8), `--sampled N` (decisioni
 //! della partita, 300), `--top-k K` (5), `--batch B` (righe per lotto, 16),
-//! `--seed S` (1), `--no-laya` (salta il modello vero anche se compilato).
+//! `--seed S` (1), `--no-laya` (salta il modello vero anche se compilato),
+//! `--model-dir DIR` (una checkpoint locale, es. messa a punto con
+//! `tools/laya-finetune/`; senza, vale `LAYA_MODEL_DIR` e poi Hugging Face).
+//!
+//! ```text
+//! cargo run -p sim-laya --release --features metal,accelerate --example laya_eval -- \
+//!     --model-dir ~/laya-traingame-ft
+//! ```
+//!
+//! I semi 1–3 (scenari di `--seed 1`) sono esclusi di default da
+//! `export_dataset`, così una checkpoint messa a punto non ha visto questi mondi.
 //!
 //! Deliberazioni (scelte di vita rare, seconda parte): `--delib-per-kind N`
 //! (casi ovvi per tipo, 6), `--delib-sampled N` (deliberazioni della
@@ -18,6 +28,7 @@
 //! Il contesto è quello italiano di `World::npc_context`: una variante inglese
 //! non esiste nel `sim` (andrebbe scritta a parte), quindi non è valutata.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use sim_laya::eval::deliberations::{
@@ -38,6 +49,7 @@ struct Args {
     batch: usize,
     seed: u64,
     laya: bool,
+    model_dir: Option<PathBuf>,
     actions: bool,
     deliberations: bool,
     delib_per_kind: usize,
@@ -52,6 +64,7 @@ fn parse_args() -> Args {
         batch: 16,
         seed: 1,
         laya: true,
+        model_dir: sim_laya::loader::model_dir_from_env(),
         actions: true,
         deliberations: true,
         delib_per_kind: 6,
@@ -71,6 +84,11 @@ fn parse_args() -> Args {
             "--batch" => args.batch = (num("--batch") as usize).max(1),
             "--seed" => args.seed = num("--seed"),
             "--no-laya" => args.laya = false,
+            "--model-dir" => {
+                args.model_dir = Some(PathBuf::from(
+                    it.next().expect("--model-dir vuole una cartella"),
+                ))
+            }
             "--delib-per-kind" => args.delib_per_kind = num("--delib-per-kind") as usize,
             "--delib-sampled" => args.delib_sampled = num("--delib-sampled") as usize,
             "--only-deliberations" => args.actions = false,
@@ -103,10 +121,14 @@ fn load_laya(args: &Args) -> Option<Result<Box<dyn ChoiceModel>, String>> {
         return None;
     }
     let load = Instant::now();
-    let model = sim_laya::loader::load_real_model();
+    let model = sim_laya::loader::load_real_model_from(args.model_dir.as_deref());
     if let Ok(model) = &model {
+        let from = args
+            .model_dir
+            .as_ref()
+            .map_or("Hugging Face".to_string(), |d| d.display().to_string());
         println!(
-            "Caricato {} in {:.1} s\n",
+            "Caricato {} ({from}) in {:.1} s\n",
             model.name(),
             load.elapsed().as_secs_f32()
         );
