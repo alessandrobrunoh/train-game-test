@@ -2,9 +2,16 @@
 //!
 //! Una chiacchierata (`Action::Socialize`) coinvolge due NPC nello stesso
 //! posto: la sim apre una [`Conversation`] con un [`Topic`], ne scrive le
-//! battute in italiano (modelli con varianti deterministiche e un tono che
-//! dipende dal carattere) distribuite nel tempo della chiacchierata, e alla
-//! fine ne applica gli effetti (affinità, notizie, pettegolezzi).
+//! battute in italiano distribuite nel tempo della chiacchierata, e alla fine
+//! ne applica gli effetti (affinità, notizie, pettegolezzi).
+//!
+//! Le battute seguono un filo solo (vedi `text`): saluto, l'argomento
+//! (la notizia, il lavoro, la famiglia…), una risposta coerente con com'è
+//! la notizia (bella, brutta, scandalosa) e con il tono, un seguito sullo
+//! stesso argomento e i saluti; il carattere cambia le parole, non
+//! l'argomento. [`grammar`] mette preposizioni e articoli giusti davanti ai
+//! nomi delle carrozze ("all'Alveare", "nella Brace") e la d eufonica
+//! ("Bruno ed Elena").
 //!
 //! Il `game` legge [`World::conversations`](crate::World::conversations) per
 //! disegnare i fumetti: a ogni istante mostra la battuta con `at` più recente
@@ -18,6 +25,7 @@ use crate::ids::NpcId;
 use crate::item::ItemKind;
 use crate::time::GameTime;
 
+pub mod grammar;
 pub(crate) mod text;
 
 pub use text::{MAX_LINE_CHARS, template_count};

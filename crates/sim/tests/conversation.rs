@@ -515,3 +515,48 @@ fn stats_count_conversations() {
     assert!(s.count(ActionKind::Socialize) >= s.conversations_open);
     assert!(s.to_string().contains("conversazioni"));
 }
+
+/// Every line spoken over a day on long trains (numbered carriage names
+/// too): no grammar slips ("a Alveare", "Bruno e Elena", double spaces,
+/// lowercase starts), within the bubble.
+#[test]
+fn lines_are_grammatical_on_long_trains() {
+    use sim::dialogue::grammar;
+    for seed in [1, 7] {
+        let mut w = World::generate(seed, 22, 120);
+        let names: Vec<String> = w.carriages.iter().map(|c| c.name.clone()).collect();
+        let places: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert!(
+            places
+                .iter()
+                .any(|p| p.ends_with(|c: char| c.is_ascii_digit()))
+        );
+        for name in &places {
+            for with_prep in [
+                grammar::prep_a(name),
+                grammar::prep_in(name),
+                grammar::prep_di(name),
+            ] {
+                let line = format!("Ne parlano {with_prep}.");
+                assert!(grammar::slips(&line, &places).is_empty(), "{line}");
+            }
+            assert_ne!(grammar::prep_a(name), format!("a {name}"));
+        }
+        let mut brain = UtilityBrain::new(seed);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..DAY {
+            w.tick(&mut brain);
+            for c in w.conversations() {
+                if !seen.insert(c.id) {
+                    continue;
+                }
+                for l in &c.lines {
+                    let slips = grammar::slips(&l.text, &places);
+                    assert!(slips.is_empty(), "{:?}: {slips:?}", l.text);
+                    assert!(l.text.chars().count() <= sim::dialogue::MAX_LINE_CHARS);
+                }
+            }
+        }
+        assert!(seen.len() > 100, "{}", seen.len());
+    }
+}

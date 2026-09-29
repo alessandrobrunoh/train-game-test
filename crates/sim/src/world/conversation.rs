@@ -281,6 +281,7 @@ impl World {
             fond: plan.fond,
             need: plan.need,
             place,
+            hour: now.hour(),
         };
         let lines = text::write(&script, seed, now, until);
         let conversation = Conversation {
