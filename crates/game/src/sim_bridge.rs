@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use sim::{UtilityBrain, World};
 
+use crate::cabin::SLEEP_SPEED;
 use crate::state::{Sim, SimClock, SimPerf, new_brain};
 
 // --- Parametri della partita -----------------------------------------------
@@ -140,6 +141,20 @@ fn advance_sim(
     mut dropped: Local<f32>,
 ) {
     let dt = time.delta_secs();
+    // Il giocatore dorme: il tempo corre fino al mattino, anche in pausa.
+    if let Some(until) = sim.world.player.asleep_until {
+        let wanted = accumulate(&mut clock, dt, SLEEP_SPEED)
+            .min(until.since(sim.world.clock).max(1).min(u64::from(u32::MAX)) as u32);
+        let Sim { world, brain } = &mut *sim;
+        let start = Instant::now();
+        for _ in 0..wanted {
+            world.tick(brain);
+            if start.elapsed() >= TICK_BUDGET || !world.player.is_asleep() {
+                break;
+            }
+        }
+        return;
+    }
     if clock.paused {
         if perf.effective != 0.0 || perf.behind {
             *perf = SimPerf::default();

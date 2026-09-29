@@ -29,13 +29,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use sim::{GameTime, Stock, UtilityBrain, World};
+use sim::{GameTime, UtilityBrain, World};
 
 /// Versione del formato dei salvataggi. 6: catalogo degli oggetti e crafting
 /// (Fase 3: `Stock` con 13 oggetti) insieme a prezzi per distanza e
 /// specialità delle carrozze (Fase 6a/6b). 7: piani delle carrozze
-/// (`Npc::floor`, `Station::floor`, `SimParams::stairs_minutes`).
-pub const SAVE_VERSION: u32 = 7;
+/// (`Npc::floor`, `Station::floor`, `SimParams::stairs_minutes`). 8: il
+/// giocatore nella sim (`World::player`: nome, gettoni, inventario a slot,
+/// cabina e baule, ricette; `Npc::player`, `Station::owner`); il corpo non
+/// ha più l'inventario, solo la posizione fisica del giocatore.
+pub const SAVE_VERSION: u32 = 8;
 const MAGIC: [u8; 8] = *b"TRAINSAV";
 /// Byte fissi prima dell'intestazione: magic, versione, lunghezza.
 const PREFIX_LEN: usize = MAGIC.len() + 4 + 4;
@@ -140,13 +143,9 @@ impl SaveHeader {
 pub struct SaveBodyRef<'a> {
     pub world: &'a World,
     pub brain: &'a UtilityBrain,
-    /// Posizione del giocatore (centro del corpo).
+    /// Posizione fisica del giocatore (centro del corpo): il resto del
+    /// giocatore (nome, gettoni, inventario, cabina) è in `world.player`.
     pub player: [f32; 2],
-    /// Inventario del giocatore.
-    pub tokens: u32,
-    pub items: Stock,
-    /// Ricette imparate oltre a quelle di base (chiavi).
-    pub learnt_recipes: &'a [String],
     /// Velocità del tempo (minuti di gioco al secondo) e pausa.
     pub minutes_per_second: f32,
     pub paused: bool,
@@ -158,9 +157,6 @@ pub struct SaveBody {
     pub world: World,
     pub brain: UtilityBrain,
     pub player: [f32; 2],
-    pub tokens: u32,
-    pub items: Stock,
-    pub learnt_recipes: Vec<String>,
     pub minutes_per_second: f32,
     /// Se era in pausa: salvato per completezza, ma una partita caricata
     /// riparte sempre in pausa.
@@ -576,18 +572,11 @@ pub(crate) mod tests {
     }
 
     fn sample(world: &World, brain: &UtilityBrain, slot: &str) -> Vec<u8> {
-        let mut items = Stock::default();
-        items.set(ItemKind::Razione, 3.0);
-        items.set(ItemKind::Coperta, 2.0);
-        let learnt = ["lampada".to_string()];
         let header = SaveHeader::of("seed7-100", slot, 1234, world);
         let body = SaveBodyRef {
             world,
             brain,
             player: [12.5, 24.0],
-            tokens: 42,
-            items,
-            learnt_recipes: &learnt,
             minutes_per_second: 600.0,
             paused: false,
         };
@@ -599,6 +588,12 @@ pub(crate) mod tests {
         let mut world = World::generate(7, 10, 120);
         let mut brain = UtilityBrain::new(7);
         world.run(&mut brain, 2 * MINUTES_PER_DAY + 77);
+        // Il giocatore è nel mondo: nome, gettoni, inventario, baule, ricette.
+        world.set_player_name("Ada");
+        world.player.tokens = 42;
+        world.player.inventory.add(ItemKind::Razione, 3);
+        world.player.chest.add(ItemKind::Coperta, 2);
+        world.player.known_recipes.push("lampada".to_string());
         let bytes = sample(&world, &brain, "prova");
         let file = decode(&bytes).unwrap();
         assert_eq!(file.header.slot, "prova");
@@ -611,10 +606,13 @@ pub(crate) mod tests {
             postcard::to_allocvec(&brain).unwrap()
         );
         assert_eq!(file.body.player, [12.5, 24.0]);
-        assert_eq!(file.body.tokens, 42);
-        assert_eq!(file.body.items.count(ItemKind::Razione), 3);
-        assert_eq!(file.body.items.count(ItemKind::Coperta), 2);
-        assert_eq!(file.body.learnt_recipes, ["lampada"]);
+        let player = &file.body.world.player;
+        assert_eq!(player, &world.player);
+        assert_eq!(player.name, "Ada");
+        assert_eq!(player.tokens, 42);
+        assert_eq!(player.inventory.count(ItemKind::Razione), 3);
+        assert_eq!(player.chest.count(ItemKind::Coperta), 2);
+        assert_eq!(player.known_recipes, ["lampada"]);
         assert_eq!(file.body.minutes_per_second, 600.0);
         // Anche l'evento più vecchio e i contatori interni.
         assert_eq!(file.body.world.events_total(), world.events_total());
@@ -672,9 +670,6 @@ pub(crate) mod tests {
                 world: &world,
                 brain: &brain,
                 player: [0.0; 2],
-                tokens: 0,
-                items: Stock::default(),
-                learnt_recipes: &[],
                 minutes_per_second: 1.0,
                 paused: true,
             };
@@ -720,9 +715,6 @@ pub(crate) mod tests {
                 world: &world,
                 brain: &brain,
                 player: [0.0; 2],
-                tokens: 0,
-                items: Stock::default(),
-                learnt_recipes: &[],
                 minutes_per_second: 1.0,
                 paused: false,
             };

@@ -367,6 +367,7 @@ fn npc_details(
         place.to_string()
     };
     field(ui, "Si trova in", &place);
+    player_regard(ui, npc);
 
     ui.separator();
     field(ui, "Azione", &action_text(world, npc));
@@ -573,6 +574,30 @@ fn missing_npc(ui: &mut egui::Ui, world: &World, id: NpcId) {
 }
 
 /// Etichetta + valore, che va a capo se il valore è lungo.
+/// "Ti considera: amico (affinità +0.42)": cosa pensa del giocatore.
+fn player_regard(ui: &mut egui::Ui, npc: &Npc) {
+    let regard = npc.regard();
+    let color = match regard {
+        sim::Regard::Friend => GOOD,
+        sim::Regard::Wary => DANGER,
+        sim::Regard::Acquaintance | sim::Regard::Stranger => Color32::GRAY,
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.weak("Ti considera:");
+        let label = ui.colored_label(color, regard.label(npc.sex));
+        if let Some(tie) = npc.player {
+            label.on_hover_text(format!(
+                "Affinità con te {:+.2}: sale con i regali e gli acquisti al suo bancone, \
+                 scende se ti vede rubare. Cambia i prezzi, i regali accettati e i saluti.",
+                tie.affinity
+            ));
+            if tie.wants_to_talk {
+                ui.colored_label(WARNING, "(ha qualcosa da dirti)");
+            }
+        }
+    });
+}
+
 fn field(ui: &mut egui::Ui, name: &str, value: &str) {
     ui.horizontal_wrapped(|ui| {
         ui.weak(format!("{name}:"));

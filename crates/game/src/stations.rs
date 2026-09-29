@@ -65,6 +65,8 @@ pub struct StationSpot {
     pub level: u8,
     /// Piano della carrozza (0 = piano terra).
     pub floor: u8,
+    /// Postazione privata (il letto della cabina del giocatore).
+    pub private: bool,
 }
 
 impl StationSpot {
@@ -157,21 +159,119 @@ pub fn station_range(with_storage: bool) -> (f32, f32) {
 }
 
 /// Come [`layout_carriage`], ma ogni piano della carrozza è disposto per
-/// conto suo con le postazioni che ci stanno.
-pub fn layout_floors(stations: &[Station], range: (f32, f32)) -> Vec<StationSpot> {
+/// conto suo con le postazioni che ci stanno, nell'intervallo `range_of(piano)`.
+pub fn layout_floors_with(
+    stations: &[Station],
+    range_of: impl Fn(u8) -> (f32, f32),
+) -> Vec<StationSpot> {
     let top = stations.iter().map(|s| s.floor).max().unwrap_or(0);
     if top == 0 {
-        return layout_carriage(stations, range);
+        return layout_carriage(stations, range_of(0));
     }
-    let mut spots = layout_carriage(stations, range);
+    let mut spots = layout_carriage(stations, range_of(0));
     for floor in 0..=top {
         let ids: Vec<usize> = (0..stations.len())
             .filter(|&i| stations[i].floor == floor)
             .collect();
         let here: Vec<Station> = ids.iter().map(|&i| stations[i].clone()).collect();
-        for (spot, &i) in layout_carriage(&here, range).into_iter().zip(&ids) {
+        for (spot, &i) in layout_carriage(&here, range_of(floor))
+            .into_iter()
+            .zip(&ids)
+        {
             spots[i] = StationSpot { floor, ..spot };
         }
+    }
+    spots
+}
+
+/// Larghezza della cabina del giocatore, in fondo al suo piano (a destra).
+pub const CABIN_WIDTH: f32 = 62.0;
+/// Larghezze del letto e del baule della cabina.
+pub const CABIN_BED_WIDTH: f32 = 22.0;
+pub const CHEST_WIDTH: f32 = 14.0;
+
+/// La cabina del giocatore (x locali alla carrozza): paravento a sinistra,
+/// letto, un po' di spazio e il baule contro la parete di testata.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CabinSpot {
+    pub carriage: CarriageId,
+    pub floor: u8,
+    pub bed: StationId,
+    /// Bordo sinistro della cabina (il paravento) e destro (la parete).
+    pub left: f32,
+    pub right: f32,
+    pub bed_x: f32,
+    pub chest_x: f32,
+}
+
+impl CabinSpot {
+    fn new(carriage: CarriageId, floor: u8, bed: StationId) -> Self {
+        let (_, right) = interior_range();
+        let left = right - CABIN_WIDTH;
+        Self {
+            carriage,
+            floor,
+            bed,
+            left,
+            right,
+            bed_x: left + 8.0 + CABIN_BED_WIDTH / 2.0,
+            chest_x: right - 2.0 - CHEST_WIDTH / 2.0,
+        }
+    }
+
+    /// Quota del pavimento della cabina.
+    pub fn base_y(&self) -> f32 {
+        floor_y(usize::from(self.floor))
+    }
+}
+
+/// Posti delle postazioni di una carrozza: quelle condivise disposte come
+/// al solito (vedi [`layout_floors_with`]); se c'è il letto privato del
+/// giocatore, sul suo piano le altre lasciano libera la cabina.
+fn layout_with_cabin(
+    stations: &[Station],
+    range: (f32, f32),
+    cabin: Option<&CabinSpot>,
+) -> Vec<StationSpot> {
+    let shared: Vec<usize> = (0..stations.len())
+        .filter(|&i| stations[i].is_shared())
+        .collect();
+    let list: Vec<Station> = shared.iter().map(|&i| stations[i].clone()).collect();
+    let laid = layout_floors_with(&list, |floor| match cabin {
+        Some(c) if c.floor == floor => (range.0, range.1.min(c.left - GROUP_GAP)),
+        _ => range,
+    });
+    let mut spots = vec![
+        StationSpot {
+            kind: StationKind::Bed,
+            x: 0.0,
+            width: 0.0,
+            level: 0,
+            floor: 0,
+            private: true,
+        };
+        stations.len()
+    ];
+    for (spot, &i) in laid.into_iter().zip(&shared) {
+        spots[i] = spot;
+    }
+    for (i, station) in stations.iter().enumerate() {
+        if station.is_shared() {
+            continue;
+        }
+        let x = match cabin {
+            Some(c) if c.bed.index() == i => c.bed_x,
+            // Un'altra postazione privata (non ne esistono): in fondo.
+            _ => range.1 - CABIN_BED_WIDTH / 2.0,
+        };
+        spots[i] = StationSpot {
+            kind: station.kind,
+            x,
+            width: CABIN_BED_WIDTH,
+            level: 0,
+            floor: station.floor,
+            private: true,
+        };
     }
     spots
 }
@@ -250,6 +350,7 @@ pub fn layout_carriage(stations: &[Station], range: (f32, f32)) -> Vec<StationSp
             width: 0.0,
             level: 0,
             floor: 0,
+            private: false,
         };
         stations.len()
     ];
@@ -267,6 +368,7 @@ pub fn layout_carriage(stations: &[Station], range: (f32, f32)) -> Vec<StationSp
                 width: slot - gap,
                 level: level as u8,
                 floor: 0,
+                private: false,
             };
         }
         cursor += g.cols as f32 * slot + gap_after(k);
@@ -310,6 +412,8 @@ pub fn seat_offset(capacity: u16, seat: u16, width: f32) -> (f32, f32, bool) {
 #[derive(Resource, Debug, Default)]
 pub struct StationLayout {
     pub carriages: Vec<Vec<StationSpot>>,
+    /// La cabina del giocatore, se ne ha una.
+    pub cabin: Option<CabinSpot>,
     /// Per carrozza: zona della coda (Mensa, vedi [`queue_zone`]).
     queues: Vec<Option<(f32, f32)>>,
     /// Per carrozza con una coda: dove sta chi ozia o chiacchiera, lontano
@@ -319,6 +423,10 @@ pub struct StationLayout {
 
 impl StationLayout {
     pub fn from_world(world: &World) -> Self {
+        let cabin = world
+            .player
+            .home
+            .map(|h| CabinSpot::new(h.carriage, h.floor, h.bed));
         let carriages: Vec<Vec<StationSpot>> = world
             .carriages
             .iter()
@@ -328,7 +436,8 @@ impl StationLayout {
                     // La scala per il piano di sopra occupa l'inizio della carrozza.
                     range.0 = range.0.max(STAIRS_LEFT + STAIRS_WIDTH + GROUP_GAP);
                 }
-                layout_floors(&c.stations, range)
+                let here = cabin.as_ref().filter(|cab| cab.carriage == c.id);
+                layout_with_cabin(&c.stations, range, here)
             })
             .collect();
         let queues: Vec<_> = carriages.iter().map(|spots| queue_zone(spots)).collect();
@@ -345,6 +454,7 @@ impl StationLayout {
             .collect();
         Self {
             carriages,
+            cabin,
             queues,
             lounges,
         }
@@ -509,9 +619,12 @@ fn spawn_station_entities(
             match spot.kind {
                 StationKind::Bed => {
                     let upper = spot.level > 0;
-                    let blanket = (hash2(index as i32, station as i32, 3)
-                        % u32::from(prop_art::BLANKET_VARIANTS))
-                        as u8;
+                    let blanket = if spot.private {
+                        prop_art::PLAYER_BLANKET
+                    } else {
+                        (hash2(index as i32, station as i32, 3)
+                            % u32::from(prop_art::BLANKET_VARIANTS)) as u8
+                    };
                     let key = ArtKey::Bed {
                         width: wu,
                         upper,
@@ -592,6 +705,45 @@ fn spawn_station_entities(
                 }
             }
         }
+        // La cabina del giocatore: paravento, tappeto e baule.
+        if let Some(cabin) = layout.cabin.filter(|c| c.carriage.index() == index) {
+            let base = cabin.base_y() - FLOOR_Y;
+            let mut prop = |image: Handle<Image>, (w, h): (i32, i32), x: f32, z: f32| {
+                let size = Vec2::new(w as f32, h as f32);
+                sprites.push((
+                    art_sprite(image, size),
+                    Transform::from_xyz(x, base + size.y / 2.0, z),
+                    None,
+                ));
+            };
+            let screen = art.get(images.as_deref_mut(), ArtKey::Screen, prop_art::screen);
+            prop(
+                screen,
+                (prop_art::SCREEN_W, prop_art::SCREEN_H),
+                cabin.left + prop_art::SCREEN_W as f32 / 2.0,
+                Z_STATION,
+            );
+            let rug_w = (cabin.right - cabin.left - 12.0) as i32;
+            let rug = art.get(images.as_deref_mut(), ArtKey::Rug(rug_w as u16), || {
+                prop_art::rug(rug_w)
+            });
+            prop(
+                rug,
+                (rug_w, prop_art::RUG_H),
+                (cabin.left + cabin.right) / 2.0 + 1.0,
+                Z_STATION - 0.1,
+            );
+            let chest_w = CHEST_WIDTH as i32;
+            let chest = art.get(images.as_deref_mut(), ArtKey::Chest(chest_w as u16), || {
+                prop_art::chest(chest_w)
+            });
+            prop(
+                chest,
+                (chest_w, prop_art::CHEST_H),
+                cabin.chest_x,
+                Z_STATION,
+            );
+        }
         // Numero di ogni colonna di cuccette, su una targhetta sopra la più alta.
         for (number, top) in bunk_columns(spots).into_iter().enumerate() {
             let number = number as u16 + 1;
@@ -635,7 +787,10 @@ fn spawn_station_entities(
 /// Cuccetta più alta di ogni colonna di letti a castello, da sinistra a destra.
 fn bunk_columns(spots: &[StationSpot]) -> Vec<StationSpot> {
     let mut tops: Vec<StationSpot> = Vec::new();
-    for spot in spots.iter().filter(|s| s.kind == StationKind::Bed) {
+    for spot in spots
+        .iter()
+        .filter(|s| s.kind == StationKind::Bed && !s.private)
+    {
         match tops
             .iter_mut()
             .find(|t| t.floor == spot.floor && (t.x - spot.x).abs() < 0.5)
@@ -774,7 +929,10 @@ mod tests {
         // Piano per piano: colonne piene dal basso, numerate da sinistra.
         let mut expected = 0;
         for floor in 0..=spots.iter().map(|s| s.floor).max().unwrap() {
-            let here: Vec<_> = spots.iter().filter(|s| s.floor == floor).collect();
+            let here: Vec<_> = spots
+                .iter()
+                .filter(|s| s.floor == floor && !s.private)
+                .collect();
             let levels = here.iter().map(|s| s.level).max().unwrap();
             expected += here.len().div_ceil(usize::from(levels) + 1);
             let xs: Vec<f32> = columns

@@ -5,6 +5,7 @@ mod art;
 mod background;
 mod brain_ui;
 mod bubbles;
+mod cabin;
 mod camera;
 mod characters;
 mod crafting;
@@ -86,6 +87,8 @@ fn main() {
             // Finestra "Mercato" e listino dei prezzi (tasto M).
             market_ui::MarketUiPlugin,
             crafting::CraftingPlugin,
+            // Il giocatore nella sim: posto, cabina, baule e sonno.
+            cabin::CabinPlugin,
         ))
         // Screenshot automatici (solo con `TRAINGAME_SHOTS`).
         .add_plugins(shot::ShotPlugin)

@@ -21,7 +21,7 @@ use egui_plot::{Corner, Legend, Line, Plot, Points};
 use sim::{CarriageId, ItemKind, MarketQuote, Trend, World};
 
 use crate::player::Player;
-use crate::state::{PlayerInventory, Sim};
+use crate::state::Sim;
 use crate::storage::plural_title;
 use crate::train::{TrainLayout, TrainLocation};
 use crate::ui::{PointerCheck, item_swatch};
@@ -140,7 +140,7 @@ fn buy_blocker(
     if quote.stock == 0 {
         return Some("Esaurito".to_string());
     }
-    (tokens < quote.price).then(|| format!("Servono {} gettoni", quote.price))
+    (tokens < quote.player_price).then(|| format!("Servono {} gettoni", quote.player_price))
 }
 
 /// Perché il giocatore non può vendere `quote` (None: può).
@@ -170,29 +170,18 @@ fn trade_ready(world: &World, market: CarriageId, here: CarriageId) -> Result<()
 }
 
 /// Esegue un acquisto o una vendita; restituisce l'esito da mostrare.
-fn perform(
-    world: &mut World,
-    inventory: &mut PlayerInventory,
-    market: CarriageId,
-    trade: Trade,
-) -> String {
+fn perform(world: &mut World, market: CarriageId, trade: Trade) -> String {
     match trade {
-        Trade::Buy(item) => match world.player_buy(market, item, &mut inventory.tokens) {
-            Ok(price) => {
-                inventory.add(item, 1);
-                format!("Comprato {} per {price} gettoni", item.with_article())
-            }
+        Trade::Buy(item) => match world.player_buy(market, item) {
+            Ok(price) => format!("Comprato {} per {price} gettoni", item.with_article()),
             Err(e) => capitalized(&e.to_string()),
         },
         Trade::Sell(item) => {
-            if inventory.count(item) == 0 {
+            if world.player.inventory.count(item) == 0 {
                 return format!("Non hai {}", item.with_article());
             }
-            match world.player_sell(market, item, &mut inventory.tokens) {
-                Ok(pay) => {
-                    inventory.remove_one(item);
-                    format!("Venduto {} per {pay} gettoni", item.with_article())
-                }
+            match world.player_sell(market, item) {
+                Ok(pay) => format!("Venduto {} per {pay} gettoni", item.with_article()),
                 Err(e) => capitalized(&e.to_string()),
             }
         }
@@ -228,7 +217,6 @@ fn market_window(
     sim: Option<ResMut<Sim>>,
     layout: Option<Res<TrainLayout>>,
     player: Query<&Transform, With<Player>>,
-    mut inventory: ResMut<PlayerInventory>,
     mut window: ResMut<MarketWindow>,
 ) {
     if !window.open {
@@ -269,7 +257,7 @@ fn market_window(
             market = Some(nearest);
             match window.tab {
                 Tab::Mercato => {
-                    trade = market_tab(ui, world, nearest, here, &inventory, &window.message);
+                    trade = market_tab(ui, world, nearest, here, &window.message);
                 }
                 Tab::Listino => {
                     let chart_item = &mut window.chart_item;
@@ -278,7 +266,7 @@ fn market_window(
             }
         });
     if let (Some(trade), Some(market), Some(sim)) = (trade, market, sim.as_mut()) {
-        let message = perform(&mut sim.world, &mut inventory, market, trade);
+        let message = perform(&mut sim.world, market, trade);
         window.message = Some(message);
     }
     if !open {
@@ -292,10 +280,10 @@ fn market_tab(
     world: &World,
     market: CarriageId,
     here: CarriageId,
-    inventory: &PlayerInventory,
     message: &Option<String>,
 ) -> Option<Trade> {
     let ready = trade_ready(world, market, here);
+    let player = &world.player;
     ui.horizontal(|ui| {
         ui.strong(world.carriage_label(market));
         if market == here {
@@ -310,7 +298,7 @@ fn market_tab(
             None => ui.weak("Nessun mercante al bancone"),
         };
         ui.separator();
-        ui.label(format!("Hai {} gettoni", inventory.tokens));
+        ui.label(format!("Hai {} gettoni", player.tokens));
     });
     ui.separator();
     let quotes = world.market_quotes(market);
@@ -338,7 +326,13 @@ fn market_tab(
                     item_swatch(ui, q.item);
                     ui.label(plural_title(q.item));
                 });
-                ui.strong(format!("{} g", q.price));
+                let price = ui.strong(format!("{} g", q.player_price));
+                if q.player_price != q.price {
+                    price.on_hover_text(format!(
+                        "Prezzo del Mercato: {} g (il mercante ti fa un prezzo diverso)",
+                        q.price
+                    ));
+                }
                 let (arrow, color) = trend_arrow(q.trend);
                 let since = match q.reference {
                     Some(r) => format!(
@@ -360,10 +354,12 @@ fn market_tab(
                     None => ui.weak("nessuno"),
                 };
                 ui.label(distance_text(q.distance));
-                let owned = inventory.count(q.item);
+                let owned = player.inventory.count(q.item);
                 ui.label(owned.to_string());
                 ui.horizontal(|ui| {
-                    let buy = buy_blocker(q, ready, inventory.tokens);
+                    let full = player.inventory.room_for(q.item) == 0;
+                    let buy = buy_blocker(q, ready, player.tokens)
+                        .or_else(|| full.then(|| "L'inventario è pieno".to_string()));
                     let response = ui.add_enabled(buy.is_none(), egui::Button::new("Compra"));
                     if response.clicked() {
                         trade = Some(Trade::Buy(q.item));
@@ -393,7 +389,8 @@ fn market_tab(
     ui.label(
         RichText::new(format!(
             "Il prezzo cresce con la distanza dal produttore e quando lo scaffale si svuota. \
-             Il Mercato ricompra al {share:.0}% del prezzo, pagando dalla cassa del treno."
+             Il Mercato ricompra al {share:.0}% del prezzo, pagando dalla cassa del treno. \
+             Un mercante amico ti fa uno sconto, uno che diffida di te un ricarico."
         ))
         .small()
         .weak(),
@@ -614,27 +611,21 @@ mod tests {
         );
         assert_eq!(sell_blocker(&quote, ready, 1), None);
 
-        let mut inv = PlayerInventory {
-            tokens: 100,
-            ..PlayerInventory::default()
-        };
+        world.player.tokens = 100;
         let supply = world.money_supply();
-        let message = perform(&mut world, &mut inv, market, Trade::Buy(ItemKind::Vestito));
+        let message = perform(&mut world, market, Trade::Buy(ItemKind::Vestito));
         assert!(message.starts_with("Comprato un vestito"), "{message}");
-        assert_eq!(inv.count(ItemKind::Vestito), 1);
-        let spent = 100 - inv.tokens;
-        let message = perform(&mut world, &mut inv, market, Trade::Sell(ItemKind::Vestito));
+        assert_eq!(world.player.inventory.count(ItemKind::Vestito), 1);
+        let spent = 100 - world.player.tokens;
+        let message = perform(&mut world, market, Trade::Sell(ItemKind::Vestito));
         assert!(message.starts_with("Venduto un vestito"), "{message}");
-        assert_eq!(inv.count(ItemKind::Vestito), 0);
-        let earned = inv.tokens + spent - 100;
+        assert_eq!(world.player.inventory.count(ItemKind::Vestito), 0);
+        let earned = world.player.tokens + spent - 100;
         assert!(earned > 0 && earned < spent);
-        // La moneta della sim cambia solo per quello che il giocatore porta o prende.
-        assert_eq!(
-            world.money_supply(),
-            supply + u64::from(spent) - u64::from(earned)
-        );
+        // I gettoni passano tra il giocatore e la cassa: la moneta non cambia.
+        assert_eq!(world.money_supply(), supply);
         // Niente da vendere.
-        let message = perform(&mut world, &mut inv, market, Trade::Sell(ItemKind::Vestito));
+        let message = perform(&mut world, market, Trade::Sell(ItemKind::Vestito));
         assert_eq!(message, "Non hai un vestito");
         assert_eq!(
             market_name(&world, market),

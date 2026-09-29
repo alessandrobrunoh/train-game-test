@@ -46,6 +46,7 @@ use crate::characters::{
     AppearanceKey, BABY_YEARS, CharacterArt, Frame, Stage, anim_for, anim_frame, appearance,
 };
 use crate::life_fx::FadingOut;
+use crate::player::Player;
 use crate::saves::WorldRebuildSet;
 use crate::state::{NpcSprite, PointerOverUi, SelectedNpc, Sim, SimClock, WorldReplaced};
 use crate::stations::{BED_TOP, FAR_ROW_RISE, StationLayout, interior_range, seat_offset};
@@ -77,6 +78,8 @@ const CATCH_UP: f32 = 3.0;
 const TELEPORT_DISTANCE: f32 = CARRIAGE_PITCH * 1.5;
 /// Distanza tra due NPC che chiacchierano.
 const CHAT_DISTANCE: f32 = 10.0;
+/// Distanza dal giocatore di chi lo saluta.
+const GREET_DISTANCE: f32 = 14.0;
 /// Distanza tra due persone in coda, e tra la prima e le cucine.
 const QUEUE_SPACING: f32 = 6.0;
 const QUEUE_HEAD_GAP: f32 = 2.0;
@@ -648,6 +651,25 @@ fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Po
     }
 }
 
+/// Chi sta salutando il giocatore (`World::greeting_of`) e ozia nel suo
+/// stesso posto gli si avvicina, dalla parte da cui arriva, e lo guarda.
+fn approach_player(world: &World, npc: &Npc, player: Vec2, pose: &mut Pose) {
+    if npc.action != Action::Idle || world.greeting_of(npc.id).is_none() || !world.with_player(npc)
+    {
+        return;
+    }
+    let side = if pose.position.x < player.x {
+        -1.0
+    } else {
+        1.0
+    };
+    let (left, right) = interior_range();
+    let c = npc.carriage;
+    pose.position.x =
+        (player.x + side * GREET_DISTANCE).clamp(carriage_x(c, left), carriage_x(c, right));
+    pose.face = Face::Toward(player.x);
+}
+
 /// Dove va disegnato l'NPC (centro del corpo), anche se non ha uno sprite.
 pub(crate) fn npc_position(world: &World, stations: &StationLayout, npc: &Npc) -> Vec2 {
     npc_pose(world, stations, npc, 0).position
@@ -813,9 +835,11 @@ fn sync_npc_sprites(
     mut art: ResMut<CharacterArt>,
     mut images: ResMut<Assets<Image>>,
     mut sprites: Query<SyncedSprite, With<NpcSprite>>,
+    player: Query<&Transform, (With<Player>, Without<NpcSprite>)>,
     mut seats: Local<HashMap<NpcId, SeatKey>>,
 ) {
     let world = &sim.world;
+    let player_pos = player.single().ok().map(|t| t.translation.truncate());
     // Frazione di minuto già trascorsa verso il prossimo tick.
     let fraction = clock.accumulator;
     let (camera_transform, projection) = *camera;
@@ -838,6 +862,9 @@ fn sync_npc_sprites(
         }
         let seat = slots.get(&npc.id).copied().unwrap_or(0);
         let mut pose = npc_pose(world, &stations, npc, seat);
+        if let Some(player) = player_pos {
+            approach_player(world, npc, player, &mut pose);
+        }
         let z = sprite_z(npc.id, pose.far);
         if let Action::Travel { to } = npc.action {
             // Posizione continua tra un tick e l'altro (usata se nasce ora).

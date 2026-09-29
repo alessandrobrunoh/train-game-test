@@ -3,15 +3,14 @@
 //! `sim_bridge.rs` fa avanzare la simulazione e disegna gli NPC,
 //! `ui.rs` mostra controlli del tempo, ispettore ed eventi, `interaction.rs`
 //! e `inventory.rs` gestiscono cosa il giocatore prende, compra e regala.
+//! Il giocatore (nome, gettoni, inventario, cabina) vive nella sim:
+//! `sim.world.player` (vedi `cabin.rs`).
 
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use sim::{ItemKind, NpcId, RecipeDef, Stock, UtilityBrain, World};
+use sim::{NpcId, UtilityBrain, World};
 use sim_laya::{LayaBrain, LayaConfig};
-
-/// Gettoni con cui il giocatore comincia la partita.
-pub const PLAYER_START_TOKENS: u32 = 100;
 
 pub struct StatePlugin;
 
@@ -21,7 +20,6 @@ impl Plugin for StatePlugin {
             .init_resource::<SelectedNpc>()
             .init_resource::<FollowNpc>()
             .init_resource::<SimPerf>()
-            .init_resource::<PlayerInventory>()
             .init_resource::<PointerOverUi>()
             .add_message::<WorldReplaced>();
     }
@@ -103,61 +101,6 @@ pub struct PointerOverUi(pub bool);
 /// Sprite che rappresenta un NPC della simulazione.
 #[derive(Component)]
 pub struct NpcSprite(pub NpcId);
-
-/// Cosa possiede il giocatore: gettoni e oggetti (solo unità intere), e le
-/// ricette che ha imparato oltre a quelle di base (per chiave,
-/// `RecipeDef::key`). Nella Fase 4 passerà nella sim.
-#[derive(Resource, Debug)]
-pub struct PlayerInventory {
-    pub tokens: u32,
-    pub items: Stock,
-    pub learnt_recipes: Vec<String>,
-}
-
-impl Default for PlayerInventory {
-    fn default() -> Self {
-        Self {
-            tokens: PLAYER_START_TOKENS,
-            items: Stock::default(),
-            learnt_recipes: Vec::new(),
-        }
-    }
-}
-
-impl PlayerInventory {
-    /// Se il giocatore sa fare la ricetta: quelle di base sì, le altre se
-    /// le ha imparate.
-    pub fn knows(&self, recipe: &RecipeDef) -> bool {
-        recipe.basic || self.learnt_recipes.iter().any(|k| k == recipe.key)
-    }
-
-    /// Impara una ricetta (per i dialoghi della Fase 5); falso se la sapeva già.
-    #[allow(dead_code)]
-    pub fn learn(&mut self, recipe: &RecipeDef) -> bool {
-        if self.knows(recipe) {
-            return false;
-        }
-        self.learnt_recipes.push(recipe.key.to_string());
-        true
-    }
-
-    pub fn count(&self, item: ItemKind) -> u32 {
-        self.items.count(item)
-    }
-
-    pub fn add(&mut self, item: ItemKind, units: u32) {
-        self.items.add(item, units as f32, f32::INFINITY);
-    }
-
-    /// Toglie un'unità, se c'è.
-    pub fn remove_one(&mut self, item: ItemKind) -> bool {
-        if self.count(item) == 0 {
-            return false;
-        }
-        self.items.take(item, 1.0);
-        true
-    }
-}
 
 /// Partita in corso: una "run" nasce con una nuova partita e continua nei
 /// salvataggi. Lo storico SQLite (`history`) e i salvataggi (`saves`) vivono

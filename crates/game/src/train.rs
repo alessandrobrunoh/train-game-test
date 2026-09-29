@@ -168,6 +168,23 @@ pub fn floor_y(floor: usize) -> f32 {
     FLOOR_Y + floor as f32 * STOREY
 }
 
+/// Piano (0 = terra) a cui sta un corpo con il centro a quota `y`.
+pub fn floor_at(y: f32) -> u8 {
+    ((y - FLOOR_Y) / STOREY).floor().clamp(0.0, 255.0) as u8
+}
+
+/// Dove si trova, per la sim, chi è in `position` (centro del corpo): la
+/// carrozza (nel soffietto quella davanti) e il piano.
+pub fn place_at(layout: &TrainLayout, position: Vec2) -> sim::Place {
+    let index = match layout.location_at(position.x) {
+        TrainLocation::Carriage(i) | TrainLocation::Gangway(i) => i,
+    };
+    sim::Place {
+        carriage: sim::CarriageId(index as u16),
+        floor: floor_at(position.y),
+    }
+}
+
 /// Rettangoli solidi (pavimento, solai, soffitto, pareti di testata e
 /// soffietto alla sua destra) della carrozza `index` con `floors` piani, in
 /// coordinate mondo. La grafica è in `env_art.rs` e ricalca questi rettangoli.

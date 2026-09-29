@@ -197,6 +197,10 @@ pub enum ArtKey {
         hue: u8,
     },
     Shelf,
+    /// Cabina del giocatore: baule, paravento e tappeto.
+    Chest(u16),
+    Screen,
+    Rug(u16),
     Crate(ItemKind),
     Good(ItemKind),
     /// Arte dell'esterno (vedi `background.rs`).

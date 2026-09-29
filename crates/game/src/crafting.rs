@@ -9,8 +9,9 @@
 //!
 //! Con "Crea" il giocatore lavora per i minuti di gioco della ricetta: il
 //! tempo scorre alla velocità scelta e si ferma in pausa. Alla fine la sim
-//! controlla postazione e ingredienti (`World::player_craft`), li consuma e
-//! mette il risultato nell'inventario. Uscire dalla carrozza o caricare
+//! controlla ricetta, postazione, ingredienti e posto nell'inventario
+//! (`World::player_craft`), li consuma e mette il risultato nell'inventario
+//! del giocatore (`world.player`). Uscire dalla carrozza o caricare
 //! un'altra partita annulla il lavoro senza perdere niente: gli ingredienti
 //! si consumano solo alla fine.
 
@@ -20,7 +21,7 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use sim::{CarriageId, GameTime, ItemKind, RECIPES, RecipeDef, World};
 
 use crate::player::Player;
-use crate::state::{PlayerInventory, Sim, WorldReplaced};
+use crate::state::{Sim, WorldReplaced};
 use crate::train::{TrainLayout, TrainLocation};
 use crate::ui::{MARGIN, PointerCheck, item_swatch};
 
@@ -96,12 +97,12 @@ fn amount_label(item: ItemKind, n: u32) -> String {
 /// Perché il giocatore non può iniziare `recipe` adesso (None: può).
 fn blocker(
     world: &World,
-    inventory: &PlayerInventory,
     recipe: &RecipeDef,
     here: Option<CarriageId>,
     busy: bool,
 ) -> Option<String> {
-    if !inventory.knows(recipe) {
+    let inventory = &world.player.inventory;
+    if !world.player.knows(recipe) {
         return Some("Non conosci ancora questa ricetta".to_string());
     }
     let here_ok = here
@@ -131,8 +132,8 @@ fn station_place(recipe: &RecipeDef) -> String {
 }
 
 /// Il lavoro è finito (o annullato): chiede alla sim di fare la ricetta.
-fn finish(world: &mut World, inventory: &mut PlayerInventory, job: &CraftJob) -> String {
-    match world.player_craft(job.recipe, &mut inventory.items, job.carriage) {
+fn finish(world: &mut World, job: &CraftJob) -> String {
+    match world.player_craft(job.recipe, job.carriage) {
         Ok(n) => format!("Fatto: {}", amount_label(job.recipe.output, n)),
         Err(e) => format!("Non riuscito: {e}"),
     }
@@ -158,7 +159,6 @@ fn advance_job(
     mut sim: ResMut<Sim>,
     layout: Res<TrainLayout>,
     player: Single<&Transform, With<Player>>,
-    mut inventory: ResMut<PlayerInventory>,
     mut window: ResMut<CraftingWindow>,
 ) {
     let Some(job) = window.job else {
@@ -174,7 +174,7 @@ fn advance_job(
         return;
     }
     window.job = None;
-    window.message = Some(finish(&mut sim.world, &mut inventory, &job));
+    window.message = Some(finish(&mut sim.world, &job));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -183,7 +183,6 @@ fn crafting_window(
     sim: Option<Res<Sim>>,
     layout: Res<TrainLayout>,
     player: Single<&Transform, With<Player>>,
-    inventory: Res<PlayerInventory>,
     mut window: ResMut<CraftingWindow>,
 ) {
     if !window.open {
@@ -247,7 +246,7 @@ fn crafting_window(
                         );
                     }
                     for &recipe in &local {
-                        if recipe_row(ui, world, &inventory, recipe, here, window.job.is_some()) {
+                        if recipe_row(ui, world, recipe, here, window.job.is_some()) {
                             start = Some(recipe);
                         }
                     }
@@ -260,7 +259,7 @@ fn crafting_window(
                             .default_open(local.is_empty())
                             .show(ui, |ui| {
                                 for recipe in elsewhere {
-                                    recipe_row(ui, world, &inventory, recipe, here, true);
+                                    recipe_row(ui, world, recipe, here, true);
                                 }
                             });
                     }
@@ -290,14 +289,14 @@ fn crafting_window(
 fn recipe_row(
     ui: &mut egui::Ui,
     world: &World,
-    inventory: &PlayerInventory,
     recipe: &'static RecipeDef,
     here: Option<CarriageId>,
     busy: bool,
 ) -> bool {
     let p = &world.params;
-    let known = inventory.knows(recipe);
-    let blocked = blocker(world, inventory, recipe, here, busy);
+    let inventory = &world.player.inventory;
+    let known = world.player.knows(recipe);
+    let blocked = blocker(world, recipe, here, busy);
     let mut clicked = false;
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(WIDTH - 24.0);
@@ -353,66 +352,61 @@ fn recipe_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim::{CarriageKind, Stock};
+    use sim::{CarriageKind, INVENTORY_SLOTS, SlotInventory};
 
     fn first(world: &World, kind: CarriageKind) -> CarriageId {
         world.carriages.iter().find(|c| c.kind == kind).unwrap().id
     }
 
-    fn inventory(items: &[(ItemKind, f32)]) -> PlayerInventory {
-        let mut stock = Stock::default();
+    fn with_items(world: &mut World, items: &[(ItemKind, u32)]) {
+        world.player.inventory = SlotInventory::new(INVENTORY_SLOTS);
         for &(item, n) in items {
-            stock.set(item, n);
-        }
-        PlayerInventory {
-            items: stock,
-            ..PlayerInventory::default()
+            world.player.inventory.add(item, n);
         }
     }
 
     #[test]
     fn blockers_explain_what_is_missing() {
-        let world = World::generate(3, 10, 40);
+        let mut world = World::generate(3, 10, 40);
         let officina = first(&world, CarriageKind::Officina);
         let mensa = first(&world, CarriageKind::Mensa);
         let coperta = RecipeDef::by_key("coperta").unwrap();
         let lampada = RecipeDef::by_key("lampada").unwrap();
-        let mut inv = inventory(&[(ItemKind::Tessuto, 2.0)]);
-        assert_eq!(blocker(&world, &inv, coperta, Some(officina), false), None);
+        with_items(&mut world, &[(ItemKind::Tessuto, 2)]);
+        assert_eq!(blocker(&world, coperta, Some(officina), false), None);
         assert!(
-            blocker(&world, &inv, coperta, Some(officina), true)
+            blocker(&world, coperta, Some(officina), true)
                 .unwrap()
                 .contains("lavorando")
         );
-        let wrong = blocker(&world, &inv, coperta, Some(mensa), false).unwrap();
+        let wrong = blocker(&world, coperta, Some(mensa), false).unwrap();
         assert!(wrong.contains("banco da lavoro"), "{wrong}");
         assert!(wrong.contains("Officina"), "{wrong}");
-        inv.items.set(ItemKind::Tessuto, 1.0);
-        let missing = blocker(&world, &inv, coperta, Some(officina), false).unwrap();
+        with_items(&mut world, &[(ItemKind::Tessuto, 1)]);
+        let missing = blocker(&world, coperta, Some(officina), false).unwrap();
         assert_eq!(missing, "Ti manca 1 tessuto");
         // Not basic: must be learnt first.
-        let unknown = blocker(&world, &inv, lampada, Some(officina), false).unwrap();
+        let unknown = blocker(&world, lampada, Some(officina), false).unwrap();
         assert!(unknown.contains("conosci"), "{unknown}");
-        assert!(inv.learn(lampada));
-        assert!(!inv.learn(lampada));
-        assert!(inv.knows(lampada));
+        assert!(world.player.learn(lampada));
+        assert!(world.player.knows(lampada));
     }
 
     #[test]
     fn finishing_a_job_crafts_through_the_sim() {
         let mut world = World::generate(3, 10, 40);
         let officina = first(&world, CarriageKind::Officina);
-        let mut inv = inventory(&[(ItemKind::Tessuto, 2.0)]);
+        with_items(&mut world, &[(ItemKind::Tessuto, 2)]);
         let job = CraftJob {
             recipe: RecipeDef::by_key("coperta").unwrap(),
             carriage: officina,
             since: world.clock,
             until: world.clock + 60,
         };
-        assert_eq!(finish(&mut world, &mut inv, &job), "Fatto: Coperta");
-        assert_eq!(inv.count(ItemKind::Coperta), 1);
-        assert_eq!(inv.count(ItemKind::Tessuto), 0);
-        let again = finish(&mut world, &mut inv, &job);
+        assert_eq!(finish(&mut world, &job), "Fatto: Coperta");
+        assert_eq!(world.player.inventory.count(ItemKind::Coperta), 1);
+        assert_eq!(world.player.inventory.count(ItemKind::Tessuto), 0);
+        let again = finish(&mut world, &job);
         assert!(again.starts_with("Non riuscito"), "{again}");
         assert_eq!(amount_label(ItemKind::Te, 3), "3 Tè");
     }

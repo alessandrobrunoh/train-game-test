@@ -1,4 +1,5 @@
-//! HUD minimale: in quale carrozza si trova il giocatore.
+//! HUD minimale: chi è il giocatore, quanti gettoni ha e in quale carrozza
+//! si trova (e se è nella sua cabina).
 
 use bevy::prelude::*;
 
@@ -41,7 +42,7 @@ fn spawn_hud(mut commands: Commands) {
         ));
     commands.spawn((
         Text::new(
-            "A/D: muovi   Spazio/W: salta   W/S: scale   Z: vista piani   E: interagisci   Q: cambia oggetto   I: inventario   C: crafting   M: mercato   P: pausa   1-5: velocità   Click: seleziona NPC   F: segui NPC   V: fumetti   G: popolazione   H: storia   B: cervello   F5: salva   F9: carica   Esc: partite",
+            "A/D: muovi   Spazio/W: salta   W/S: scale   Z: vista piani   E: interagisci (in cabina: letto, baule)   Q: cambia oggetto   I: inventario   C: crafting   M: mercato   P: pausa   1-5: velocità   Click: seleziona NPC   F: segui NPC   V: fumetti   G: popolazione   H: storia   B: cervello   F5: salva   F9: carica   Esc: partite",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),
@@ -63,13 +64,20 @@ fn update_location_text(
     player: Single<&Transform, With<Player>>,
     mut text: Single<&mut Text, With<LocationText>>,
 ) {
-    let label = match layout.location_at(player.translation.x) {
+    let place = match layout.location_at(player.translation.x) {
         TrainLocation::Carriage(i) => match sim.world.carriages.get(i) {
             Some(c) => c.label().to_string(),
             None => format!("Carrozza {}", i + 1),
         },
         TrainLocation::Gangway(i) => format!("Passaggio {} -> {}", i + 1, i + 2),
     };
+    let me = &sim.world.player;
+    let home = if me.at_home() {
+        " · nella tua cabina"
+    } else {
+        ""
+    };
+    let label = format!("{} · {} gettoni    {place}{home}", me.name, me.tokens);
     // Aggiorna solo se cambia, per non segnare il testo come modificato ogni frame.
     if text.0 != label {
         text.0 = label;

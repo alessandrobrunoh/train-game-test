@@ -19,6 +19,12 @@
 //! deliberazione (`bubbles.rs`) non ne ha uno di dialogo: mai due fumetti
 //! sulla stessa testa. Fumetti vicini si impilano (vedi [`stack`]).
 //!
+//! **Il giocatore.** Gli NPC che lo conoscono e gli vogliono bene lo salutano
+//! (`World::greetings`): un fumetto caldo sopra la loro testa per almeno
+//! [`GREET_SECS`] secondi reali ([`GreetBubble`]). Chi ha qualcosa da dirgli
+//! (`World::wants_to_talk`, per ora un amico che l'ha appena salutato; poi
+//! la chat e gli incarichi della Fase 5.4) ha un "!" giallo sopra la testa.
+//!
 //! Il tasto **V** passa tra tutti i fumetti, solo quello del selezionato e
 //! nessuno ([`SpeechMode`]). L'ispettore mostra la conversazione in corso e
 //! le ultime concluse ([`conversation_section`]).
@@ -85,6 +91,15 @@ const TENSE_BORDER: Rgba = rgb(176, 36, 44);
 const TENSE_PAPER: Rgba = rgb(255, 236, 232);
 const HEART: Rgba = rgb(230, 70, 100);
 const NOTE: Rgba = rgb(70, 110, 210);
+const TALK_BORDER: Rgba = rgb(150, 110, 20);
+const TALK_PAPER: Rgba = rgb(255, 226, 110);
+/// I saluti stanno davanti al giocatore (10), che di solito è lì accanto.
+const GREET_Z: f32 = 10.5;
+/// Un saluto al giocatore resta almeno tanti secondi reali.
+pub(crate) const GREET_SECS: f64 = 3.0;
+/// Il "!" di chi ha qualcosa da dire ondeggia di tanto (unità) e così veloce.
+const MARK_BOB: f32 = 1.5;
+const MARK_BOB_SPEED: f32 = 3.0;
 
 const TEXT_COLOR: Color = Color::srgb(0.16, 0.14, 0.2);
 const TENSE_TEXT: Color = Color::srgb(0.42, 0.08, 0.1);
@@ -103,7 +118,15 @@ impl Plugin for SpeechPlugin {
             )
             .add_systems(
                 Update,
-                (speech_keys, update_speech, place_speech, move_reactions)
+                (
+                    speech_keys,
+                    update_speech,
+                    place_speech,
+                    move_reactions,
+                    update_greetings,
+                    center_greet_texts,
+                    update_talk_marks,
+                )
                     .chain()
                     .after(BubblesSet)
                     .after(NpcRenderSet),
@@ -390,6 +413,8 @@ struct SpeechArt {
     /// Fumetto piccolo con i puntini, e con "!" (teso).
     dots: [Handle<Image>; Tone::COUNT],
     bang: Handle<Image>,
+    /// "!" giallo: ha qualcosa da dire al giocatore.
+    talk: Handle<Image>,
     /// Reazioni di chi ascolta.
     heart: Handle<Image>,
     note: Handle<Image>,
@@ -432,6 +457,17 @@ fn bang_canvas() -> Canvas {
     )
 }
 
+/// Fumetto piccolo 7×9 con un "!" (ha qualcosa da dire al giocatore).
+fn talk_canvas() -> Canvas {
+    Canvas::from_rows(
+        &[
+            ".kkkkk.", "kppRppk", "kppRppk", "kppRppk", "kpppppk", "kppRppk", ".kkkkk.", "..kk...",
+            "..k....",
+        ],
+        &[('k', TALK_BORDER), ('p', TALK_PAPER), ('R', TALK_BORDER)],
+    )
+}
+
 fn heart_canvas() -> Canvas {
     Canvas::from_rows(
         &[".h.h.", "hhhhh", "hhhhh", ".hhh.", "..h.."],
@@ -460,6 +496,7 @@ fn make_art(mut commands: Commands, images: Option<ResMut<Assets<Image>>>) {
         tail: TONE_COLORS.map(|t| add(tail_canvas(t))),
         dots: TONE_COLORS.map(|t| add(dots_canvas(t))),
         bang: add(bang_canvas()),
+        talk: add(talk_canvas()),
         heart: add(heart_canvas()),
         note: add(note_canvas()),
         alarm: add(alarm_canvas()),
@@ -1139,6 +1176,219 @@ const TONE_TENSE: Color32 = Color32::from_rgb(230, 80, 80);
 const CURRENT_LINE: Color32 = Color32::from_rgb(245, 220, 140);
 /// Conversazioni recenti mostrate al massimo.
 const RECENT_TALKS: usize = 5;
+
+// --- Saluti al giocatore -------------------------------------------------------------
+
+/// Fumetto di un saluto al giocatore (`World::greetings`).
+#[derive(Component)]
+struct GreetBubble {
+    npc: NpcId,
+    since: GameTime,
+    /// Istante reale in cui è comparso.
+    born: f64,
+    /// Ultima posizione della testa (se lo sprite sparisce resta lì).
+    head: Vec2,
+    text: Entity,
+}
+
+/// Testo (figlio) di un saluto.
+#[derive(Component)]
+struct GreetText;
+
+/// "!" sopra chi ha qualcosa da dire al giocatore.
+#[derive(Component)]
+struct TalkMark {
+    npc: NpcId,
+}
+
+/// Il fondo di un saluto (disgiunto da NPC, testi e "!").
+type GreetOnly = (
+    Without<NpcSprite>,
+    Without<GreetText>,
+    Without<TalkMark>,
+    Without<ChatBubble>,
+    Without<ChatPart>,
+    Without<ChatText>,
+);
+
+/// Crea, sposta e toglie i fumetti dei saluti al giocatore.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn update_greetings(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    sim: Res<Sim>,
+    clock: Res<SimClock>,
+    mode: Res<SpeechMode>,
+    art: Option<Res<SpeechArt>>,
+    index: Res<NpcSpriteIndex>,
+    sprites: Query<(&Transform, &NpcVisual), With<NpcSprite>>,
+    mut bubbles: Query<(Entity, &mut GreetBubble, &mut Transform, &mut Sprite), GreetOnly>,
+    texts: Query<&TextLayoutInfo, With<GreetText>>,
+) {
+    let Some(art) = art else {
+        return;
+    };
+    let real = time.elapsed_secs_f64();
+    let world = &sim.world;
+    let fast = !clock.paused && clock.minutes_per_second > FAST_SPEED;
+    let mut shown: HashSet<(NpcId, GameTime)> = HashSet::new();
+    for (entity, mut bubble, mut transform, mut sprite) in &mut bubbles {
+        let alive = world
+            .greeting_of(bubble.npc)
+            .is_some_and(|g| g.since == bubble.since);
+        let head = head_of(&index, &sprites, bubble.npc);
+        if (!alive && real - bubble.born >= GREET_SECS) || *mode == SpeechMode::Off {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        shown.insert((bubble.npc, bubble.since));
+        if let Some(head) = head {
+            bubble.head = head;
+        }
+        let text = world
+            .greeting_of(bubble.npc)
+            .map(|g| wrap_text(&g.text, LINE_CHARS, MAX_LINES).join("\n"));
+        let layout = texts.get(bubble.text).ok();
+        let size = bubble_size(text.map(Shown::Text).as_ref(), layout);
+        if sprite.custom_size != Some(size) {
+            sprite.custom_size = Some(size);
+        }
+        let age = (real - bubble.born) as f32;
+        let alpha = (age / FADE_SECS).min(1.0);
+        sprite.color = Color::WHITE.with_alpha(alpha);
+        transform.translation = Vec3::new(
+            bubble.head.x.round(),
+            (bubble.head.y + GAP + 2.0).round(),
+            GREET_Z,
+        );
+    }
+    if fast || *mode == SpeechMode::Off {
+        return;
+    }
+    for greeting in world.greetings() {
+        if shown.contains(&(greeting.npc, greeting.since)) {
+            continue;
+        }
+        let Some(head) = head_of(&index, &sprites, greeting.npc) else {
+            continue;
+        };
+        let text = wrap_text(&greeting.text, LINE_CHARS, MAX_LINES).join("\n");
+        let size = bubble_size(Some(&Shown::Text(text.clone())), None);
+        let text_entity = commands
+            .spawn((
+                GreetText,
+                Text2d::new(text),
+                TextFont {
+                    font_size: FontSize::Px(TEXT_SIZE),
+                    ..default()
+                },
+                TextLayout::new(Justify::Center, LineBreak::NoWrap),
+                TextColor(TEXT_COLOR),
+                Anchor::CENTER,
+                Transform::from_xyz(0.0, size.y / 2.0, 0.02).with_scale(Vec3::splat(TEXT_SCALE)),
+            ))
+            .id();
+        let tail = commands
+            .spawn((
+                Sprite::from_image(art.tail[Tone::Friendly.index()].clone()),
+                Anchor::TOP_LEFT,
+                Transform::from_xyz(-2.0, 1.0, 0.01),
+            ))
+            .id();
+        commands
+            .spawn((
+                Name::new("Saluto"),
+                SpeechEntity,
+                GreetBubble {
+                    npc: greeting.npc,
+                    since: greeting.since,
+                    born: real,
+                    head,
+                    text: text_entity,
+                },
+                Sprite {
+                    image: art.body[Tone::Friendly.index()].clone(),
+                    custom_size: Some(size),
+                    image_mode: slicer(),
+                    color: Color::WHITE.with_alpha(0.0),
+                    ..default()
+                },
+                Anchor::BOTTOM_CENTER,
+                Transform::from_xyz(head.x, head.y + GAP + 2.0, GREET_Z),
+            ))
+            .add_children(&[tail, text_entity]);
+    }
+}
+
+/// Tiene il testo al centro del suo fumetto (le dimensioni cambiano quando
+/// il testo è impaginato).
+fn center_greet_texts(
+    bubbles: Query<(&GreetBubble, &Sprite)>,
+    mut texts: Query<&mut Transform, With<GreetText>>,
+) {
+    for (bubble, sprite) in &bubbles {
+        let Some(size) = sprite.custom_size else {
+            continue;
+        };
+        if let Ok(mut t) = texts.get_mut(bubble.text)
+            && (t.translation.y - size.y / 2.0).abs() > 0.01
+        {
+            t.translation.y = size.y / 2.0;
+        }
+    }
+}
+
+/// Un "!" giallo sopra chi ha qualcosa da dire al giocatore (e non lo sta
+/// già salutando).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn update_talk_marks(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    sim: Res<Sim>,
+    mode: Res<SpeechMode>,
+    art: Option<Res<SpeechArt>>,
+    index: Res<NpcSpriteIndex>,
+    sprites: Query<(&Transform, &NpcVisual), With<NpcSprite>>,
+    mut marks: Query<
+        (Entity, &TalkMark, &mut Transform),
+        (Without<NpcSprite>, Without<GreetBubble>),
+    >,
+) {
+    let Some(art) = art else {
+        return;
+    };
+    let world = &sim.world;
+    let bob = (time.elapsed_secs() * MARK_BOB_SPEED).sin() * MARK_BOB;
+    let wanted = |id: NpcId| {
+        *mode != SpeechMode::Off && world.wants_to_talk(id) && world.greeting_of(id).is_none()
+    };
+    let mut has_mark: HashSet<NpcId> = HashSet::new();
+    for (entity, mark, mut transform) in &mut marks {
+        match head_of(&index, &sprites, mark.npc).filter(|_| wanted(mark.npc)) {
+            Some(head) => {
+                has_mark.insert(mark.npc);
+                transform.translation =
+                    Vec3::new(head.x.round(), (head.y + GAP + bob).round(), REACTION_Z);
+            }
+            None => commands.entity(entity).despawn(),
+        }
+    }
+    for npc in &world.npcs {
+        if has_mark.contains(&npc.id) || !wanted(npc.id) {
+            continue;
+        }
+        if let Some(head) = head_of(&index, &sprites, npc.id) {
+            commands.spawn((
+                Name::new("Ha qualcosa da dirti"),
+                SpeechEntity,
+                TalkMark { npc: npc.id },
+                Sprite::from_image(art.talk.clone()),
+                Anchor::BOTTOM_CENTER,
+                Transform::from_xyz(head.x, head.y + GAP, REACTION_Z),
+            ));
+        }
+    }
+}
 
 fn tone_color(tone: Tone) -> Color32 {
     match tone {

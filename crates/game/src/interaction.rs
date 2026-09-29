@@ -8,7 +8,13 @@
 //!   lavoro: compra un oggetto (il più economico, Q per cambiare) al prezzo
 //!   del Mercato.
 //! - Vicino a un NPC sveglio: gli regala qualcosa che accetta (un vestito o un
-//!   attrezzo che gli manca, oppure cibo se ha fame).
+//!   attrezzo che gli manca, oppure cibo se ha fame). Chi diffida del
+//!   giocatore non accetta niente.
+//! - Nella propria cabina: E sul letto per dormire fino al mattino (dalle
+//!   20:00), E sul baule per aprirlo (vedi `cabin.rs`).
+//!
+//! Tutto passa dalla sim (`World::player_*`): inventario e gettoni sono in
+//! `world.player`.
 //!
 //! Mentre la camera segue un NPC (tasto F) non si interagisce con niente.
 //!
@@ -16,14 +22,15 @@
 //! razione"); dopo aver premuto E, per un attimo, l'esito.
 
 use bevy::prelude::*;
-use sim::{CarriageId, CarriageKind, ItemKind, NpcId, StationKind, World};
+use sim::{CarriageId, CarriageKind, ItemKind, NpcId, Regard, StationKind, World};
 
+use crate::cabin::ChestWindow;
 use crate::camera::follow_target;
 use crate::player::Player;
-use crate::state::{FollowNpc, NpcSprite, PlayerInventory, Sim};
-use crate::stations::StationLayout;
+use crate::state::{FollowNpc, NpcSprite, Sim};
+use crate::stations::{CABIN_BED_WIDTH, CHEST_WIDTH, StationLayout};
 use crate::storage::{STORAGE_HEIGHT, has_storage, storage_range};
-use crate::train::{FLOOR_Y, TrainLayout, TrainLocation};
+use crate::train::{FLOOR_Y, TrainLayout, TrainLocation, floor_at};
 
 /// Quanto oltre il bordo di scaffale o bancone arriva il giocatore.
 const REACH: f32 = 6.0;
@@ -36,6 +43,7 @@ const FEEDBACK_SECS: f32 = 1.6;
 const STORAGE_PROMPT_Y: f32 = STORAGE_HEIGHT + 28.0;
 const COUNTER_PROMPT_Y: f32 = 34.0;
 const NPC_PROMPT_ABOVE: f32 = 12.0;
+const CHEST_PROMPT_Y: f32 = 26.0;
 /// Riquadro del suggerimento (pixel logici dello schermo).
 const PROMPT_BOX: Vec2 = Vec2::new(480.0, 40.0);
 const PROMPT_FONT: f32 = 15.0;
@@ -73,6 +81,10 @@ enum TargetKind {
         name: String,
         item: ItemKind,
     },
+    /// Il letto della cabina del giocatore.
+    Bed,
+    /// Il baule della cabina del giocatore.
+    Chest,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -134,21 +146,46 @@ fn market_items(world: &World, carriage: CarriageId) -> Vec<(ItemKind, u32)> {
     let mut items: Vec<(ItemKind, u32)> = ItemKind::ALL
         .into_iter()
         .filter(|&item| c.stock.count(item) >= 1)
-        .filter_map(|item| Some((item, world.price(carriage, item)?)))
+        .filter_map(|item| Some((item, world.player_price(carriage, item)?)))
         .collect();
     items.sort_by_key(|&(item, price)| (price, item));
     items
 }
 
-/// Cosa regalare a un NPC, se accetta qualcosa che il giocatore ha.
-fn gift_for(world: &World, id: NpcId, inventory: &PlayerInventory) -> Option<ItemKind> {
+/// Cosa regalare a un NPC, se accetta qualcosa che il giocatore ha (chi
+/// diffida del giocatore non accetta niente).
+fn gift_for(world: &World, id: NpcId) -> Option<ItemKind> {
     let npc = world.npc(id)?;
-    if !npc.is_awake() {
+    if !npc.is_awake() || npc.regard() == Regard::Wary {
         return None;
     }
+    let inventory = &world.player.inventory;
     GIFTS
         .into_iter()
         .find(|&item| inventory.count(item) > 0 && npc.accepts_gift(item))
+}
+
+/// Letto o baule della cabina, se il giocatore in `player` ci è accanto
+/// (il baule ha la precedenza).
+fn cabin_target(layout: &StationLayout, player: Vec2) -> Option<Target> {
+    let cabin = layout.cabin?;
+    let index = cabin.carriage.index();
+    let left = TrainLayout::carriage_left(index);
+    let local = player.x - left;
+    if floor_at(player.y) != cabin.floor || !(cabin.left..=cabin.right + REACH).contains(&local) {
+        return None;
+    }
+    let base = cabin.base_y();
+    if (local - cabin.chest_x).abs() <= CHEST_WIDTH / 2.0 + REACH {
+        return Some(Target {
+            kind: TargetKind::Chest,
+            anchor: Vec2::new(left + cabin.chest_x, base + CHEST_PROMPT_Y),
+        });
+    }
+    ((local - cabin.bed_x).abs() <= CABIN_BED_WIDTH / 2.0 + REACH).then(|| Target {
+        kind: TargetKind::Bed,
+        anchor: Vec2::new(left + cabin.bed_x, base + CHEST_PROMPT_Y),
+    })
 }
 
 /// Il bersaglio più adatto per il giocatore in `player` (centro del corpo).
@@ -158,24 +195,29 @@ fn find_target(
     world: &World,
     layout: &TrainLayout,
     stations: &StationLayout,
-    inventory: &PlayerInventory,
     player: Vec2,
     npcs: impl Iterator<Item = (NpcId, Vec2)>,
 ) -> Option<Target> {
     let TrainLocation::Carriage(index) = layout.location_at(player.x) else {
         return None;
     };
+    if let Some(target) = cabin_target(stations, player) {
+        return Some(target);
+    }
+    // Scorte e banconi sono al piano terra.
+    let ground = floor_at(player.y) == 0;
     let carriage = world.carriages.get(index)?;
     let id = carriage.id;
     let left = TrainLayout::carriage_left(index);
     let local = player.x - left;
 
     let (s0, s1) = storage_range();
-    let near_storage =
-        has_storage(&world.params, carriage.kind) && (s0 - REACH..=s1 + REACH).contains(&local);
+    let near_storage = ground
+        && has_storage(&world.params, carriage.kind)
+        && (s0 - REACH..=s1 + REACH).contains(&local);
     let storage_anchor = Vec2::new(left + (s0 + s1) / 2.0, FLOOR_Y + STORAGE_PROMPT_Y);
 
-    if carriage.kind == CarriageKind::Mercato {
+    if carriage.kind == CarriageKind::Mercato && ground {
         let counter = stations
             .carriages
             .get(index)
@@ -211,7 +253,10 @@ fn find_target(
     }
 
     // Niente da regalare: inutile cercare NPC.
-    if !GIFTS.iter().any(|&item| inventory.count(item) > 0) {
+    if !GIFTS
+        .iter()
+        .any(|&item| world.player.inventory.count(item) > 0)
+    {
         return None;
     }
     let mut near: Vec<(NpcId, Vec2)> = npcs
@@ -226,7 +271,7 @@ fn find_target(
         da.total_cmp(&db).then(a.0.cmp(&b.0))
     });
     near.into_iter().find_map(|(npc, pos)| {
-        let item = gift_for(world, npc, inventory)?;
+        let item = gift_for(world, npc)?;
         Some(Target {
             kind: TargetKind::Npc {
                 id: npc,
@@ -239,8 +284,20 @@ fn find_target(
 }
 
 /// Testo del suggerimento per un bersaglio.
-fn prompt_text(target: &TargetKind, choice: usize, tokens: u32) -> String {
+fn prompt_text(world: &World, target: &TargetKind, choice: usize) -> String {
+    let tokens = world.player.tokens;
     match target {
+        TargetKind::Bed => match world.params.is_long_sleep(world.clock.hour()) {
+            true => format!(
+                "E: dormi fino alle {:02}:00 (salva la partita)",
+                world.params.wake_hour
+            ),
+            false => format!(
+                "Il tuo letto (si dorme dalle {:02}:00)",
+                world.params.long_sleep_from_hour
+            ),
+        },
+        TargetKind::Chest => "E: apri il baule".to_string(),
         TargetKind::Storage { items, .. } if items.is_empty() => "Scorte vuote".to_string(),
         TargetKind::Storage { items, .. } => {
             let item = items[choice % items.len()];
@@ -278,23 +335,19 @@ fn capitalized(text: &str) -> String {
     }
 }
 
-/// Esegue l'interazione con `target`; restituisce l'esito da mostrare.
-fn perform(
-    world: &mut World,
-    inventory: &mut PlayerInventory,
-    target: &TargetKind,
-    choice: usize,
-) -> String {
-    match target {
+/// Esegue l'interazione con `target`; restituisce l'esito da mostrare
+/// (None: niente da dire, es. si apre il baule).
+fn perform(world: &mut World, target: &TargetKind, choice: usize) -> Option<String> {
+    let message = match target {
         TargetKind::Storage { items, .. } if items.is_empty() => "Le scorte sono vuote".to_string(),
         TargetKind::Storage { carriage, items } => {
             let item = items[choice % items.len()];
+            if world.player.inventory.room_for(item) == 0 {
+                return Some("L'inventario è pieno".to_string());
+            }
             match world.player_take(*carriage, item, 1) {
                 0 => "Non c'è più niente da prendere".to_string(),
-                n => {
-                    inventory.add(item, n);
-                    format!("Preso: {}", item.with_article())
-                }
+                _ => format!("Preso: {}", item.with_article()),
             }
         }
         TargetKind::Market { items, .. } if items.is_empty() => "Merce esaurita".to_string(),
@@ -302,27 +355,22 @@ fn perform(
             carriage, items, ..
         } => {
             let (item, _) = items[choice % items.len()];
-            match world.player_buy(*carriage, item, &mut inventory.tokens) {
-                Ok(price) => {
-                    inventory.add(item, 1);
-                    format!("Comprato {} per {price} gettoni", item.with_article())
-                }
+            match world.player_buy(*carriage, item) {
+                Ok(price) => format!("Comprato {} per {price} gettoni", item.with_article()),
                 Err(e) => capitalized(&e.to_string()),
             }
         }
-        TargetKind::Npc { id, name, item } => {
-            if inventory.count(*item) == 0 {
-                return format!("Non hai {}", item.with_article());
-            }
-            match world.player_give(*id, *item) {
-                Ok(()) => {
-                    inventory.remove_one(*item);
-                    format!("Hai dato {} a {name}", item.with_article())
-                }
-                Err(e) => format!("{name}: {e}"),
-            }
-        }
-    }
+        TargetKind::Npc { id, name, item } => match world.player_give(*id, *item) {
+            Ok(()) => format!("Hai dato {} a {name}", item.with_article()),
+            Err(e) => format!("{name}: {e}"),
+        },
+        TargetKind::Bed => match world.player_go_to_bed() {
+            Ok(wake) => format!("Buonanotte… (sveglia alle {:02}:00)", wake.hour()),
+            Err(e) => capitalized(&e.to_string()),
+        },
+        TargetKind::Chest => return None,
+    };
+    Some(message)
 }
 
 // --- Sistemi ----------------------------------------------------------------
@@ -371,7 +419,6 @@ fn update_target(
     follow: Res<FollowNpc>,
     layout: Res<TrainLayout>,
     stations: Res<StationLayout>,
-    inventory: Res<PlayerInventory>,
     player: Single<&Transform, With<Player>>,
     npcs: Query<(&NpcSprite, &Transform), Without<Player>>,
     mut state: ResMut<InteractionState>,
@@ -383,7 +430,6 @@ fn update_target(
                 &sim.world,
                 &layout,
                 &stations,
-                &inventory,
                 player.translation.truncate(),
                 npcs.iter()
                     .map(|(npc, transform)| (npc.0, transform.translation.truncate())),
@@ -399,7 +445,7 @@ fn update_target(
 fn interact(
     keys: Res<ButtonInput<KeyCode>>,
     mut sim: ResMut<Sim>,
-    mut inventory: ResMut<PlayerInventory>,
+    mut chest: ResMut<ChestWindow>,
     mut state: ResMut<InteractionState>,
 ) {
     if keys.just_pressed(KeyCode::KeyQ) {
@@ -411,18 +457,25 @@ fn interact(
     let Some(target) = state.target.clone() else {
         return;
     };
-    let message = perform(&mut sim.world, &mut inventory, &target.kind, state.choice);
-    state.feedback = Some((
-        message,
-        target.anchor,
-        Timer::from_seconds(FEEDBACK_SECS, TimerMode::Once),
-    ));
+    if sim.world.player.is_asleep() {
+        return;
+    }
+    if target.kind == TargetKind::Chest {
+        chest.open = !chest.open;
+    }
+    if let Some(message) = perform(&mut sim.world, &target.kind, state.choice) {
+        state.feedback = Some((
+            message,
+            target.anchor,
+            Timer::from_seconds(FEEDBACK_SECS, TimerMode::Once),
+        ));
+    }
 }
 
 /// Posiziona il suggerimento (o l'esito) sopra il bersaglio, in coordinate schermo.
 fn update_prompt(
     time: Res<Time>,
-    inventory: Res<PlayerInventory>,
+    sim: Res<Sim>,
     mut state: ResMut<InteractionState>,
     camera: Single<(&Camera, &Transform), With<Camera2d>>,
     root: Single<(&mut Node, &mut Visibility), With<PromptRoot>>,
@@ -435,11 +488,11 @@ fn update_prompt(
     }
     let shown = match (&state.feedback, &state.target) {
         (Some((message, anchor, _)), _) => Some((message.clone(), *anchor)),
-        (None, Some(target)) => Some((
-            prompt_text(&target.kind, state.choice, inventory.tokens),
+        (None, Some(target)) if !sim.world.player.is_asleep() => Some((
+            prompt_text(&sim.world, &target.kind, state.choice),
             target.anchor,
         )),
-        (None, None) => None,
+        (None, _) => None,
     };
 
     let (mut node, mut visibility) = root.into_inner();
@@ -502,28 +555,19 @@ mod tests {
         )
     }
 
-    fn target(
-        f: &Fixture,
-        inv: &PlayerInventory,
-        pos: Vec2,
-        npcs: &[(NpcId, Vec2)],
-    ) -> Option<Target> {
-        find_target(
-            &f.world,
-            &f.layout,
-            &f.stations,
-            inv,
-            pos,
-            npcs.iter().copied(),
-        )
+    fn target(f: &Fixture, pos: Vec2, npcs: &[(NpcId, Vec2)]) -> Option<Target> {
+        find_target(&f.world, &f.layout, &f.stations, pos, npcs.iter().copied())
+    }
+
+    fn count(f: &Fixture, item: ItemKind) -> u32 {
+        f.world.player.inventory.count(item)
     }
 
     #[test]
     fn takes_items_from_storage() {
         let mut f = fixture();
-        let mut inv = PlayerInventory::default();
         let officina = first(&f.world, CarriageKind::Officina);
-        let t = target(&f, &inv, at_storage(officina), &[]).expect("magazzino");
+        let t = target(&f, at_storage(officina), &[]).expect("magazzino");
         // Officina all'avvio: rottami, attrezzi, vestiti, metallo, tessuto e
         // le comodità per i Dormitori, in ordine di catalogo.
         let TargetKind::Storage { carriage, items } = &t.kind else {
@@ -533,12 +577,12 @@ mod tests {
         assert_eq!(items[0], ItemKind::Rottame);
         assert!(items.contains(&ItemKind::Tessuto) && items.contains(&ItemKind::Coperta));
         assert_eq!(
-            prompt_text(&t.kind, 0, 0),
+            prompt_text(&f.world, &t.kind, 0),
             "E: prendi un pezzo di rottame   Q: altro"
         );
-        let message = perform(&mut f.world, &mut inv, &t.kind, 0);
+        let message = perform(&mut f.world, &t.kind, 0).unwrap();
         assert!(message.starts_with("Preso"), "{message}");
-        assert_eq!(inv.count(ItemKind::Rottame), 1);
+        assert_eq!(count(&f, ItemKind::Rottame), 1);
         assert_eq!(
             f.world.carriages[officina.index()]
                 .stock
@@ -547,24 +591,28 @@ mod tests {
         );
         // Q: the next item.
         let tessuto = items.iter().position(|&i| i == ItemKind::Tessuto).unwrap();
-        perform(&mut f.world, &mut inv, &t.kind, tessuto);
-        assert_eq!(inv.count(ItemKind::Tessuto), 1);
+        perform(&mut f.world, &t.kind, tessuto);
+        assert_eq!(count(&f, ItemKind::Tessuto), 1);
+        // Inventario pieno: non si prende niente.
+        f.world.player.inventory.add(ItemKind::Attrezzo, 99);
+        f.world.player.inventory.add(ItemKind::Rottame, 9);
+        let full = perform(&mut f.world, &t.kind, 0).unwrap();
+        assert_eq!(full, "L'inventario è pieno");
 
         // Lontano dal magazzino (e senza niente da regalare): nessun bersaglio.
+        f.world.player.inventory = sim::SlotInventory::new(sim::INVENTORY_SLOTS);
         let center = Vec2::new(TrainLayout::carriage_center_x(officina.index()), 12.0);
-        let empty = PlayerInventory::default();
-        assert_eq!(target(&f, &empty, center, &[]), None);
+        assert_eq!(target(&f, center, &[]), None);
         // Nei Dormitori non c'è magazzino.
         let dorm = first(&f.world, CarriageKind::Dormitorio);
-        assert_eq!(target(&f, &empty, at_storage(dorm), &[]), None);
+        assert_eq!(target(&f, at_storage(dorm), &[]), None);
     }
 
     #[test]
     fn buys_at_the_market_only_with_a_merchant() {
         let mut f = fixture();
-        let mut inv = PlayerInventory::default();
         let market = first(&f.world, CarriageKind::Mercato);
-        let t = target(&f, &inv, at_storage(market), &[]).expect("mercato");
+        let t = target(&f, at_storage(market), &[]).expect("mercato");
         let TargetKind::Market {
             items, merchant, ..
         } = &t.kind
@@ -574,12 +622,15 @@ mod tests {
         assert!(!merchant);
         // Dal più economico: i vestiti costano meno degli attrezzi.
         assert_eq!(items[0].0, ItemKind::Vestito);
-        assert_eq!(prompt_text(&t.kind, 0, 50), "Nessun mercante al bancone");
         assert_eq!(
-            perform(&mut f.world, &mut inv, &t.kind, 0),
+            prompt_text(&f.world, &t.kind, 0),
             "Nessun mercante al bancone"
         );
-        assert_eq!(inv.tokens, crate::state::PLAYER_START_TOKENS);
+        assert_eq!(
+            perform(&mut f.world, &t.kind, 0).unwrap(),
+            "Nessun mercante al bancone"
+        );
+        assert_eq!(f.world.player.tokens, sim::PLAYER_START_TOKENS);
 
         // Un mercante al primo bancone.
         let counter = f.world.carriages[market.index()]
@@ -597,29 +648,28 @@ mod tests {
 
         let spot = f.stations.spot(market, counter).unwrap();
         let pos = Vec2::new(TrainLayout::carriage_left(market.index()) + spot.x, 12.0);
-        let t = target(&f, &inv, pos, &[]).expect("bancone");
-        let price = f.world.price(market, ItemKind::Attrezzo).unwrap();
+        let t = target(&f, pos, &[]).expect("bancone");
+        let price = f.world.player_price(market, ItemKind::Attrezzo).unwrap();
         // Q: il secondo oggetto è l'attrezzo.
+        f.world.player.tokens = 50;
         assert_eq!(
-            prompt_text(&t.kind, 1, 50),
+            prompt_text(&f.world, &t.kind, 1),
             format!("E: compra un attrezzo ({price} gettoni, ne hai 50)   Q: altro")
         );
-        // Un attrezzo costa più dei gettoni iniziali del giocatore.
-        inv.tokens = 100;
-        perform(&mut f.world, &mut inv, &t.kind, 1);
-        assert_eq!(inv.count(ItemKind::Attrezzo), 1);
-        assert_eq!(inv.tokens, 100 - price);
+        f.world.player.tokens = 100;
+        perform(&mut f.world, &t.kind, 1);
+        assert_eq!(count(&f, ItemKind::Attrezzo), 1);
+        assert_eq!(f.world.player.tokens, 100 - price);
         // Troppo povero per un altro attrezzo.
-        inv.tokens = 1;
-        let message = perform(&mut f.world, &mut inv, &t.kind, 1);
+        f.world.player.tokens = 1;
+        let message = perform(&mut f.world, &t.kind, 1).unwrap();
         assert!(message.starts_with("Servono"), "{message}");
-        assert_eq!(inv.count(ItemKind::Attrezzo), 1);
+        assert_eq!(count(&f, ItemKind::Attrezzo), 1);
     }
 
     #[test]
     fn gives_food_to_a_hungry_npc_nearby() {
         let mut f = fixture();
-        let mut inv = PlayerInventory::default();
         let dorm = first(&f.world, CarriageKind::Dormitorio);
         let pos = Vec2::new(TrainLayout::carriage_center_x(dorm.index()), 12.0);
         let npc = f.world.npcs[0].id;
@@ -627,25 +677,58 @@ mod tests {
         f.world.npcs[0].inventory.clothes = Some(0.5);
         let npcs = [(npc, pos + Vec2::new(4.0, -4.0))];
         // Senza niente da dare, niente bersaglio.
-        assert_eq!(target(&f, &inv, pos, &npcs), None);
+        assert_eq!(target(&f, pos, &npcs), None);
 
-        inv.add(ItemKind::Razione, 2);
-        let t = target(&f, &inv, pos, &npcs).expect("npc");
+        f.world.player.inventory.add(ItemKind::Razione, 2);
+        let t = target(&f, pos, &npcs).expect("npc");
         let TargetKind::Npc { id, item, .. } = &t.kind else {
             panic!("{t:?}");
         };
         assert_eq!((*id, *item), (npc, ItemKind::Razione));
-        let message = perform(&mut f.world, &mut inv, &t.kind, 0);
+        let message = perform(&mut f.world, &t.kind, 0).unwrap();
         assert!(message.starts_with("Hai dato una razione"), "{message}");
-        assert_eq!(inv.count(ItemKind::Razione), 1);
+        assert_eq!(count(&f, ItemKind::Razione), 1);
         assert!(f.world.npc(npc).unwrap().needs.hunger > 0.7);
 
         // Sazio: non accetta altro cibo.
         f.world.npcs[0].needs.hunger = 0.95;
-        assert_eq!(target(&f, &inv, pos, &npcs), None);
+        assert_eq!(target(&f, pos, &npcs), None);
         // Troppo lontano.
         f.world.npcs[0].needs.hunger = 0.2;
         let far = [(npc, pos + Vec2::new(30.0, 0.0))];
-        assert_eq!(target(&f, &inv, pos, &far), None);
+        assert_eq!(target(&f, pos, &far), None);
+        // Chi diffida non accetta niente.
+        f.world.npcs[0].player = Some(sim::PlayerTie {
+            affinity: -0.6,
+            ..sim::PlayerTie::default()
+        });
+        assert_eq!(target(&f, pos, &npcs), None);
+    }
+
+    #[test]
+    fn the_cabin_has_a_bed_to_sleep_in_and_a_chest() {
+        let mut f = fixture();
+        let cabin = f.stations.cabin.expect("cabina");
+        let left = TrainLayout::carriage_left(cabin.carriage.index());
+        let y = cabin.base_y() + 12.0;
+        let chest = target(&f, Vec2::new(left + cabin.chest_x, y), &[]).expect("baule");
+        assert_eq!(chest.kind, TargetKind::Chest);
+        assert_eq!(perform(&mut f.world, &chest.kind, 0), None);
+        let bed = target(&f, Vec2::new(left + cabin.bed_x, y), &[]).expect("letto");
+        assert_eq!(bed.kind, TargetKind::Bed);
+        // Alle 06:00 è presto; alle 21:00 si dorme fino al mattino.
+        assert!(prompt_text(&f.world, &bed.kind, 0).contains("dalle 20:00"));
+        let early = perform(&mut f.world, &bed.kind, 0).unwrap();
+        assert!(early.contains("presto"), "{early}");
+        f.world.clock = sim::GameTime::from_dhm(1, 21, 0);
+        let night = perform(&mut f.world, &bed.kind, 0).unwrap();
+        assert!(night.contains("06:00"), "{night}");
+        assert!(f.world.player.is_asleep());
+        // Al piano di sotto, sotto la cabina, niente.
+        let below = Vec2::new(left + cabin.bed_x, FLOOR_Y + 12.0);
+        assert_ne!(
+            target(&f, below, &[]).map(|t| t.kind),
+            Some(TargetKind::Bed)
+        );
     }
 }

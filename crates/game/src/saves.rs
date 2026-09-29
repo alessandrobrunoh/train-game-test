@@ -12,8 +12,8 @@
 //!
 //! Tasti, finestra e autosalvataggi accodano comandi in [`SaveQueue`], eseguiti
 //! all'inizio del frame successivo (`PreUpdate`, [`WorldSwapSet`]). Caricare o
-//! creare una partita sostituisce `Sim`, `PlayerInventory`, la posizione del
-//! giocatore, `SimClock` (in pausa dopo un caricamento) e `RunInfo`, azzera
+//! creare una partita sostituisce `Sim` (con il giocatore: nome, gettoni,
+//! inventario, cabina), la posizione fisica del giocatore, `SimClock` (in pausa dopo un caricamento) e `RunInfo`, azzera
 //! selezione e "Segui" e invia `WorldReplaced`: i moduli che tengono dati
 //! derivati dal mondo li ricostruiscono in [`WorldRebuildSet`], subito dopo e
 //! nello stesso frame (treno, postazioni, magazzini, sprite, grafici, notifiche).
@@ -36,9 +36,7 @@ use crate::save_file::{
     slot_path,
 };
 use crate::sim_bridge::{SIM_CARRIAGES, SIM_NPCS, SIM_SEED, SimTickSet};
-use crate::state::{
-    FollowNpc, PlayerInventory, RunInfo, SelectedNpc, Sim, SimClock, WorldReplaced,
-};
+use crate::state::{FollowNpc, RunInfo, SelectedNpc, Sim, SimClock, WorldReplaced};
 use crate::train::TrainLayout;
 use crate::ui::PointerCheck;
 
@@ -141,6 +139,8 @@ pub enum SaveCommand {
         seed: u64,
         carriages: usize,
         npcs: usize,
+        /// Nome del giocatore.
+        name: String,
     },
     DeleteSave(PathBuf),
     DeleteRun(PathBuf),
@@ -202,6 +202,8 @@ pub(crate) struct SavesWindow {
     seed: u64,
     carriages: usize,
     npcs: usize,
+    /// Nome del giocatore della nuova partita.
+    player_name: String,
     /// Eliminazione in attesa di conferma (file o cartella).
     confirm: Option<PathBuf>,
     listing: Vec<RunEntry>,
@@ -225,6 +227,7 @@ impl Default for SavesWindow {
             seed: SIM_SEED,
             carriages: SIM_CARRIAGES,
             npcs: SIM_NPCS,
+            player_name: sim::DEFAULT_PLAYER_NAME.to_string(),
             confirm: None,
             listing: Vec::new(),
             dirty: true,
@@ -238,8 +241,8 @@ impl Default for SavesWindow {
 pub struct LoadedGame {
     pub world: World,
     pub brain: UtilityBrain,
+    /// Posizione fisica del giocatore (il resto è in `world.player`).
     pub player: Vec2,
-    pub inventory: PlayerInventory,
     pub clock: SimClock,
     pub run: RunInfo,
 }
@@ -252,11 +255,6 @@ impl LoadedGame {
             world: body.world,
             brain: body.brain,
             player: Vec2::from_array(body.player),
-            inventory: PlayerInventory {
-                tokens: body.tokens,
-                items: body.items,
-                learnt_recipes: body.learnt_recipes,
-            },
             clock: SimClock {
                 paused: true,
                 minutes_per_second: body.minutes_per_second,
@@ -266,15 +264,17 @@ impl LoadedGame {
         }
     }
 
-    /// Nuova partita (seme, carrozze e persone entro i limiti).
-    pub fn new_game(seed: u64, carriages: usize, npcs: usize, run: RunInfo) -> Self {
+    /// Nuova partita (seme, carrozze e persone entro i limiti) con il
+    /// giocatore chiamato `name`.
+    pub fn new_game(seed: u64, carriages: usize, npcs: usize, name: &str, run: RunInfo) -> Self {
         let carriages = carriages.clamp(1, MAX_CARRIAGES);
         let npcs = npcs.clamp(1, MAX_NPCS);
+        let mut world = World::generate(seed, carriages, npcs);
+        world.set_player_name(name);
         Self {
-            world: World::generate(seed, carriages, npcs),
+            world,
             brain: UtilityBrain::new(seed),
             player: start_position(),
-            inventory: PlayerInventory::default(),
             clock: SimClock::default(),
             run,
         }
@@ -287,7 +287,6 @@ pub fn encode_game(
     slot: &str,
     sim: &Sim,
     player: Vec2,
-    inventory: &PlayerInventory,
     clock: &SimClock,
 ) -> Result<EncodedSave, save_file::SaveError> {
     let header = SaveHeader::of(run_id, slot, now_ms(), &sim.world);
@@ -295,9 +294,6 @@ pub fn encode_game(
         world: &sim.world,
         brain: sim.brain.fallback(),
         player: player.to_array(),
-        tokens: inventory.tokens,
-        items: inventory.items,
-        learnt_recipes: &inventory.learnt_recipes,
         minutes_per_second: clock.minutes_per_second,
         paused: clock.paused,
     };
@@ -353,7 +349,6 @@ fn autosave(sim: Res<Sim>, mut auto: ResMut<Autosave>, mut queue: ResMut<SaveQue
 #[derive(SystemParam)]
 struct GameAccess<'w, 's> {
     sim: ResMut<'w, Sim>,
-    inventory: ResMut<'w, PlayerInventory>,
     clock: ResMut<'w, SimClock>,
     run: ResMut<'w, RunInfo>,
     selected: ResMut<'w, SelectedNpc>,
@@ -379,7 +374,6 @@ impl GameAccess<'_, '_> {
         self.sim.world = game.world;
         // Tiene la modalità scelta (e il modello caricato), dimentica il resto.
         self.sim.brain.replace_fallback(game.brain);
-        *self.inventory = game.inventory;
         *self.clock = game.clock;
         *self.run = game.run;
         self.selected.0 = None;
@@ -441,9 +435,10 @@ fn process_commands(
                 seed,
                 carriages,
                 npcs,
+                name,
             } => {
                 let run = new_run_info(&config.data_dir, seed);
-                let loaded = LoadedGame::new_game(seed, carriages, npcs, run);
+                let loaded = LoadedGame::new_game(seed, carriages, npcs, &name, run);
                 let (c, n) = (loaded.world.carriages.len(), loaded.world.npcs.len());
                 game.replace(loaded);
                 notice.show(
@@ -482,14 +477,7 @@ fn start_save(
 ) {
     let started = Instant::now();
     let player = game.player_position();
-    let encoded = encode_game(
-        &game.run.run_id,
-        &slot,
-        &game.sim,
-        player,
-        &game.inventory,
-        &game.clock,
-    );
+    let encoded = encode_game(&game.run.run_id, &slot, &game.sim, player, &game.clock);
     let encoded = match encoded {
         Ok(encoded) => encoded,
         Err(e) => {
@@ -852,6 +840,13 @@ fn new_game(ui: &mut egui::Ui, window: &mut SavesWindow, queue: &mut SaveQueue) 
         .num_columns(2)
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
+            ui.label("Il tuo nome");
+            ui.add(
+                egui::TextEdit::singleline(&mut window.player_name)
+                    .desired_width(160.0)
+                    .char_limit(sim::MAX_PLAYER_NAME_CHARS),
+            );
+            ui.end_row();
             ui.label("Seme");
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut window.seed).speed(1.0));
@@ -877,6 +872,7 @@ fn new_game(ui: &mut egui::Ui, window: &mut SavesWindow, queue: &mut SaveQueue) 
                 seed: window.seed,
                 carriages: window.carriages,
                 npcs: window.npcs,
+                name: sim::clean_player_name(&window.player_name),
             });
         }
         ui.weak("I progressi non salvati della partita in corso andranno persi.");
@@ -906,16 +902,9 @@ mod tests {
 
     fn save_bytes(sim: &Sim, slot: &str) -> Vec<u8> {
         let clock = SimClock::default();
-        encode_game(
-            "seed3-1",
-            slot,
-            sim,
-            Vec2::new(100.0, 12.0),
-            &PlayerInventory::default(),
-            &clock,
-        )
-        .unwrap()
-        .finish()
+        encode_game("seed3-1", slot, sim, Vec2::new(100.0, 12.0), &clock)
+            .unwrap()
+            .finish()
     }
 
     #[test]
@@ -933,7 +922,7 @@ mod tests {
         let mut loaded = LoadedGame::from_save(save_file::decode(&bytes).unwrap(), run);
         assert!(loaded.clock.paused);
         assert_eq!(loaded.player, Vec2::new(100.0, 12.0));
-        assert_eq!(loaded.inventory.tokens, PlayerInventory::default().tokens);
+        assert_eq!(loaded.world.player, sim.world.player);
 
         // Si prosegue su entrambi (a cavallo di una mezzanotte, con nascite e morti).
         let ticks = 2 * MINUTES_PER_DAY + 17;
@@ -961,15 +950,7 @@ mod tests {
         let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
 
         let t = Instant::now();
-        let encoded = encode_game(
-            "x",
-            "y",
-            &sim,
-            Vec2::ZERO,
-            &PlayerInventory::default(),
-            &SimClock::default(),
-        )
-        .unwrap();
+        let encoded = encode_game("x", "y", &sim, Vec2::ZERO, &SimClock::default()).unwrap();
         let encode_ms = ms(t);
         let raw = encoded.raw_len();
         let t = Instant::now();
@@ -1051,6 +1032,7 @@ mod tests {
                 seed: 9,
                 carriages: 7,
                 npcs: 60,
+                name: "Ada".into(),
             },
         );
         let small_run = app.world().resource::<RunInfo>().clone();
@@ -1059,6 +1041,7 @@ mod tests {
         assert_eq!(app.world().resource::<TrainLayout>().len(), 7);
         assert_eq!(app.world().resource::<StationLayout>().carriages.len(), 7);
         assert_eq!(carriage_entities(&mut app), 7);
+        assert_eq!(app.world().resource::<Sim>().world.player.name, "Ada");
 
         // Si va avanti un po' e si salva.
         {
@@ -1084,6 +1067,7 @@ mod tests {
                 seed: 1,
                 carriages: 25,
                 npcs: 100,
+                name: "Bea".into(),
             },
         );
         assert_eq!(carriage_entities(&mut app), 25);
@@ -1093,6 +1077,7 @@ mod tests {
         assert_eq!(app.world().resource::<TrainLayout>().len(), 7);
         assert_eq!(app.world().resource::<StationLayout>().carriages.len(), 7);
         assert_eq!(world_bytes(&app.world().resource::<Sim>().world), saved);
+        assert_eq!(app.world().resource::<Sim>().world.player.name, "Ada");
         assert_eq!(app.world().resource::<RunInfo>().dir, small_run.dir);
         assert!(app.world().resource::<SimClock>().paused);
 
@@ -1103,6 +1088,7 @@ mod tests {
                 seed: 2,
                 carriages: 3,
                 npcs: 10,
+                name: String::new(),
             },
         );
         run_command(&mut app, SaveCommand::QuickLoad);

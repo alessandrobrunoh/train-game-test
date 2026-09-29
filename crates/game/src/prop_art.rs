@@ -36,15 +36,26 @@ pub const VISE_TOP: f32 = 18.0;
 
 // --- Letti --------------------------------------------------------------------
 
-/// Colori delle coperte (per varietà tra un letto e l'altro).
-const BLANKETS: [Rgba; 5] = [
+/// Colori delle coperte (per varietà tra un letto e l'altro); l'ultima,
+/// gialla come la sciarpa, è quella del letto del giocatore.
+const BLANKETS: [Rgba; 6] = [
     rgb(92, 104, 64),
     rgb(140, 56, 52),
     rgb(64, 84, 132),
     rgb(120, 92, 60),
     rgb(98, 72, 118),
+    rgb(214, 170, 48),
 ];
-pub const BLANKET_VARIANTS: u8 = BLANKETS.len() as u8;
+/// Coperte delle cuccette degli NPC.
+pub const BLANKET_VARIANTS: u8 = 5;
+/// Coperta del letto del giocatore.
+pub const PLAYER_BLANKET: u8 = 5;
+
+/// Baule della cabina e paravento che la separa dal dormitorio.
+pub const CHEST_H: i32 = 11;
+pub const SCREEN_W: i32 = 5;
+pub const SCREEN_H: i32 = 46;
+pub const RUG_H: i32 = 2;
 
 /// Cuccetta larga `w`: telaio, materasso, cuscino, coperta e testiere. I
 /// letti dei piani alti (`upper`) hanno i montanti e una scaletta che
@@ -112,6 +123,60 @@ pub fn bed_plate(number: u16) -> Canvas {
     rect(&mut c, 0, 0, w, 1, rgb(120, 92, 44));
     rect(&mut c, 0, h - 1, w, 1, rgb(214, 184, 110));
     c.overlay(&digits, 1, 1);
+    c
+}
+
+// --- Cabina del giocatore --------------------------------------------------------
+
+/// Baule di legno con le cerniere e la serratura d'ottone, largo `w`.
+pub fn chest(w: i32) -> Canvas {
+    let mut c = Canvas::new(w as u32, CHEST_H as u32);
+    let wood = rgb(128, 84, 46);
+    let band = rgb(70, 52, 40);
+    let brass = rgb(214, 176, 84);
+    // Cassa e coperchio bombato.
+    rect(&mut c, 0, 0, w, 7, wood);
+    rect(&mut c, 0, 0, w, 1, shade(wood, 0.6));
+    rect(&mut c, 1, 7, w - 2, 3, shade(wood, 1.15));
+    rect(&mut c, 2, 10, w - 4, 1, shade(wood, 1.3));
+    rect(&mut c, 0, 6, w, 1, shade(wood, 0.75));
+    // Fasce di ferro.
+    for x in [2, w - 3] {
+        rect(&mut c, x, 0, 1, 10, band);
+    }
+    // Serratura.
+    let cx = w / 2;
+    rect(&mut c, cx - 1, 4, 3, 4, brass);
+    px(&mut c, cx, 5, shade(brass, 0.5));
+    c
+}
+
+/// Paravento di legno e tela che chiude la cabina verso il dormitorio.
+pub fn screen() -> Canvas {
+    let mut c = Canvas::new(SCREEN_W as u32, SCREEN_H as u32);
+    let wood = rgb(110, 76, 48);
+    let cloth = rgb(188, 170, 128);
+    rect(&mut c, 0, 0, 1, SCREEN_H, wood);
+    rect(&mut c, SCREEN_W - 1, 0, 1, SCREEN_H, wood);
+    rect(&mut c, 1, 2, SCREEN_W - 2, SCREEN_H - 4, cloth);
+    rect(&mut c, 0, SCREEN_H - 2, SCREEN_W, 2, shade(wood, 1.2));
+    rect(&mut c, 0, 0, SCREEN_W, 2, shade(wood, 0.8));
+    for y in (6..SCREEN_H - 4).step_by(8) {
+        rect(&mut c, 1, y, SCREEN_W - 2, 1, shade(cloth, 0.85));
+    }
+    c
+}
+
+/// Tappeto a righe sul pavimento della cabina, largo `w`.
+pub fn rug(w: i32) -> Canvas {
+    let mut c = Canvas::new(w as u32, RUG_H as u32);
+    let red = rgb(150, 58, 52);
+    rect(&mut c, 0, 0, w, RUG_H, red);
+    for x in (1..w - 1).step_by(3) {
+        px(&mut c, x, 1, rgb(214, 170, 48));
+    }
+    px(&mut c, 0, 1, shade(red, 0.7));
+    px(&mut c, w - 1, 1, shade(red, 0.7));
     c
 }
 
