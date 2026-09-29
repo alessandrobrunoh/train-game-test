@@ -26,7 +26,9 @@ pub struct SimParams {
     pub meal_restore: f32,
     pub sleep_energy_gain: f32,
     pub socialize_gain: f32,
-    /// Social boost given to the partner when a conversation ends.
+    /// Social boost given at the end of a chat to a partner who did not
+    /// chat full time: busy (one-sided chat) or eating meanwhile. In a
+    /// two-sided conversation both gain `socialize_gain` per minute instead.
     pub socialize_partner_bonus: f32,
     /// Eating together at a Mensa is a bit social too.
     pub eat_social_gain: f32,
@@ -165,9 +167,12 @@ pub struct SimParams {
     /// The defaults put the median age at death around 78.
     pub mortality_base: f32,
     pub mortality_growth: f32,
-    /// Affinity gained by both NPCs when a chat ends...
+    /// Affinity gained by both NPCs when a chat ends (scaled by the tone of
+    /// a conversation: more if friendly, less if neutral)...
     pub affinity_per_chat: f32,
-    /// ...unless they quarrel (this chance), losing as much instead.
+    /// ...unless they quarrel (about this chance, higher between grumpy or
+    /// ill-matched people and lower between friends: a Tense
+    /// conversation), losing about as much instead.
     pub quarrel_chance: f32,
     /// Friend ties fade towards 0 by this much every day (family ties don't).
     pub affinity_decay_per_day: f32,
@@ -250,6 +255,26 @@ pub struct SimParams {
     pub protest_concession_days: u64,
     /// Resolved deliberations kept in [`crate::World::recent_deliberations`].
     pub recent_deliberations_kept: usize,
+
+    // --- Conversations (see [`crate::dialogue`]) ---
+    /// A chat with a busy partner (working, asleep, away, already talking)
+    /// is one-sided and lasts at most this long.
+    pub one_sided_chat_minutes: u64,
+    /// A partner who is eating keeps eating and talks along if its meal
+    /// lasts at least this much longer; the chat then ends with the meal.
+    pub conversation_min_minutes: u64,
+    /// Below this affinity for the one who approaches, a partner turns away.
+    pub conversation_refuse_affinity: f32,
+    /// How much a piece of gossip moves the listener's opinion of whom it is
+    /// about (a caught thief: minus this; a generous helper: plus half).
+    pub gossip_affinity: f32,
+    /// People talk about events of the last this many days.
+    pub news_days: u64,
+    /// Finished conversations kept in [`crate::World::recent_conversations`].
+    pub recent_conversations_kept: usize,
+    /// At most one notable conversation (quarrel, gossip about a theft)
+    /// logged as an event every this many hours, per kind.
+    pub conversation_log_hours: u64,
 
     // --- Event log ---
     /// Most events kept in [`crate::World::events`]: beyond it the oldest are
@@ -382,6 +407,14 @@ impl Default for SimParams {
             protest_birth_bonus: 0.02,
             protest_concession_days: 24,
             recent_deliberations_kept: 64,
+
+            one_sided_chat_minutes: 10,
+            conversation_min_minutes: 8,
+            conversation_refuse_affinity: -0.4,
+            gossip_affinity: 0.05,
+            news_days: 3,
+            recent_conversations_kept: 64,
+            conversation_log_hours: 6,
 
             max_events: default_max_events(),
         }

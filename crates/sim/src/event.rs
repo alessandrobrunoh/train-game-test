@@ -5,6 +5,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::deliberation::{Choice, DeliberationId, DeliberationKind, Grievance, Resolver};
+use crate::dialogue::{ConversationId, Tone, Topic};
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
 use crate::npc::{Job, Sex};
@@ -181,6 +182,24 @@ pub enum EventKind {
     /// prices), now `level_percent`% of the base, up if `raised`. Logged when it moved
     /// by 10 points or more, at most every `SimParams::economy_log_days`.
     PayChanged { level_percent: u32, raised: bool },
+    /// A notable conversation started: a quarrel (`tone` Tense) or gossip
+    /// about a theft. Logged at most every
+    /// `SimParams::conversation_log_hours` per kind (see [`crate::Conversation`]).
+    Chat {
+        id: ConversationId,
+        /// Who started it...
+        npc: NpcId,
+        name: String,
+        /// ...with whom.
+        other: NpcId,
+        other_name: String,
+        topic: Topic,
+        tone: Tone,
+        /// Whom they talk about, if anyone.
+        about: Option<NpcId>,
+        /// The line that sums it up.
+        line: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -448,6 +467,22 @@ impl fmt::Display for Event {
                 "L'amministrazione {} paghe e prezzi: ora al {level_percent}% dei valori base",
                 if *raised { "alza" } else { "abbassa" }
             ),
+            EventKind::Chat {
+                name,
+                other_name,
+                topic,
+                tone,
+                line,
+                ..
+            } => match (tone, topic) {
+                (Tone::Tense, _) => write!(f, "{name} e {other_name} litigano: «{line}»"),
+                (_, Topic::Gossip) => write!(f, "{name} spettegola con {other_name}: «{line}»"),
+                _ => write!(
+                    f,
+                    "{name} e {other_name} parlano di {}: «{line}»",
+                    topic.name()
+                ),
+            },
         }
     }
 }

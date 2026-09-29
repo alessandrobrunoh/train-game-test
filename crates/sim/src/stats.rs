@@ -5,6 +5,7 @@ use std::fmt;
 use crate::action::ActionKind;
 use crate::carriage::CarriageKind;
 use crate::deliberation::DeliberationCounters;
+use crate::dialogue::{ConversationCounters, Tone};
 use crate::item::{ItemKind, Stock};
 use crate::npc::{LifeStage, Needs};
 use crate::time::GameTime;
@@ -61,6 +62,11 @@ pub struct Stats {
     /// Deliberations since the world was generated: opened and resolved per
     /// kind, by rules or brain, per choice, thefts, help, protests.
     pub deliberations: DeliberationCounters,
+    /// Conversations in progress (see [`World::conversations`]).
+    pub conversations_open: usize,
+    /// Chats and conversations since the world was generated: two-sided
+    /// share, topics, tones.
+    pub conversations: ConversationCounters,
 }
 
 impl Stats {
@@ -138,6 +144,8 @@ impl Stats {
             deaths_total: world.life.deaths_total,
             deliberations_open: world.open_deliberations().len(),
             deliberations: world.deliberation_counters.clone(),
+            conversations_open: world.conversations().len(),
+            conversations: world.conversation_counters.clone(),
         }
     }
 
@@ -200,6 +208,15 @@ impl fmt::Display for Stats {
             self.avg_age,
             self.births_total,
             self.deaths_total,
+        )?;
+        let c = &self.conversations;
+        write!(
+            f,
+            " conversazioni {} in corso, {} in tutto ({:.0}% a due, {:.0}% tese) |",
+            self.conversations_open,
+            c.conversations,
+            100.0 * c.two_sided_share(),
+            100.0 * c.by_tone[Tone::Tense.index()] as f32 / c.conversations.max(1) as f32,
         )?;
         for kind in ActionKind::ALL {
             write!(f, " {} {}", kind.name(), self.count(kind))?;

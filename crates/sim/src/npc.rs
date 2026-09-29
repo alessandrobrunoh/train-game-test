@@ -10,6 +10,7 @@ use crate::carriage::{CarriageKind, StationKind};
 use crate::defs::ItemUse;
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
+use crate::personality::Personality;
 use crate::time::{GameTime, MINUTES_PER_DAY};
 
 /// Needs in `0..=1`, where 1 means fully satisfied.
@@ -211,6 +212,11 @@ pub struct Npc {
     /// the id (see [`crate::SimParams::meal_shift`]).
     #[serde(default)]
     pub meal_shift: Option<u8>,
+    /// Personality tags (2–3, drawn at birth, see [`Personality`]): they
+    /// give the tone of conversations. None (saves from before
+    /// personalities): derived from the id, see [`Npc::personality`].
+    #[serde(default)]
+    pub personality: Option<Personality>,
 }
 
 /// Character traits in `0..=1`, drawn at birth and never changed. They weigh
@@ -278,6 +284,12 @@ impl Npc {
     /// Life stage from the cached [`Npc::age`].
     pub fn stage(&self) -> LifeStage {
         LifeStage::of_age(self.age)
+    }
+
+    /// Personality tags (derived from the id for NPCs saved without them).
+    pub fn personality(&self) -> Personality {
+        self.personality
+            .unwrap_or_else(|| Personality::from_id(self.id, self.traits))
     }
 
     /// The surname: everything after the first space of `name`.

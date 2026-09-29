@@ -13,7 +13,10 @@ use crate::item::ItemKind;
 /// - `Work`: produces/moves items and pays a wage when it completes.
 /// - `Buy`: at a Mercato, pays the price and takes one unit at start (no station).
 /// - `Travel`: moves the NPC to `to` when it completes.
-/// - `Socialize`: restores social while running; the partner gets a bonus at the end.
+/// - `Socialize`: restores social while running. A free partner switches to
+///   `Socialize` back with the same end and a [`crate::Conversation`] opens
+///   (a partner who is eating talks along and gets a bonus at the end); a
+///   busy one gets a short one-sided chat and the bonus.
 /// - `Idle`: nothing, short filler.
 /// - `Wait`: queues for a seat in a Mensa whose tables are full ("aspetta un
 ///   posto in mensa"): seated (`Eat`) as soon as one frees up, first come

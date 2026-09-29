@@ -56,7 +56,7 @@ fn pair(a: NpcId, b: NpcId) -> Cooldown {
 }
 
 /// What `other` is to someone, as an Italian noun ("madre", "amico").
-fn relation_word(kind: RelationKind, other: Sex) -> &'static str {
+pub(super) fn relation_word(kind: RelationKind, other: Sex) -> &'static str {
     match kind {
         RelationKind::Partner => other.pick("compagna", "compagno"),
         RelationKind::Parent => other.pick("madre", "padre"),

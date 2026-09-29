@@ -42,6 +42,12 @@
 //! Italian question with 2–4 options; a brain may answer them, otherwise a
 //! built-in rule decides. See [`World::open_deliberations`].
 //!
+//! Conversations ([`dialogue`]): a chat (`Action::Socialize`) with someone
+//! free nearby becomes a two-sided [`Conversation`] with a topic, a tone set
+//! by the pair's tie and [`Personality`], and short Italian lines for speech
+//! bubbles; at the end it changes their affinity and spreads gossip. See
+//! [`World::conversations`].
+//!
 //! 1 tick = 1 game minute. All randomness comes from seeded ChaCha RNGs, so a
 //! world is fully deterministic given its seed and the brain's seed.
 
@@ -50,12 +56,14 @@ pub mod brain;
 pub mod carriage;
 pub mod defs;
 pub mod deliberation;
+pub mod dialogue;
 pub mod event;
 pub mod ids;
 pub mod item;
 mod names;
 pub mod npc;
 pub mod params;
+pub mod personality;
 pub mod stats;
 pub mod time;
 pub mod world;
@@ -68,6 +76,9 @@ pub use deliberation::{
     Choice, Deliberation, DeliberationAnswer, DeliberationCounters, DeliberationId,
     DeliberationKind, DeliberationOption, Gathering, Grievance, ResolvedDeliberation, Resolver,
 };
+pub use dialogue::{
+    Conversation, ConversationCounters, ConversationId, Line, News, Tone, Topic, Valence,
+};
 pub use event::{BirthDenial, DeathCause, Event, EventKind};
 pub use ids::{CarriageId, NpcId, StationId};
 pub use item::{ItemKind, Stock};
@@ -75,6 +86,7 @@ pub use npc::{
     Inventory, Job, LifeStage, MAX_RELATIONS, Needs, Npc, Relation, RelationKind, Sex, Traits,
 };
 pub use params::SimParams;
+pub use personality::{Personality, Temper};
 pub use stats::Stats;
 pub use time::{GameTime, MINUTES_PER_DAY, MINUTES_PER_HOUR};
 pub use world::{BuyError, Economy, EconomyCounters, GiveError, LifeCounters, Tally, World};

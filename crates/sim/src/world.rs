@@ -14,14 +14,17 @@ use crate::defs::{RecipeDef, Source, StationCount, Work};
 use crate::deliberation::{
     Deliberation, DeliberationCounters, Gathering, Grievance, ResolvedDeliberation,
 };
+use crate::dialogue::{Conversation, ConversationCounters};
 use crate::event::{DeathCause, Event, EventKind};
 use crate::ids::{CarriageId, NpcId, StationId};
 use crate::item::{ItemKind, Stock};
 use crate::names;
 use crate::npc::{Inventory, Job, LifeStage, Needs, Npc, Relation, RelationKind, Sex, Traits};
 use crate::params::SimParams;
+use crate::personality::Personality;
 use crate::time::GameTime;
 
+mod conversation;
 mod deliberate;
 mod economy;
 mod life;
@@ -122,6 +125,27 @@ pub struct World {
     /// Treasury, pay policy and production/money counters.
     #[serde(default)]
     pub economy: Economy,
+    /// Conversations in progress, sorted by id (see [`World::conversations`]).
+    #[serde(default)]
+    conversations: Vec<Conversation>,
+    /// Last finished conversations, oldest first.
+    #[serde(default)]
+    recent_conversations: Vec<Conversation>,
+    #[serde(default)]
+    next_conversation_id: u64,
+    /// Conversation counters since the world was generated.
+    #[serde(default)]
+    pub conversation_counters: ConversationCounters,
+    /// When a quarrel / gossip about a theft was last logged (rate limit).
+    #[serde(default)]
+    last_chat_log: [Option<GameTime>; 2],
+    /// Notable recent facts people talk about (taken from the events as
+    /// they are logged, oldest first).
+    #[serde(default)]
+    news: Vec<conversation::NewsItem>,
+    /// Events already looked at for `news` (see `events_total`).
+    #[serde(default)]
+    news_seen: u64,
     /// Scratch buffer reused every tick (see `presence_index`).
     #[serde(skip)]
     presence: Presence,
@@ -351,8 +375,9 @@ impl World {
             }
         }
 
-        // Characters from their own stream, so they don't disturb the rest.
+        // Characters from their own streams, so they don't disturb the rest.
         let mut trait_rng = ChaCha8Rng::seed_from_u64(seed ^ 0x7EA1_75C0_FFEE);
+        let mut personality_rng = ChaCha8Rng::seed_from_u64(seed ^ 0x9E50_4A11_7A1C);
         let mut npcs = Vec::with_capacity(n_npcs);
         for i in 0..n_npcs {
             let (age, sex) = (ages[i], sexes[i]);
@@ -366,6 +391,8 @@ impl World {
                 .is_some_and(Job::uses_tool)
                 .then(|| rng.random_range(0.1..1.0));
             let clothes = Some(rng.random_range(0.1..1.0));
+            let traits = Traits::random(&mut trait_rng);
+            let personality = Personality::random(traits, &mut personality_rng);
             let tokens = if job.is_some() {
                 rng.random_range(STARTING_TOKENS_WORKER)
             } else {
@@ -398,8 +425,9 @@ impl World {
                 action_until: clock + rng.random_range(0..30),
                 starving_minutes: 0,
                 relations: Vec::new(),
-                traits: Traits::random(&mut trait_rng),
+                traits,
                 meal_shift: Some(shift_of[i]),
+                personality: Some(personality),
             });
         }
 
@@ -543,6 +571,13 @@ impl World {
             protest_tally: Vec::new(),
             birth_bonus_until: None,
             economy,
+            conversations: Vec::new(),
+            recent_conversations: Vec::new(),
+            next_conversation_id: 0,
+            conversation_counters: ConversationCounters::default(),
+            last_chat_log: [None; 2],
+            news: Vec::new(),
+            news_seen: 0,
             presence: Presence::default(),
             load: Vec::new(),
         }
@@ -562,6 +597,14 @@ impl World {
 
     pub fn carriage(&self, id: CarriageId) -> Option<&Carriage> {
         self.carriages.get(id.index())
+    }
+
+    /// Whether NPCs `a` and `b` are in the same place, close enough to talk:
+    /// today the same carriage, neither of them travelling. Every "can
+    /// these two talk?" check of the conversations goes through here.
+    pub fn same_place(&self, a: &Npc, b: &Npc) -> bool {
+        let travelling = |n: &Npc| matches!(n.action, Action::Travel { .. });
+        a.carriage == b.carriage && !travelling(a) && !travelling(b)
     }
 
     /// NPCs currently in a carriage (travellers count as being in their origin).
@@ -820,6 +863,8 @@ impl World {
     fn trim_events(&mut self) {
         let max = self.params.max_events;
         if self.events.len() > max {
+            // Notable facts are kept for conversations before events go.
+            self.collect_news();
             let keep = max - max / 4;
             let dropped = self.events.len() - keep;
             self.events.drain(..dropped);
@@ -855,6 +900,8 @@ impl World {
     pub fn tick(&mut self, brain: &mut dyn Brain) {
         let now = self.clock;
 
+        // Conversations that are over end for both (before their actions do).
+        self.end_conversations();
         let mut deciding = Vec::new();
         for i in 0..self.npcs.len() {
             if self.npcs[i].action_until <= now {
@@ -890,6 +937,10 @@ impl World {
                 description: String::new(),
             };
             for (k, (&i, req)) in deciding.iter().zip(requests).enumerate() {
+                // Pulled into someone's conversation earlier in this loop.
+                if self.npcs[i].action_until > now {
+                    continue;
+                }
                 let option = match choices.get(k) {
                     Some(&THINK) => Some(&think),
                     Some(&c) => req.options.get(c),
@@ -945,10 +996,22 @@ impl World {
         by_carriage.iter_mut().for_each(Vec::clear);
         presence.spot.clear();
         presence.spot.resize(self.next_npc_id as usize, 0);
+        // Who is already in a conversation is not available (marked first).
+        const TALKING: u16 = u16::MAX;
+        for c in &self.conversations {
+            for id in [c.a, c.b] {
+                if let Some(spot) = presence.spot.get_mut(id.0 as usize) {
+                    *spot = TALKING;
+                }
+            }
+        }
         for (i, npc) in self.npcs.iter().enumerate() {
-            if available_for_chat(npc) {
+            let spot = &mut presence.spot[npc.id.0 as usize];
+            if *spot == TALKING {
+                *spot = 0;
+            } else if available_for_chat(npc) {
                 by_carriage[npc.carriage.index()].push(i);
-                presence.spot[npc.id.0 as usize] = npc.carriage.0 + 1;
+                *spot = npc.carriage.0 + 1;
             }
         }
         presence
@@ -1231,10 +1294,7 @@ impl World {
                     npc.inventory.tokens
                 )
             }
-            Action::Socialize(other) => match self.npc(other) {
-                Some(other) => format!("chiacchiera con {} ({minutes} min)", other.name),
-                None => format!("chiacchiera ({minutes} min)"),
-            },
+            Action::Socialize(other) => self.describe_chat(npc, other, minutes),
             Action::Travel { to } => {
                 let dest = self.carriage(to);
                 let shopping = dest.and_then(|c| {
@@ -1288,10 +1348,12 @@ impl World {
                 }
             }
             Action::Travel { to } => self.npcs[i].carriage = to,
+            // A one-sided chat (conversations end in `end_conversations`):
+            // the busy partner still gets a bonus and the tie changes.
             Action::Socialize(partner) => {
                 let bonus = self.params.socialize_partner_bonus;
                 if let Some(j) = self.npc_index(partner)
-                    && self.npcs[j].carriage == here
+                    && self.same_place(&self.npcs[i], &self.npcs[j])
                 {
                     let needs = &mut self.npcs[j].needs;
                     needs.social = (needs.social + bonus).min(1.0);
@@ -1480,10 +1542,13 @@ impl World {
         let now = self.clock;
         let here = self.npcs[i].carriage;
         let chosen = option.filter(|o| self.still_valid(i, &o.action));
-        let (action, minutes) = match chosen {
+        let (action, mut minutes) = match chosen {
             Some(o) => (o.action, o.minutes.max(1)),
             None => (Action::Idle, self.params.idle_min.max(1)),
         };
+        if let Action::Socialize(partner) = action {
+            minutes = self.start_chat(i, partner, minutes).max(1);
+        }
         if let Some(station) = action.station() {
             self.carriages[here.index()].stations[station.index()].occupancy += 1;
         }

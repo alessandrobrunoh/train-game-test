@@ -35,6 +35,7 @@ use crate::names;
 use crate::npc::{
     Inventory, Job, LifeStage, MAX_RELATIONS, Needs, Npc, Relation, RelationKind, Sex, Traits,
 };
+use crate::personality::Personality;
 
 /// A job is overstaffed (Contadini, Cuochi, Mercanti sent back to the
 /// Officine) above its quota plus a tenth of it.
@@ -262,6 +263,7 @@ impl World {
             other.relations.retain(|r| r.other != npc.id);
         }
         self.forget_deliberations_of(npc.id);
+        self.drop_conversation_of(npc.id);
     }
 
     // ------------------------------------------------------------------
@@ -531,6 +533,12 @@ impl World {
             self.npcs[father].traits,
             &mut self.rng,
         );
+        let personality = Personality::inherited(
+            self.npcs[mother].personality(),
+            self.npcs[father].personality(),
+            traits,
+            &mut self.rng,
+        );
         let (m, f) = (&self.npcs[mother], &self.npcs[father]);
         let meal_shift = self.params.meal_shift(m);
         let name = format!("{first} {}", f.surname());
@@ -586,6 +594,7 @@ impl World {
             traits,
             // The family eats together.
             meal_shift: Some(meal_shift),
+            personality: Some(personality),
         };
         for &parent in &[mother, father] {
             self.npcs[parent].relations.push(Relation {

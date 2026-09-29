@@ -211,8 +211,10 @@ fn austerity_pays_everyone_the_same_share() {
     let due: u64 =
         workers.iter().map(|w| w.2).sum::<u64>() + jobless * u64::from(w.params.stipend_per_day);
     assert!(due > 100);
-    w.economy.treasury = due / 2;
-    let supply = npc_tokens(&w) + due / 2;
+    // Half, rounded up: with an odd `due` a ratio just below 1/2 would round
+    // most shares down by a whole token.
+    w.economy.treasury = due.div_ceil(2);
+    let supply = npc_tokens(&w) + due.div_ceil(2);
     w.run(&mut brain, 2);
     assert_eq!(w.money_supply(), supply);
     assert!(w.economy.treasury < 50, "{} left", w.economy.treasury);

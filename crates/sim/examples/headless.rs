@@ -2,13 +2,15 @@
 //!
 //! `cargo run -p sim --release --example headless [seed] [carrozze] [npc] [giorni] [--years N]`
 //! (default: 42 10 100 30). Con `--years N` (o `--anni N`) simula N anni di
-//! vita e stampa una riga per anno invece che per giorno.
+//! vita e stampa una riga per anno invece che per giorno. Alla fine stampa
+//! alcune conversazioni tra NPC con le loro battute.
 
 use std::time::Instant;
 
 use sim::{
-    Action, ActionKind, Choice, DeathCause, DeliberationCounters, DeliberationKind, EventKind,
-    ItemKind, LifeStage, MINUTES_PER_DAY, Needs, Stats, Tally, UtilityBrain, World,
+    Action, ActionKind, Choice, ConversationCounters, DeathCause, DeliberationCounters,
+    DeliberationKind, EventKind, ItemKind, LifeStage, MINUTES_PER_DAY, Needs, Stats, Tally, Tone,
+    Topic, UtilityBrain, World,
 };
 
 fn main() {
@@ -70,6 +72,7 @@ fn main() {
         let mut meals = 0usize;
         let mut samples = 0.0;
         let events_before = world.events_total();
+        let talk_before = world.conversation_counters.clone();
         // Run until the next midnight (the first day starts at 06:00).
         let ticks = MINUTES_PER_DAY - u64::from(world.clock.minute_of_day());
         for _ in 0..ticks {
@@ -115,7 +118,7 @@ fn main() {
             })
             .collect();
         println!(
-            "G{day:2} | pop {:3} | saz {:.2} en {:.2} soc {:.2} | pasti {:.1} | verd {:4.0} raz {:4.0} rott {:3.0} | attr {:2}/{:3} vest {:2}/{:3} | comprati {:2}a {:2}v rotti {:2}a {:2}v | gettoni {:5} | {}",
+            "G{day:2} | pop {:3} | saz {:.2} en {:.2} soc {:.2} | pasti {:.1} | verd {:4.0} raz {:4.0} rott {:3.0} | attr {:2}/{:3} vest {:2}/{:3} | comprati {:2}a {:2}v rotti {:2}a {:2}v | gettoni {:5} | {} | {}",
             s.population,
             needs.hunger / samples,
             needs.energy / samples,
@@ -134,6 +137,7 @@ fn main() {
             broke[v.index()],
             s.tokens,
             distribution.join(" "),
+            talk_summary(&talk_before, &world.conversation_counters, 1),
         );
     }
     let elapsed = start.elapsed();
@@ -148,6 +152,106 @@ fn main() {
     }
     if let Some(npc) = world.npcs.first() {
         println!("{}", world.npc_context(npc.id).unwrap_or_default());
+    }
+    print_conversations(
+        &ConversationCounters::default(),
+        &world.conversation_counters,
+        days,
+    );
+    print_samples(&world);
+}
+
+/// Compact daily line: conversations, share two-sided, share tense.
+fn talk_summary(before: &ConversationCounters, after: &ConversationCounters, days: u64) -> String {
+    let convs = after.conversations - before.conversations;
+    let chats = after.chats - before.chats;
+    let tense = after.by_tone[Tone::Tense.index()] - before.by_tone[Tone::Tense.index()];
+    format!(
+        "conv {:.0}/g ({:.0}% a due, {:.0}% tese)",
+        convs as f64 / days.max(1) as f64,
+        100.0 * convs as f64 / chats.max(1) as f64,
+        100.0 * tense as f64 / convs.max(1) as f64,
+    )
+}
+
+/// Conversations between two snapshots of the counters: rate, topics, tones.
+fn print_conversations(before: &ConversationCounters, after: &ConversationCounters, days: u64) {
+    let convs = (after.conversations - before.conversations).max(1) as f64;
+    let share = |now: u64, then: u64| 100.0 * (now - then) as f64 / convs;
+    let topics: Vec<String> = Topic::ALL
+        .iter()
+        .map(|t| {
+            let k = t.index();
+            format!(
+                "{} {:.0}%",
+                t.name(),
+                share(after.by_topic[k], before.by_topic[k])
+            )
+        })
+        .collect();
+    let tones: Vec<String> = Tone::ALL
+        .iter()
+        .map(|t| {
+            let k = t.index();
+            format!(
+                "{} {:.0}%",
+                t.name(),
+                share(after.by_tone[k], before.by_tone[k])
+            )
+        })
+        .collect();
+    println!(
+        "      {} | a tavola {} a senso unico {} interrotte {} | argomenti: {} | toni: {} | battute {:.1} per conv. | pettegolezzi creduti {} | registrate {}",
+        talk_summary(before, after, days),
+        after.while_eating - before.while_eating,
+        after.one_sided - before.one_sided,
+        after.cut_short - before.cut_short,
+        topics.join(" "),
+        tones.join(" "),
+        (after.lines - before.lines) as f64 / convs,
+        after.gossip_spread - before.gossip_spread,
+        after.logged - before.logged,
+    );
+}
+
+/// Up to 5 recent conversations with different topics, with their lines.
+fn print_samples(world: &World) {
+    let name = |id: sim::NpcId| {
+        world
+            .npc(id)
+            .map_or_else(|| format!("#{}", id.0), |n| n.name.clone())
+    };
+    println!("\nAlcune conversazioni recenti:");
+    let mut shown: Vec<Topic> = Vec::new();
+    for c in world.recent_conversations().iter().rev() {
+        if shown.len() >= 5 || shown.contains(&c.topic) || c.lines.len() < 3 {
+            continue;
+        }
+        shown.push(c.topic);
+        let about = c
+            .about
+            .map(|id| format!(", su {}", name(id)))
+            .unwrap_or_default();
+        println!(
+            "[{} → {:02}:{:02}] {} e {}: {} ({}{about})",
+            c.since,
+            c.until.hour(),
+            c.until.minute(),
+            name(c.a),
+            name(c.b),
+            c.topic.name(),
+            c.tone.name(),
+        );
+        for l in &c.lines {
+            let who = name(l.speaker);
+            let first = who.split(' ').next().unwrap_or("?").to_string();
+            println!(
+                "   {:02}:{:02} {first}: {}",
+                l.at.hour(),
+                l.at.minute(),
+                l.text
+            );
+        }
     }
 }
 
@@ -185,6 +289,7 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
         let before = world.life.clone();
         let econ_before = world.economy.counters.clone();
         let delib_before = world.deliberation_counters.clone();
+        let talk_before = world.conversation_counters.clone();
         for _ in 0..world.params.days_per_year {
             run_day(world, brain);
             let pop = world.npcs.len();
@@ -233,6 +338,11 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
             c.austerity_days - econ_before.austerity_days,
         );
         print_deliberations(&delib_before, &world.deliberation_counters);
+        print_conversations(
+            &talk_before,
+            &world.conversation_counters,
+            u64::from(world.params.days_per_year),
+        );
         if s.population == 0 {
             break;
         }
@@ -301,6 +411,13 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
             println!("  {mark} {} ({})", o.description, o.choice.key());
         }
     }
+    println!();
+    print_conversations(
+        &ConversationCounters::default(),
+        &world.conversation_counters,
+        years * u64::from(world.params.days_per_year),
+    );
+    print_samples(world);
 }
 
 /// One line of deliberation counts between two snapshots of the counters.
