@@ -70,9 +70,7 @@ pub struct TrainLayout {
 impl TrainLayout {
     pub fn new(carriages: Vec<CarriageKind>) -> Self {
         let count = carriages.len();
-        let solids = (0..count)
-            .flat_map(|i| carriage_solids(i, count))
-            .collect();
+        let solids = (0..count).flat_map(|i| carriage_solids(i, count)).collect();
         Self { carriages, solids }
     }
 
@@ -253,9 +251,17 @@ fn spawn_carriage_entities(
     mut images: Option<&mut Assets<Image>>,
 ) {
     wheels.0 = (0..env_art::WHEEL_FRAMES)
-        .map(|f| art.get(images.as_deref_mut(), ArtKey::Wheel(f), || env_art::wheel(f)))
+        .map(|f| {
+            art.get(images.as_deref_mut(), ArtKey::Wheel(f), || {
+                env_art::wheel(f)
+            })
+        })
         .collect();
-    let bogie = art.get(images.as_deref_mut(), ArtKey::BogieFrame, env_art::bogie_frame);
+    let bogie = art.get(
+        images.as_deref_mut(),
+        ArtKey::BogieFrame,
+        env_art::bogie_frame,
+    );
     let gangway = art.get(images.as_deref_mut(), ArtKey::Gangway, env_art::gangway);
 
     let count = layout.len();
@@ -301,10 +307,8 @@ fn spawn_carriage_entities(
                     Transform::from_xyz(mid, INTERIOR_HEIGHT / 2.0, Z_BACKGROUND),
                 ));
                 for x in env_art::LAMP_XS {
-                    let mut sprite = art_sprite(
-                        glow.clone(),
-                        Vec2::new(env_art::GLOW_W, env_art::GLOW_H),
-                    );
+                    let mut sprite =
+                        art_sprite(glow.clone(), Vec2::new(env_art::GLOW_W, env_art::GLOW_H));
                     sprite.color = Color::WHITE.with_alpha(strength * 0.4);
                     parent.spawn((
                         LampGlow { strength },
@@ -340,10 +344,7 @@ fn spawn_carriage_entities(
                 for bx in [env_art::BOGIE_INSET, CARRIAGE_LENGTH - env_art::BOGIE_INSET] {
                     parent.spawn((
                         ExteriorArt,
-                        art_sprite(
-                            bogie.clone(),
-                            Vec2::new(env_art::BOGIE_W, env_art::BOGIE_H),
-                        ),
+                        art_sprite(bogie.clone(), Vec2::new(env_art::BOGIE_W, env_art::BOGIE_H)),
                         Transform::from_xyz(bx, rail_top + env_art::BOGIE_H / 2.0, Z_DECOR),
                     ));
                     for dx in [-env_art::WHEEL_OFFSET, env_art::WHEEL_OFFSET] {

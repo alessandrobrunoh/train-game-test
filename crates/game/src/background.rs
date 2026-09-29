@@ -348,7 +348,13 @@ struct RangeStyle {
 
 /// Disegna una catena montuosa con creste `ridge(x)` (quota dal basso) sopra
 /// una pianura innevata alta `plain`.
-fn mountain_range(w: i32, h: i32, plain: i32, s: &RangeStyle, ridge: impl Fn(i32) -> f32) -> Canvas {
+fn mountain_range(
+    w: i32,
+    h: i32,
+    plain: i32,
+    s: &RangeStyle,
+    ridge: impl Fn(i32) -> f32,
+) -> Canvas {
     let mut c = Canvas::new(w as u32, h as u32);
     for x in 0..w {
         let top = ridge(x).round().min((h - 1) as f32) as i32;
@@ -516,7 +522,9 @@ fn ruins(w: i32, h: i32) -> Canvas {
 
     // Cumuli di neve alla base e pianura.
     for x in 0..w {
-        let drift = 4.0 + 3.0 * wave(x as f32, w as f32, 3.0, 0.5) + 2.0 * wave(x as f32, w as f32, 11.0, 1.0);
+        let drift = 4.0
+            + 3.0 * wave(x as f32, w as f32, 3.0, 0.5)
+            + 2.0 * wave(x as f32, w as f32, 11.0, 1.0);
         for y in 0..base + drift.round() as i32 {
             let color = if y >= base + drift as i32 - 1 {
                 rgb(232, 238, 248)
@@ -570,9 +578,12 @@ fn poles(w: i32, h: i32) -> Canvas {
     let wf = w as f32;
     let bank = |x: i32| {
         let x = x as f32;
-        (base as f32 + 8.0 + 6.0 * wave(x, wf, 2.0, 0.0) + 4.0 * wave(x, wf, 5.0, 1.0)
+        (base as f32
+            + 8.0
+            + 6.0 * wave(x, wf, 2.0, 0.0)
+            + 4.0 * wave(x, wf, 5.0, 1.0)
             + 1.5 * wave(x, wf, 13.0, 2.0))
-            .round() as i32
+        .round() as i32
     };
     for x in 0..w {
         let top = bank(x);
@@ -914,7 +925,12 @@ fn scroll_layers(
     >,
     mut orbs: Query<
         (&Orb, &mut Sprite, &mut Transform),
-        (Without<Layer>, Without<SkyPart>, Without<Stars>, Without<Camera2d>),
+        (
+            Without<Layer>,
+            Without<SkyPart>,
+            Without<Stars>,
+            Without<Camera2d>,
+        ),
     >,
     mut fill: Query<
         (&mut Sprite, &mut Transform),
@@ -1091,7 +1107,11 @@ mod tests {
                     a[3] != b[3]
                 })
                 .count();
-            assert!(differ <= 12, "{}: {differ} righe diverse al bordo", spec.name);
+            assert!(
+                differ <= 12,
+                "{}: {differ} righe diverse al bordo",
+                spec.name
+            );
             // Il fondo è pieno (nessun buco verso il cielo sotto l'orizzonte).
             assert_eq!(c.get(c.width / 2, c.height - 1)[3], 255, "{}", spec.name);
         }

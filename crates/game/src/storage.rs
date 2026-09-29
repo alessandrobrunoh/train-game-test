@@ -169,18 +169,18 @@ impl Plugin for StoragePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ArtCache>()
             .insert_resource(StorageRefresh(Timer::from_seconds(
-            REFRESH_SECS,
-            TimerMode::Repeating,
-        )))
-        .add_systems(Startup, spawn_storage)
-        .add_systems(
-            PreUpdate,
-            rebuild_storage
-                .in_set(WorldRebuildSet)
-                .after(crate::stations::rebuild_stations)
-                .run_if(on_message::<WorldReplaced>),
-        )
-        .add_systems(Update, refresh_storage);
+                REFRESH_SECS,
+                TimerMode::Repeating,
+            )))
+            .add_systems(Startup, spawn_storage)
+            .add_systems(
+                PreUpdate,
+                rebuild_storage
+                    .in_set(WorldRebuildSet)
+                    .after(crate::stations::rebuild_stations)
+                    .run_if(on_message::<WorldReplaced>),
+            )
+            .add_systems(Update, refresh_storage);
     }
 }
 
@@ -278,10 +278,7 @@ fn spawn_storage_entities(
             .with_children(|parent| {
                 // Scaffale
                 parent.spawn((
-                    art_sprite(
-                        art.shelf.clone(),
-                        Vec2::new(STORAGE_WIDTH, STORAGE_HEIGHT),
-                    ),
+                    art_sprite(art.shelf.clone(), Vec2::new(STORAGE_WIDTH, STORAGE_HEIGHT)),
                     Transform::from_xyz((x0 + x1) / 2.0, STORAGE_HEIGHT / 2.0, Z_SHELF),
                 ));
 
@@ -350,8 +347,10 @@ fn spawn_storage_entities(
                 let spots = stations.carriages.get(index).map_or(&[][..], Vec::as_slice);
                 for spot in spots.iter().filter(|s| s.kind == StationKind::Counter) {
                     let w = spot.width;
-                    for (item, dx) in [(ItemKind::Attrezzo, -w / 4.0), (ItemKind::Vestito, w / 4.0)] {
-                        let size = Vec2::new(if item == ItemKind::Attrezzo { 6.0 } else { 5.0 }, 3.0);
+                    for (item, dx) in [(ItemKind::Attrezzo, -w / 4.0), (ItemKind::Vestito, w / 4.0)]
+                    {
+                        let size =
+                            Vec2::new(if item == ItemKind::Attrezzo { 6.0 } else { 5.0 }, 3.0);
                         let visible = c.stock.count(item) >= 1;
                         parent.spawn((
                             CounterGood {

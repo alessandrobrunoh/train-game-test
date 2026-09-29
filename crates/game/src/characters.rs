@@ -805,16 +805,8 @@ fn work_pose(job: Option<Job>, frame: Frame) -> Pose {
         }
         Some(Job::Contadino) => Pose {
             lean: 1,
-            near: if second {
-                Arm::To(2, 3)
-            } else {
-                Arm::To(3, 4)
-            },
-            far: if second {
-                Arm::To(3, 4)
-            } else {
-                Arm::To(2, 3)
-            },
+            near: if second { Arm::To(2, 3) } else { Arm::To(3, 4) },
+            far: if second { Arm::To(3, 4) } else { Arm::To(2, 3) },
             ..base
         },
         Some(Job::Operaio) if tool => {
@@ -838,11 +830,7 @@ fn work_pose(job: Option<Job>, frame: Frame) -> Pose {
             ..base
         },
         Some(Job::Cuoco) => Pose {
-            near: if second {
-                Arm::To(3, 2)
-            } else {
-                Arm::To(4, 1)
-            },
+            near: if second { Arm::To(3, 2) } else { Arm::To(4, 1) },
             held: Held::Ladle,
             ..base
         },
@@ -1485,7 +1473,10 @@ pub fn player_frame(grounded: bool, velocity: Vec2, clock: f32, walked: f32) -> 
 /// Ancora dello sprite del giocatore: il centro dell'ingombro 12×24, piedi in basso.
 pub fn player_anchor(size: Vec2) -> Vec2 {
     let center_y = (P_FEET + 1) as f32 - size.y / 2.0;
-    Vec2::new(0.0, (PLAYER_CELL.y as f32 / 2.0 - center_y) / PLAYER_CELL.y as f32)
+    Vec2::new(
+        0.0,
+        (PLAYER_CELL.y as f32 / 2.0 - center_y) / PLAYER_CELL.y as f32,
+    )
 }
 
 /// Cappuccio con il viso e la sciarpa gialla (10×10).
@@ -1787,7 +1778,13 @@ mod tests {
         for stage in Stage::ALL {
             for sex in Sex::ALL {
                 for look in 0..LOOKS {
-                    for job in [None, Some(Job::Contadino), Some(Job::Cuoco), Some(Job::Operaio), Some(Job::Mercante)] {
+                    for job in [
+                        None,
+                        Some(Job::Contadino),
+                        Some(Job::Cuoco),
+                        Some(Job::Operaio),
+                        Some(Job::Mercante),
+                    ] {
                         for dressed in [true, false] {
                             keys.push(key(stage, sex, look, job, dressed));
                         }
@@ -1899,7 +1896,10 @@ mod tests {
         assert_eq!(young.stage, Stage::Child);
         assert_eq!(old.stage, Stage::Elder);
         // I bambini non hanno divisa.
-        assert_eq!(appearance_of(id, Sex::Male, 10, Some(Job::Cuoco), true).job, None);
+        assert_eq!(
+            appearance_of(id, Sex::Male, 10, Some(Job::Cuoco), true).job,
+            None
+        );
     }
 
     #[test]
@@ -1954,7 +1954,10 @@ mod tests {
         let s = StationId(0);
         assert_eq!(anim_for(&Action::Eat(s), false, false, false), Anim::Eat);
         assert_eq!(anim_for(&Action::Eat(s), true, false, false), Anim::Walk);
-        assert_eq!(anim_for(&Action::Work(s), false, false, true), Anim::WorkTool);
+        assert_eq!(
+            anim_for(&Action::Work(s), false, false, true),
+            Anim::WorkTool
+        );
         assert_eq!(anim_for(&Action::Work(s), false, false, false), Anim::Work);
         assert_eq!(anim_for(&Action::Sleep(s), false, true, false), Anim::Sleep);
         // Chi va a letto cammina, poi si sdraia.

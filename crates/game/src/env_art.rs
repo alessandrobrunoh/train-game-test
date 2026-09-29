@@ -163,21 +163,33 @@ pub fn text3x5(text: &str, color: Rgba) -> Canvas {
 pub enum ArtKey {
     Interior(CarriageKind),
     Body(CarriageKind),
-    EndWall { door: bool },
+    EndWall {
+        door: bool,
+    },
     Gangway,
     BogieFrame,
     Wheel(u8),
     Glow(GlowKind),
-    Bed { width: u16, upper: bool, blanket: u8 },
+    Bed {
+        width: u16,
+        upper: bool,
+        blanket: u8,
+    },
     BedPlate(u16),
     Table(u16),
     Bench(u16),
     Stove(u16),
     Steam(u8),
-    GrowBed { width: u16, variant: u8 },
+    GrowBed {
+        width: u16,
+        variant: u8,
+    },
     Workbench(u16),
     Sparks(u8),
-    Counter { width: u16, hue: u8 },
+    Counter {
+        width: u16,
+        hue: u8,
+    },
     Shelf,
     Crate(ItemKind),
     Good(ItemKind),
@@ -344,8 +356,22 @@ pub fn interior(kind: CarriageKind) -> Canvas {
     }
     // Giunti verticali dei pannelli, con rivetti.
     for sx in (40..w).step_by(80) {
-        rect(&mut c, sx, WAINSCOT + 2, 1, h - WAINSCOT - 8, shade(s.wall, 0.78));
-        rect(&mut c, sx + 1, WAINSCOT + 2, 1, h - WAINSCOT - 8, shade(s.wall, 1.12));
+        rect(
+            &mut c,
+            sx,
+            WAINSCOT + 2,
+            1,
+            h - WAINSCOT - 8,
+            shade(s.wall, 0.78),
+        );
+        rect(
+            &mut c,
+            sx + 1,
+            WAINSCOT + 2,
+            1,
+            h - WAINSCOT - 8,
+            shade(s.wall, 1.12),
+        );
     }
     // Rivestimento basso, battiscopa, cornice sotto il soffitto.
     rect(&mut c, 0, 0, w, WAINSCOT, s.wainscot);
@@ -391,7 +417,12 @@ fn window(c: &mut Canvas, cx: i32, s: &WallStyle) {
     let (gx, gy, gw, gh) = (x0 + 2, y0 + 2, w - 4, h - 4);
     let glass = rgba(200, 228, 255, 26);
     rect(c, gx, gy, gw, gh, glass);
-    for (x, y) in [(gx, gy), (gx + gw - 1, gy), (gx, gy + gh - 1), (gx + gw - 1, gy + gh - 1)] {
+    for (x, y) in [
+        (gx, gy),
+        (gx + gw - 1, gy),
+        (gx, gy + gh - 1),
+        (gx + gw - 1, gy + gh - 1),
+    ] {
         px(c, x, y, s.frame);
     }
     // Traversa del vasistas in alto.
@@ -535,7 +566,12 @@ fn mensa_decor(c: &mut Canvas, s: &WallStyle) {
                 px(c, bx + 5 + x, y, rgba(210, 214, 200, 200));
             }
         }
-        stamp(c, &text3x5(&format!("{}", i + 2), rgb(240, 210, 90)), bx + 27, y - 2);
+        stamp(
+            c,
+            &text3x5(&format!("{}", i + 2), rgb(240, 210, 90)),
+            bx + 27,
+            y - 2,
+        );
     }
     // Rastrelliera con i piatti.
     rect(c, 222, 58, 36, 2, s.trim);
@@ -569,7 +605,10 @@ fn serra_decor(c: &mut Canvas, s: &WallStyle) {
     }
     // Rampicanti: salgono a zig-zag con foglie.
     let leaf = [rgb(70, 150, 64), rgb(104, 184, 80), rgb(46, 110, 52)];
-    for (i, x0) in [8, 64, 100, 150, 176, 236, 262, 312].into_iter().enumerate() {
+    for (i, x0) in [8, 64, 100, 150, 176, 236, 262, 312]
+        .into_iter()
+        .enumerate()
+    {
         let top = 60 + (hash2(i as i32, 0, 3) % 30) as i32;
         let mut x = x0;
         for y in WAINSCOT..top {
@@ -612,12 +651,24 @@ fn officina_decor(c: &mut Canvas, s: &WallStyle) {
     for x in 0..w {
         for y in WAINSCOT - 4..WAINSCOT {
             let yellow = (x + y).rem_euclid(8) < 4;
-            px(c, x, y, if yellow { rgb(214, 170, 40) } else { rgb(30, 30, 30) });
+            px(
+                c,
+                x,
+                y,
+                if yellow {
+                    rgb(214, 170, 40)
+                } else {
+                    rgb(30, 30, 30)
+                },
+            );
         }
     }
     // Macchie d'olio sul rivestimento basso.
     for i in 0..30 {
-        let (x, y) = ((hash2(i, 1, 7) % w as u32) as i32, (hash2(i, 2, 7) % 20) as i32 + 3);
+        let (x, y) = (
+            (hash2(i, 1, 7) % w as u32) as i32,
+            (hash2(i, 2, 7) % 20) as i32 + 3,
+        );
         rect(c, x, y, 2, 1, shade(s.wainscot, 0.8));
     }
     // Pannelli forati con gli attrezzi.
@@ -677,7 +728,10 @@ fn mercato_decor(c: &mut Canvas, s: &WallStyle) {
         rect(c, 0, y, w, 1, shade(s.wainscot, 0.75));
     }
     for i in 0..40 {
-        let (x, y) = ((hash2(i, 3, 2) % w as u32) as i32, 3 + (hash2(i, 4, 2) % 5) as i32 * 5);
+        let (x, y) = (
+            (hash2(i, 3, 2) % w as u32) as i32,
+            3 + (hash2(i, 4, 2) % 5) as i32 * 5,
+        );
         px(c, x, y + 2, shade(s.wainscot, 0.6));
     }
     // Tappeti appesi tra i finestrini.
@@ -938,7 +992,16 @@ pub fn end_wall(door: bool) -> Canvas {
         for x in 0..w {
             for y in 0..2 {
                 let yellow = (x + y) % 4 < 2;
-                px(&mut c, x, y, if yellow { rgb(214, 170, 40) } else { rgb(30, 30, 30) });
+                px(
+                    &mut c,
+                    x,
+                    y,
+                    if yellow {
+                        rgb(214, 170, 40)
+                    } else {
+                        rgb(30, 30, 30)
+                    },
+                );
             }
         }
     } else {
@@ -1048,7 +1111,12 @@ pub fn wheel(frame: u8) -> Canvas {
         for step in 1..4 {
             let r = step as f32 + 0.3;
             let (x, y) = (center + a.cos() * r, center + a.sin() * r);
-            px(&mut c, x.round() as i32, y.round() as i32, rgb(110, 110, 122));
+            px(
+                &mut c,
+                x.round() as i32,
+                y.round() as i32,
+                rgb(110, 110, 122),
+            );
         }
     }
     let lo = (center.floor()) as i32;
@@ -1198,7 +1266,12 @@ mod tests {
         assert_eq!(c.get(3, 0), rgb(1, 1, 1));
         px(&mut c, -1, 10, rgb(1, 1, 1));
         let mut big = Canvas::new(5, 5);
-        stamp(&mut big, &Canvas::from_rows(&["a"], &[('a', rgb(7, 7, 7))]), 1, 0);
+        stamp(
+            &mut big,
+            &Canvas::from_rows(&["a"], &[('a', rgb(7, 7, 7))]),
+            1,
+            0,
+        );
         assert_eq!(get(&big, 1, 0), rgb(7, 7, 7));
     }
 
@@ -1211,12 +1284,22 @@ mod tests {
             calls += 1;
             interior(CarriageKind::Serra)
         };
-        let a = cache.get(Some(&mut images), ArtKey::Interior(CarriageKind::Serra), &mut make);
-        let b = cache.get(Some(&mut images), ArtKey::Interior(CarriageKind::Serra), &mut make);
+        let a = cache.get(
+            Some(&mut images),
+            ArtKey::Interior(CarriageKind::Serra),
+            &mut make,
+        );
+        let b = cache.get(
+            Some(&mut images),
+            ArtKey::Interior(CarriageKind::Serra),
+            &mut make,
+        );
         assert_eq!(a, b);
-        let c = cache.get(Some(&mut images), ArtKey::Interior(CarriageKind::Mensa), || {
-            interior(CarriageKind::Mensa)
-        });
+        let c = cache.get(
+            Some(&mut images),
+            ArtKey::Interior(CarriageKind::Mensa),
+            || interior(CarriageKind::Mensa),
+        );
         assert_ne!(a, c);
         assert_eq!(calls, 1);
         assert_eq!(cache.generated, 2);

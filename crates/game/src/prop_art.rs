@@ -197,7 +197,11 @@ pub fn steam(frame: u8) -> Canvas {
     let rise = i32::from(frame) * 4;
     for (i, (x, y, r)) in [(4, 1, 1), (3, 5, 2), (5, 9, 1)].into_iter().enumerate() {
         let y = (y + rise) % STEAM_H;
-        let sway = if (i as u8 + frame).is_multiple_of(2) { 0 } else { 1 };
+        let sway = if (i as u8 + frame).is_multiple_of(2) {
+            0
+        } else {
+            1
+        };
         let alpha = 170 - (y * 10) as u8;
         for dy in -r..=r {
             for dx in -r..=r {
@@ -232,8 +236,16 @@ pub fn grow_bed(w: i32, variant: u8) -> Canvas {
         match kind {
             0 => {
                 // Cespo di lattuga.
-                for (dx, dy) in [(0, 0), (1, 0), (2, 0), (-1, 0), (0, 1), (1, 1), (-1, 1), (0, 2)]
-                {
+                for (dx, dy) in [
+                    (0, 0),
+                    (1, 0),
+                    (2, 0),
+                    (-1, 0),
+                    (0, 1),
+                    (1, 1),
+                    (-1, 1),
+                    (0, 2),
+                ] {
                     let g = greens[((dx + dy + 3) % 3) as usize];
                     px(&mut c, x + dx, 7 + dy, g);
                 }
@@ -364,7 +376,12 @@ pub fn counter(w: i32, hue: u8) -> Canvas {
             } else {
                 rgb(238, 232, 214)
             };
-            px(&mut c, x, y, if y == 37 { shade(stripe, 1.1) } else { stripe });
+            px(
+                &mut c,
+                x,
+                y,
+                if y == 37 { shade(stripe, 1.1) } else { stripe },
+            );
         }
     }
     // Bordo a festoni.
@@ -549,7 +566,11 @@ mod tests {
     fn crate_templates_share_one_size() {
         for item in ItemKind::ALL {
             let c = crate_art(item);
-            assert_eq!((c.width as i32, c.height as i32), (CRATE_W, CRATE_H), "{item:?}");
+            assert_eq!(
+                (c.width as i32, c.height as i32),
+                (CRATE_W, CRATE_H),
+                "{item:?}"
+            );
         }
         assert_eq!(good_art(ItemKind::Attrezzo).height, 3);
         assert_eq!(good_art(ItemKind::Vestito).width, 5);

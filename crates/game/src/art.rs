@@ -95,7 +95,6 @@ impl Canvas {
         }
     }
 
-
     /// Copia ruotata di 90° in senso antiorario (la cima finisce a sinistra).
     pub fn rotated_ccw(&self) -> Self {
         let mut out = Self::new(self.height, self.width);
@@ -204,7 +203,10 @@ mod tests {
     fn outline_surrounds_shapes() {
         let c = Canvas::from_rows(&["...", ".r.", "..."], &[('r', R)]).outlined(G);
         assert_eq!(c.get(1, 1), R);
-        assert_eq!((c.get(0, 1), c.get(2, 1), c.get(1, 0), c.get(1, 2)), (G, G, G, G));
+        assert_eq!(
+            (c.get(0, 1), c.get(2, 1), c.get(1, 0), c.get(1, 2)),
+            (G, G, G, G)
+        );
         // Gli angoli restano vuoti.
         assert_eq!(c.get(0, 0), CLEAR);
     }

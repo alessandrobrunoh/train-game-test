@@ -363,10 +363,18 @@ fn spawn_station_entities(
     mut images: Option<&mut Assets<Image>>,
 ) {
     anim.steam = (0..prop_art::STEAM_FRAMES)
-        .map(|f| art.get(images.as_deref_mut(), ArtKey::Steam(f), || prop_art::steam(f)))
+        .map(|f| {
+            art.get(images.as_deref_mut(), ArtKey::Steam(f), || {
+                prop_art::steam(f)
+            })
+        })
         .collect();
     anim.sparks = (0..prop_art::SPARK_FRAMES)
-        .map(|f| art.get(images.as_deref_mut(), ArtKey::Sparks(f), || prop_art::sparks(f)))
+        .map(|f| {
+            art.get(images.as_deref_mut(), ArtKey::Sparks(f), || {
+                prop_art::sparks(f)
+            })
+        })
         .collect();
 
     for (index, spots) in layout.carriages.iter().enumerate() {
@@ -390,7 +398,8 @@ fn spawn_station_entities(
                 StationKind::Bed => {
                     let upper = spot.level > 0;
                     let blanket = (hash2(index as i32, station as i32, 3)
-                        % u32::from(prop_art::BLANKET_VARIANTS)) as u8;
+                        % u32::from(prop_art::BLANKET_VARIANTS))
+                        as u8;
                     let key = ArtKey::Bed {
                         width: wu,
                         upper,
@@ -400,7 +409,12 @@ fn spawn_station_entities(
                         prop_art::bed(w, upper, blanket)
                     });
                     let below = if upper { LEVEL_HEIGHT } else { 0.0 };
-                    place(image, prop_art::BED_H + below as i32, base - below, Z_STATION);
+                    place(
+                        image,
+                        prop_art::BED_H + below as i32,
+                        base - below,
+                        Z_STATION,
+                    );
                 }
                 StationKind::Table => {
                     let bench = art.get(images.as_deref_mut(), ArtKey::Bench(wu), || {
@@ -446,7 +460,11 @@ fn spawn_station_entities(
                     let x = spot.x - spot.width / 2.0 + 5.0;
                     sprites.push((
                         art_sprite(anim.sparks.first().cloned().unwrap_or_default(), size),
-                        Transform::from_xyz(x, base + prop_art::VISE_TOP + size.y / 2.0 - 2.0, Z_SPARKS),
+                        Transform::from_xyz(
+                            x,
+                            base + prop_art::VISE_TOP + size.y / 2.0 - 2.0,
+                            Z_SPARKS,
+                        ),
                         Some(StationFx::Sparks(Sparks {
                             carriage: index,
                             station,
@@ -457,9 +475,7 @@ fn spawn_station_entities(
                     let hue = counters % prop_art::STALL_VARIANTS;
                     counters += 1;
                     let key = ArtKey::Counter { width: wu, hue };
-                    let image = art.get(images.as_deref_mut(), key, || {
-                        prop_art::counter(w, hue)
-                    });
+                    let image = art.get(images.as_deref_mut(), key, || prop_art::counter(w, hue));
                     place(image, prop_art::COUNTER_H, base, Z_STATION);
                 }
             }
