@@ -214,6 +214,15 @@ Proposta, coerente con l'ambientazione (treno-mondo, rottame, ribelli della coda
 - Nuovo `speech.rs`, sullo schema di `chat_hearts`: `Text2d` su uno sfondo pixel-art a 9 riquadri sopra la testa, righe alternate ogni 2,5 s reali, al massimo circa 4 fumetti a schermo. A velocità alte si vede solo "…" o "!".
 
 ### 5.4 Chat del giocatore [G+S]
+
+> **Fatta (2026-09-29).** Tipi in `sim/src/chat.rs` (`Intent`, `Band`, `ChatLog`, `Favour`, `ChatReply`), API in `world/chat.rs` (`player_chat_start`, `player_chat`, `player_chat_text`, `player_chat_gift`, `chat_log`, `player_favour`), testi in `dialogue/chat.rs`.
+> - **Intenzioni:** Saluta, Chiedi del lavoro, Chiedi dei prezzi (i Mercati entro 6 carrozze da casa, lavoro o dove si trova; i mercanti li conoscono tutti), Chiedi un favore, Regala, Scambia, Chiedi notizie (le notizie delle conversazioni e i pettegolezzi sul giocatore), Insulta, Congedati. Risposte per intenzione × affinità (bassa / media / alta) × tratti × stato (fame, stanchezza, turno, età).
+> - **Testo libero:** `KeywordReader` (parole, radici e frasi; accenti, maiuscole e lettere allungate ignorati; un errore di battitura da 5 lettere, due da 8), dietro il trait `IntentReader`, così un lettore LLM potrà sostituirlo. Se non capisce, l'NPC dice di non aver capito e non succede nient'altro. Un oggetto nominato ("quanto costa un vestito?") guida la risposta sui prezzi.
+> - **Effetti:** saluto +0,03 (al massimo ogni 6 ore), insulto −0,15 (al massimo ogni ora), incarico fatto +0,15. Gli incarichi ("portami due barre di metallo") nascono dal catalogo (un bene che manca, cibo se ha fame, un ingrediente del suo lavoro che scarseggia), durano 2 giorni e si pagano con i gettoni dell'NPC (fino a metà dei suoi), al prezzo del Mercato più economico: la moneta si conserva. Chi ti saluta può pensare a un incarico e mostrare il "!": aprendo la chat parla per primo.
+> - **Memoria:** le ultime 24 righe per NPC in `PlayerCharacter::chats` (96 NPC al massimo). `SAVE_VERSION` 9.
+> - **Gioco (`chat.rs`):** T (o E se non c'è niente da regalare) apre la finestra con ritratto, lavoro, "Ti considera: …", incarico, storico, risposte suggerite e campo di testo (Invio invia, Esc chiude). **Il tempo si ferma** mentre si parla (la chat mette la pausa e la toglie alla chiusura, se l'aveva messa lei; P e 1–5 restano attivi) e il giocatore resta fermo. Le battute appaiono anche come fumetti sopra l'NPC e il giocatore; "Regala" apre la scelta del regalo, "Scambia" con un mercante al banco la finestra del Mercato.
+> - Non ancora: incarichi diversi da "portami X" (riparazioni, consegne), ricette insegnate in chat, un lettore LLM.
+
 - Avvicinandosi a un NPC e premendo **T** (o E → "Parla") si apre la **finestra di chat**: lo storico dei messaggi con quel personaggio, con il suo ritratto e l'affinità.
 - Il giocatore può:
   - scegliere tra **risposte suggerite** (saluta, chiedi del lavoro, chiedi i prezzi, chiedi un favore, regala, scambia, insulta…): funzionano sempre;
