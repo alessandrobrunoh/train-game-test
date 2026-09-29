@@ -12,6 +12,13 @@
 //! non disegna le finestre coperte o con lo schermo bloccato (screenshot
 //! neri). Anche le finestre egui finiscono nell'immagine: l'ultima scena ha
 //! inventario e baule aperti.
+//!
+//! Le ultime scene mostrano il Narratore: la cronaca (N) con i pannelli
+//! aperti, le statistiche (K) e tutte le icone procedurali. La cronaca è
+//! finta e fissa ([`FIXTURES`], alcune sono risposte vere di un modello),
+//! quindi gli screenshot sono uguali a ogni giro e non usano la rete. Con
+//! `TRAINGAME_SHOTS_LLM=1` invece il Narratore è quello di `.env`: chiede la
+//! novità del giorno 1 alle 6:00 e la cronaca mostra la risposta vera.
 
 use std::path::PathBuf;
 
@@ -22,16 +29,22 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
 use sim::GameTime;
 
+use crate::ai_ui::StatsWindow;
 use crate::cabin::ChestWindow;
 use crate::camera::WideView;
 use crate::chat::{ChatCommand, ChatQueue};
+use crate::chronicle_ui::ChronicleWindow;
 use crate::inventory::InventoryWindow;
+use crate::item_icons::{ItemIcons, icon_canvas, shape_canvas, show_icon};
+use crate::narrator_bridge::{ChronicleEntry, EntryStatus, NarratorState};
 use crate::player::{Body, Player, start_position};
 use crate::state::Sim;
 use crate::stations::StationLayout;
 use crate::train::{FLOOR_Y, STAIRS_WIDTH, TrainLayout, floor_y};
 
 const SHOTS_ENV: &str = "TRAINGAME_SHOTS";
+/// Con questa variabile le scene del Narratore usano il modello di `.env`.
+const REAL_LLM_ENV: &str = "TRAINGAME_SHOTS_LLM";
 /// Attesa prima della prima scena (arte generata, camera ferma)...
 const FIRST_WAIT: f32 = 4.0;
 /// ...e tra una scena e l'altra (la camera raggiunge il giocatore).
@@ -46,14 +59,32 @@ impl Plugin for ShotPlugin {
         let Some(dir) = std::env::var_os(SHOTS_ENV).filter(|d| !d.is_empty()) else {
             return;
         };
+        let real = std::env::var_os(REAL_LLM_ENV).is_some_and(|v| !v.is_empty() && v != "0");
+        if !real {
+            // Niente rete: un Narratore finto, fermo, con la cronaca di prova.
+            let llm = std::sync::Arc::new(llm::MockLlm::fixed(FIXTURES[0].1));
+            let mut state = NarratorState::new(
+                narrator::NarratorConfig::new(llm, llm::Budget::per_hour(0)),
+                "finto (screenshot)",
+            );
+            state.paused = true;
+            app.insert_resource(state);
+        }
         app.insert_resource(ShotScript {
             dir: PathBuf::from(dir),
             scene: 0,
             wait: FIRST_WAIT,
             target: Handle::default(),
+            real,
+            captured: false,
         })
+        .init_resource::<IconGallery>()
         .add_systems(PostStartup, render_offscreen)
-        .add_systems(Update, run_script);
+        .add_systems(Update, run_script)
+        .add_systems(
+            bevy_egui::EguiPrimaryContextPass,
+            icon_gallery.before(crate::ui::PointerCheck),
+        );
     }
 }
 
@@ -66,6 +97,75 @@ struct ShotScript {
     wait: f32,
     /// Immagine su cui disegna la camera.
     target: Handle<Image>,
+    /// Il Narratore è quello vero (`TRAINGAME_SHOTS_LLM`).
+    real: bool,
+    /// La scena preparata è già stata scattata: si prepara la prossima al
+    /// giro dopo, così le finestre della scena restano nella foto.
+    captured: bool,
+}
+
+/// La finestra con tutte le icone (solo per gli screenshot).
+#[derive(Resource, Default)]
+struct IconGallery(bool);
+
+/// La cronaca di prova: giorno e risposta del modello. Le voci 2, 3 e 5 sono
+/// risposte vere di un modello (misura dell'A3 con i pannelli).
+const FIXTURES: [(u64, &str); 6] = [
+    (
+        1,
+        r#"{"motivo": "In coda si beve poco e male: l'acqua scende a secchi dalla Mensa.", "novita": {"tipo": "oggetto", "nome": "Borraccia di latta", "descrizione": "Una borraccia battuta a mano da un rottame: tiene l'acqua calda per ore.", "categoria": "durevole", "valore": 14, "pila": 3, "ingredienti": [{"oggetto": "metallo", "qta": 1}], "lavoro": "operaio", "aspetto": {"forma": "bottiglia", "colore": "grigio", "dettaglio": "etichetta"}}, "interfaccia": {"titolo": "Acqua in coda", "elementi": [{"tipo": "valore", "etichetta": "Borracce sul treno", "sorgente": {"scorta": "Borraccia di latta"}, "formato": "numero"}, {"tipo": "valore", "etichetta": "Metallo al Mercato", "sorgente": {"prezzo": "metallo", "mercato": "vicino"}, "formato": "gettoni"}, {"tipo": "barra", "etichetta": "Sazietà nei Dormitori", "sorgente": {"bisogno": "sazieta", "carrozza": "Dormitorio"}, "min": 0, "max": 1}, {"tipo": "lista", "etichetta": "Dove c'è rottame", "sorgente_lista": {"carrozze_con": "rottame"}}, {"tipo": "pulsante", "etichetta": "Batti una borraccia", "azione": {"apri_crafting": "Borraccia di latta"}}, {"tipo": "pulsante", "etichetta": "Chiedi a un operaio", "azione": {"parla_con_lavoro": "operaio"}}]}}"#,
+    ),
+    (
+        2,
+        r#"{"motivo": "Le scorte di rottame sono quasi esaurite, impedendo la manutenzione e la produzione di lampade.", "novita": {"tipo": "oggetto", "nome": "Frammento Recuperato", "descrizione": "Piccoli pezzi di metallo ossidato recuperati dalle intercapedini delle carrozze.", "categoria": "materia_prima", "valore": 5, "pila": 20, "ingredienti": [], "lavoro": "operaio", "aspetto": {"forma": "lingotto", "colore": "grigio", "dettaglio": "crepa"}}, "interfaccia": {"titolo": "Recupero Rottami", "elementi": [{"tipo": "valore", "etichetta": "Rottame attuale", "sorgente": {"scorta": "rottame"}, "formato": "numero"}, {"tipo": "pulsante", "etichetta": "Raccogli frammenti", "azione": {"apri_crafting": "Frammento Recuperato"}}]}}"#,
+    ),
+    (
+        3,
+        r#"{"motivo": "La disuguaglianza economica è presente e i gettoni mediani sono bassi; serve un modo per monitorare se la ricchezza è concentrata in poche mani.", "novita": {"tipo": "statistica", "nome": "Indice di Privilegio", "descrizione": "Misura il divario tra l'élite e la massa del treno.", "unita": "punti", "scala": [0, 200], "formula": {"somma": [{"peso": 1, "sorgente": {"economia": "disuguaglianza"}}, {"peso": 100, "sorgente": {"economia": "gettoni_mediani"}}]}, "soglie": [{"sopra": 150, "testo": "Tensione sociale esplosiva"}, {"sotto": 50, "testo": "Distribuzione equa"}]}, "interfaccia": {"titolo": "Stato Sociale", "elementi": [{"tipo": "valore", "etichetta": "Indice di Privilegio", "sorgente": {"statistica": "Indice di Privilegio"}, "formato": "numero"}, {"tipo": "valore", "etichetta": "Disuguaglianza", "sorgente": {"economia": "disuguaglianza"}, "formato": "percento"}, {"tipo": "valore", "etichetta": "Gettoni Medi", "sorgente": {"economia": "gettoni_mediani"}, "formato": "gettoni"}]}}"#,
+    ),
+    (
+        4,
+        r#"{"motivo": "Nessun numero dice quanto regge l'animo del treno dopo giorni di gelo.", "novita": {"tipo": "statistica", "nome": "Morale", "descrizione": "Quanto regge l'animo di chi vive sul treno.", "unita": "%", "scala": [0, 100], "formula": {"media": [{"peso": 100, "sorgente": {"bisogno": "sazieta"}}, {"peso": 100, "sorgente": {"bisogno": "socialita"}}, {"peso": 100, "sorgente": {"bisogno": "energia"}}]}, "soglie": [{"sotto": 30, "testo": "Il treno è allo stremo"}, {"sopra": 75, "testo": "Si canta nelle carrozze"}]}, "interfaccia": {"titolo": "Morale del treno", "elementi": [{"tipo": "valore", "etichetta": "Morale", "sorgente": {"statistica": "Morale"}, "formato": "numero"}, {"tipo": "barra", "etichetta": "Energia", "sorgente": {"bisogno": "energia"}, "min": 0, "max": 100}, {"tipo": "lista", "etichetta": "I più affamati", "sorgente_lista": {"affamati": "treno"}}, {"tipo": "pulsante", "etichetta": "Storico", "azione": {"mostra_statistica": "Morale"}}]}}"#,
+    ),
+    (
+        5,
+        r#"{"motivo": "La popolazione è stabile e le scorte di cibo sono sufficienti, ma la mancanza di interazione tra le diverse carrozze sta appiattendo il morale.", "novita": {"tipo": "evento", "titolo": "Il Banchetto della Luna", "descrizione": "I cuochi hanno organizzato una cena celebrativa per unire i passeggeri, consumando scorte extra per aumentare l'umore generale.", "effetti": [{"effetto": "scorta", "carrozza": "Mensa", "oggetto": "razione", "delta": -30}, {"effetto": "scorta", "carrozza": "Mensa", "oggetto": "tè", "delta": -20}, {"effetto": "bisogno", "carrozza": null, "bisogno": "socialita", "delta": 0.2}]}, "interfaccia": {"titolo": "Festa nel Treno", "elementi": [{"tipo": "testo", "testo": "Un momento di gioia collettiva tra i vagoni."}, {"tipo": "valore", "etichetta": "Razioni consumate", "sorgente": {"scorta": "razione"}, "formato": "numero"}, {"tipo": "barra", "etichetta": "Socialità", "sorgente": {"bisogno": "socialita"}, "min": 0, "max": 1}]}}"#,
+    ),
+    (
+        6,
+        r#"{"motivo": "Le coperte non bastano e i Dormitori di coda gelano.", "novita": {"tipo": "lavoro", "nome": "Rammendatore", "descrizione": "Ripara vestiti e coperte logore con i ritagli dell'Officina.", "carrozza": "Officina", "produce": ["vestito", "coperta"]}, "interfaccia": {"titolo": "Rammendi", "elementi": [{"tipo": "valore", "etichetta": "Coperte sul treno", "sorgente": {"scorta": "coperta"}}, {"tipo": "pulsante", "etichetta": "Cuci una coperta", "azione": {"apri_crafting": "coperta"}}, {"tipo": "pulsante", "etichetta": "Prezzo dei vestiti", "azione": {"apri_mercato": "vestito"}}, {"tipo": "pulsante", "etichetta": "Dov'è l'Officina", "azione": {"vai_a": "Officina"}}]}}"#,
+    ),
+];
+
+/// Mette la cronaca di prova nel Narratore (e un rifiuto, per vederlo).
+fn stage_chronicle(state: &mut NarratorState, now: f64) {
+    for (day, answer) in FIXTURES {
+        let draft = narrator::parse(answer).expect("a valid fixture");
+        state.record(
+            ChronicleEntry {
+                day,
+                status: EntryStatus::Proposed,
+                draft: Some(draft),
+                reason: None,
+                attempts: 1,
+                latency_ms: 1300,
+            },
+            now,
+        );
+        if day == 3 {
+            state.record(
+                ChronicleEntry {
+                    day,
+                    status: EntryStatus::Rejected,
+                    draft: narrator::parse(r#"{"motivo": "Il treno ha bisogno di acqua pulita.", "novita": {"tipo": "lavoro", "nome": "Acquaiolo", "descrizione": "Porta l'acqua dalle Mense ai Dormitori.", "carrozza": "Cisterna", "produce": ["acqua"]}}"#).ok(),
+                    reason: Some("la carrozza «Cisterna» non esiste; tipi di carrozza: Dormitorio, Mensa, Mercato, Officina, Serra".into()),
+                    attempts: 2,
+                    latency_ms: 2600,
+                },
+                now,
+            );
+        }
+    }
 }
 
 /// Dimensioni dell'immagine fuori schermo (16:9, come la finestra).
@@ -99,10 +199,19 @@ enum Spot {
     Cabin { windows: bool },
     /// Nella sua cabina, in chat con l'amico.
     Chat,
+    /// Le finestre del Narratore: cronaca (N), statistiche (K), icone.
+    Narrator(NarratorView),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NarratorView {
+    Chronicle,
+    Stats,
+    Icons,
 }
 
 /// Nome del file, posto del giocatore, vista allargata.
-const SCENES: [(&str, Spot, bool); 7] = [
+const SCENES: [(&str, Spot, bool); 10] = [
     ("1-piano-terra", Spot::Floor(0, Some(160.0)), false),
     ("2-piano-sopra", Spot::Floor(1, Some(160.0)), false),
     ("3-sulla-scala", Spot::Floor(0, None), false),
@@ -110,6 +219,9 @@ const SCENES: [(&str, Spot, bool); 7] = [
     ("5-cabina", Spot::Cabin { windows: false }, false),
     ("6-inventario-baule", Spot::Cabin { windows: true }, false),
     ("7-chat", Spot::Chat, false),
+    ("8-cronaca", Spot::Narrator(NarratorView::Chronicle), false),
+    ("9-statistiche", Spot::Narrator(NarratorView::Stats), false),
+    ("10-icone", Spot::Narrator(NarratorView::Icons), false),
 ];
 
 /// Un amico del giocatore sveglio nella cabina, e qualcosa nell'inventario
@@ -168,25 +280,47 @@ fn run_script(
     ),
     mut body: Single<&mut Body, With<Player>>,
     mut exit: MessageWriter<AppExit>,
+    mut narrator: (
+        Option<ResMut<NarratorState>>,
+        ResMut<ChronicleWindow>,
+        ResMut<StatsWindow>,
+        ResMut<IconGallery>,
+    ),
 ) {
     script.wait -= time.delta_secs();
     if script.wait > 0.0 {
         return;
     }
     if script.scene == 0 {
+        if !script.real
+            && let Some(state) = narrator.0.as_mut()
+        {
+            stage_chronicle(state, time.elapsed_secs_f64());
+        }
         let Sim { world, brain } = &mut *sim;
         let evening = GameTime::from_dhm(1, EVENING.0, EVENING.1);
-        let minutes = evening.since(world.clock);
-        world.run(brain, minutes);
+        // Ora per ora, così le statistiche hanno uno storico.
+        while world.clock < evening {
+            let minutes = evening.since(world.clock).min(60);
+            world.run(brain, minutes);
+            if let Some(state) = narrator.0.as_mut() {
+                state.stats.sample(world);
+            }
+        }
     }
-    // Scatta la scena preparata al giro precedente.
-    if (1..=SCENES.len()).contains(&script.scene) {
+    // Scatta la scena preparata al giro precedente, e prepara la prossima
+    // solo dopo un attimo (nello stesso frame chiuderebbe le sue finestre).
+    if (1..=SCENES.len()).contains(&script.scene) && !script.captured {
         let (name, ..) = SCENES[script.scene - 1];
         let path = script.dir.join(format!("{name}.png"));
         commands
             .spawn(Screenshot::image(script.target.clone()))
             .observe(save_to_disk(path));
+        script.captured = true;
+        script.wait = 0.5;
+        return;
     }
+    script.captured = false;
     let Some(&(_, spot, wide_view)) = SCENES.get(script.scene) else {
         // Lascia un attimo al salvataggio dell'ultima immagine.
         if script.scene == SCENES.len() {
@@ -238,10 +372,76 @@ fn run_script(
             Vec2::new(x, cabin.base_y() + half_height)
         }
         (Spot::Cabin { .. } | Spot::Chat, None) => start_position(),
+        (Spot::Narrator(view), _) => {
+            ui_windows.2.0.push(ChatCommand::Close);
+            narrator.1.open = view == NarratorView::Chronicle;
+            narrator.1.expanded_newest = 4;
+            narrator.2.open = view == NarratorView::Stats;
+            narrator.2.focus = (view == NarratorView::Stats).then(|| "Morale".to_string());
+            narrator.3.0 = view == NarratorView::Icons;
+            if view == NarratorView::Chronicle
+                && !script.real
+                && let Some(state) = narrator.0.as_mut()
+            {
+                state.toast = Some(crate::narrator_bridge::NoveltyToast {
+                    text: "Novità sul treno: «Rammendatore»".to_string(),
+                    shown_at: time.elapsed_secs_f64(),
+                });
+            }
+            Vec2::new(left + 160.0, floor_y(0) + half_height)
+        }
     };
     body.teleport(position);
     body.climbing = spot == Spot::Floor(0, None);
     wide.0 = wide_view;
     script.scene += 1;
     script.wait = SCENE_WAIT;
+}
+
+/// Tutte le forme in tutti i colori, e i dettagli: per controllare le icone.
+fn icon_gallery(
+    mut contexts: bevy_egui::EguiContexts,
+    gallery: Res<IconGallery>,
+    mut icons: ResMut<ItemIcons>,
+) {
+    use bevy_egui::egui;
+    use narrator::{Appearance, Colour, Detail, Shape};
+    if !gallery.0 {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    egui::Window::new("Icone del Narratore")
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .resizable(false)
+        .show(ctx, |ui| {
+            egui::Grid::new("icone").spacing([4.0, 4.0]).show(ui, |ui| {
+                ui.label("");
+                for shape in Shape::ALL {
+                    ui.label(egui::RichText::new(shape.name()).small());
+                }
+                ui.end_row();
+                for colour in Colour::ALL {
+                    ui.label(egui::RichText::new(colour.name()).small());
+                    for shape in Shape::ALL {
+                        let key = format!("galleria/{}/{}", shape.name(), colour.name());
+                        let t = icons.get(ctx, &key, || shape_canvas(shape, colour));
+                        show_icon(ui, t, 32.0);
+                    }
+                    ui.end_row();
+                }
+                ui.label(egui::RichText::new("dettagli").small());
+                for (i, shape) in Shape::ALL.into_iter().enumerate() {
+                    let detail = Detail::ALL[i % Detail::ALL.len()];
+                    let colour = Colour::ALL[(i * 5) % Colour::ALL.len()];
+                    let look = Appearance::new(shape, colour, Some(detail));
+                    let t = icons.get(ctx, &format!("galleria/{}", look.key()), || {
+                        icon_canvas(&look)
+                    });
+                    show_icon(ui, t, 32.0).on_hover_text(look.key());
+                }
+                ui.end_row();
+            });
+        });
 }

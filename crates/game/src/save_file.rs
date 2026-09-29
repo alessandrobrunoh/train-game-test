@@ -20,6 +20,12 @@
 //! postcard non descrive i campi: ogni modifica a `SaveHeader`, `SaveBody` o
 //! ai tipi serializzati della sim (`World`, `UtilityBrain`, ...) richiede di
 //! alzare [`SAVE_VERSION`]. I file di un'altra versione vengono rifiutati.
+//!
+//! Eccezione: l'ultimo campo del corpo, `narrator` (cronaca e statistiche
+//! del Narratore, in JSON), si è aggiunto senza cambiare versione. Un corpo
+//! della versione 9 che non lo ha si legge lo stesso ([`SaveBodyV9`]: il
+//! campo resta vuoto), e un gioco più vecchio ignora i byte in più. Dentro
+//! il JSON i campi nuovi si aggiungono con `#[serde(default)]`.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -151,6 +157,9 @@ pub struct SaveBodyRef<'a> {
     /// Velocità del tempo (minuti di gioco al secondo) e pausa.
     pub minutes_per_second: f32,
     pub paused: bool,
+    /// Cronaca e statistiche del Narratore, JSON (vedi
+    /// `narrator_bridge::NarratorSave`); vuoto se non c'è.
+    pub narrator: &'a str,
 }
 
 /// Corpo del salvataggio letto dal disco (vedi [`SaveBodyRef`]).
@@ -164,6 +173,32 @@ pub struct SaveBody {
     /// riparte sempre in pausa.
     #[allow(dead_code)]
     pub paused: bool,
+    /// Vuoto nei salvataggi senza Narratore (versione 9 prima della cronaca).
+    #[serde(default)]
+    pub narrator: String,
+}
+
+/// Il corpo com'era prima del campo `narrator` (stessa versione 9).
+#[derive(Deserialize)]
+struct SaveBodyV9 {
+    world: World,
+    brain: UtilityBrain,
+    player: [f32; 2],
+    minutes_per_second: f32,
+    paused: bool,
+}
+
+impl From<SaveBodyV9> for SaveBody {
+    fn from(b: SaveBodyV9) -> Self {
+        Self {
+            world: b.world,
+            brain: b.brain,
+            player: b.player,
+            minutes_per_second: b.minutes_per_second,
+            paused: b.paused,
+            narrator: String::new(),
+        }
+    }
 }
 
 /// Un salvataggio completo (la versione è quella del file, [`SAVE_VERSION`]).
@@ -249,7 +284,13 @@ pub fn decode(bytes: &[u8]) -> Result<SaveFile, SaveError> {
     if raw.len() != raw_len {
         return Err(corrupt("lunghezza del corpo errata"));
     }
-    let body: SaveBody = postcard::from_bytes(&raw).map_err(corrupt)?;
+    // postcard non ha campi facoltativi: senza `narrator` si rilegge come v9.
+    let body: SaveBody = match postcard::from_bytes(&raw) {
+        Ok(body) => body,
+        Err(e) => postcard::from_bytes::<SaveBodyV9>(&raw)
+            .map(SaveBody::from)
+            .map_err(|_| corrupt(e))?,
+    };
     Ok(SaveFile { header, body })
 }
 
@@ -581,6 +622,7 @@ pub(crate) mod tests {
             player: [12.5, 24.0],
             minutes_per_second: 600.0,
             paused: false,
+            narrator: r#"{"paused":true}"#,
         };
         encode(&header, &body).unwrap().finish()
     }
@@ -616,8 +658,39 @@ pub(crate) mod tests {
         assert_eq!(player.chest.count(ItemKind::Coperta), 2);
         assert_eq!(player.known_recipes, ["lampada"]);
         assert_eq!(file.body.minutes_per_second, 600.0);
+        assert_eq!(file.body.narrator, r#"{"paused":true}"#);
         // Anche l'evento più vecchio e i contatori interni.
         assert_eq!(file.body.world.events_total(), world.events_total());
+    }
+
+    #[test]
+    fn reads_version_9_bodies_without_the_narrator() {
+        #[derive(Serialize)]
+        struct OldBody<'a> {
+            world: &'a World,
+            brain: &'a UtilityBrain,
+            player: [f32; 2],
+            minutes_per_second: f32,
+            paused: bool,
+        }
+        let world = World::generate(1, 3, 10);
+        let brain = UtilityBrain::new(1);
+        let header = SaveHeader::of("x", "vecchio", 0, &world);
+        let old = OldBody {
+            world: &world,
+            brain: &brain,
+            player: [1.0, 2.0],
+            minutes_per_second: 10.0,
+            paused: true,
+        };
+        let encoded = EncodedSave {
+            header: postcard::to_allocvec(&header).unwrap(),
+            body: postcard::to_allocvec(&old).unwrap(),
+        };
+        let file = decode(&encoded.finish()).unwrap();
+        assert_eq!(file.body.narrator, "");
+        assert_eq!(file.body.player, [1.0, 2.0]);
+        assert_eq!(world_bytes(&file.body.world), world_bytes(&world));
     }
 
     #[test]
@@ -674,6 +747,7 @@ pub(crate) mod tests {
                 player: [0.0; 2],
                 minutes_per_second: 1.0,
                 paused: true,
+                narrator: "",
             };
             let bytes = encode(&header, &body).unwrap().finish();
             write_atomic(&slot_path(run, slot), &bytes).unwrap();
@@ -719,6 +793,7 @@ pub(crate) mod tests {
                 player: [0.0; 2],
                 minutes_per_second: 1.0,
                 paused: false,
+                narrator: "",
             };
             write_atomic(
                 &slot_path(&run, &slot),

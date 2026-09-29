@@ -1,6 +1,7 @@
 //! TrainGame: vista laterale di un lungo treno pieno di NPC.
 //! M0: grafica placeholder, giocatore controllabile, camera che lo segue.
 
+mod ai_ui;
 mod art;
 mod background;
 mod brain_ui;
@@ -9,6 +10,7 @@ mod cabin;
 mod camera;
 mod characters;
 mod chat;
+mod chronicle_ui;
 mod crafting;
 mod env_art;
 mod fonts;
@@ -17,8 +19,10 @@ mod history_ui;
 mod hud;
 mod interaction;
 mod inventory;
+mod item_icons;
 mod life_fx;
 mod market_ui;
+mod narrator_bridge;
 mod npc_render;
 mod player;
 mod population;
@@ -92,6 +96,13 @@ fn main() {
             cabin::CabinPlugin,
             // Chat con gli NPC (tasto T).
             chat::ChatPlugin,
+        ))
+        // Il Narratore (da `.env`, spento senza): una novità al giorno, la
+        // cronaca (tasto N), i pannelli e le statistiche inventati (tasto K).
+        .add_plugins((
+            narrator_bridge::NarratorBridgePlugin,
+            ai_ui::AiUiPlugin,
+            chronicle_ui::ChronicleUiPlugin,
         ))
         // Screenshot automatici (solo con `TRAINGAME_SHOTS`).
         .add_plugins(shot::ShotPlugin)

@@ -68,6 +68,16 @@ pub(crate) struct MarketWindow {
     message: Option<String>,
 }
 
+impl MarketWindow {
+    /// Apre il listino sui prezzi e lo storico di `item` (un pannello del
+    /// Narratore, vedi `ai_ui.rs`).
+    pub(crate) fn show_item(&mut self, item: ItemKind) {
+        self.open = true;
+        self.tab = Tab::Listino;
+        self.chart_item = Some(item);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Tab {
     #[default]

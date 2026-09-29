@@ -12,6 +12,11 @@ sim = { path = "../sim" }
 sim-laya = { path = "../sim-laya" }
 # Storico SQLite della partita (vedi `history_sync.rs`).
 history = { path = "../history" }
+# Il Narratore (vedi `narrator_bridge.rs`) e il client LLM (configurazione da
+# `.env`, modello finto per test e screenshot).
+narrator = { path = "../narrator" }
+llm = { path = "../llm" }
+serde_json = "1"
 # Salvataggi (vedi `saves.rs`): cartella dati per piattaforma, formato binario
 # serde compatto, compressione LZ4 in puro Rust (senza il formato "frame").
 directories = "6.0.0"

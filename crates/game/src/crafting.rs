@@ -37,6 +37,9 @@ pub(crate) struct CraftingWindow {
     job: Option<CraftJob>,
     /// Esito dell'ultimo lavoro (o perché non è partito).
     message: Option<String>,
+    /// Ricetta in evidenza, chiesta da un pannello del Narratore
+    /// (`ai_ui.rs`): compare in cima alla finestra.
+    pub(crate) focus: Option<&'static RecipeDef>,
 }
 
 /// Un lavoro al banco: finisce a `until` (tempo di gioco).
@@ -199,6 +202,7 @@ fn crafting_window(
     let mut open = true;
     let mut start = None;
     let mut cancel = false;
+    let mut clear_focus = false;
     let max_height = (ctx.content_rect().height() - 4.0 * MARGIN - 80.0).max(160.0);
     egui::Window::new("Crafting")
         .anchor(Align2::LEFT_BOTTOM, [MARGIN, -40.0])
@@ -232,6 +236,17 @@ fn crafting_window(
             }
             if let Some(message) = &window.message {
                 ui.colored_label(Color32::from_rgb(240, 220, 140), message);
+            }
+            if let Some(recipe) = window.focus {
+                ui.horizontal(|ui| {
+                    ui.colored_label(Color32::from_rgb(240, 200, 120), "In evidenza");
+                    if ui.small_button("×").on_hover_text("Togli").clicked() {
+                        clear_focus = true;
+                    }
+                });
+                if recipe_row(ui, world, recipe, here, window.job.is_some()) {
+                    start = Some(recipe);
+                }
             }
             ui.separator();
 
@@ -267,6 +282,10 @@ fn crafting_window(
         });
     if !open {
         window.open = false;
+        window.focus = None;
+    }
+    if clear_focus {
+        window.focus = None;
     }
     if cancel {
         window.job = None;

@@ -29,6 +29,7 @@ use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{EguiContexts, EguiPreUpdateSet, EguiPrimaryContextPass};
 use sim::{UtilityBrain, World};
 
+use crate::narrator_bridge::NarratorState;
 use crate::player::{Body, Player, start_position};
 use crate::save_file::{
     self, EncodedSave, RunEntry, SaveBodyRef, SaveFile, SaveHeader, create_run, format_age,
@@ -245,6 +246,8 @@ pub struct LoadedGame {
     pub player: Vec2,
     pub clock: SimClock,
     pub run: RunInfo,
+    /// Cronaca e statistiche del Narratore (JSON; vuoto in una nuova partita).
+    pub narrator: String,
 }
 
 impl LoadedGame {
@@ -261,6 +264,7 @@ impl LoadedGame {
                 accumulator: 0.0,
             },
             run,
+            narrator: body.narrator,
         }
     }
 
@@ -277,6 +281,7 @@ impl LoadedGame {
             player: start_position(),
             clock: SimClock::default(),
             run,
+            narrator: String::new(),
         }
     }
 }
@@ -288,6 +293,7 @@ pub fn encode_game(
     sim: &Sim,
     player: Vec2,
     clock: &SimClock,
+    narrator: &str,
 ) -> Result<EncodedSave, save_file::SaveError> {
     let header = SaveHeader::of(run_id, slot, now_ms(), &sim.world);
     let body = SaveBodyRef {
@@ -296,6 +302,7 @@ pub fn encode_game(
         player: player.to_array(),
         minutes_per_second: clock.minutes_per_second,
         paused: clock.paused,
+        narrator,
     };
     save_file::encode(&header, &body)
 }
@@ -355,6 +362,7 @@ struct GameAccess<'w, 's> {
     follow: ResMut<'w, FollowNpc>,
     autosave: ResMut<'w, Autosave>,
     replaced: MessageWriter<'w, WorldReplaced>,
+    narrator: Option<ResMut<'w, NarratorState>>,
     player: Query<'w, 's, (&'static mut Body, &'static mut Transform), With<Player>>,
     camera: Query<'w, 's, &'static mut Transform, (With<Camera2d>, Without<Player>)>,
 }
@@ -379,6 +387,9 @@ impl GameAccess<'_, '_> {
         self.selected.0 = None;
         self.follow.0 = false;
         self.autosave.next_day = None;
+        if let Some(narrator) = self.narrator.as_mut() {
+            narrator.restore_json(&game.narrator);
+        }
         if let Ok((mut body, mut transform)) = self.player.single_mut() {
             body.teleport(player);
             transform.translation.x = player.x;
@@ -477,7 +488,19 @@ fn start_save(
 ) {
     let started = Instant::now();
     let player = game.player_position();
-    let encoded = encode_game(&game.run.run_id, &slot, &game.sim, player, &game.clock);
+    let narrator = game
+        .narrator
+        .as_ref()
+        .map(|n| n.save_json())
+        .unwrap_or_default();
+    let encoded = encode_game(
+        &game.run.run_id,
+        &slot,
+        &game.sim,
+        player,
+        &game.clock,
+        &narrator,
+    );
     let encoded = match encoded {
         Ok(encoded) => encoded,
         Err(e) => {
@@ -902,7 +925,7 @@ mod tests {
 
     fn save_bytes(sim: &Sim, slot: &str) -> Vec<u8> {
         let clock = SimClock::default();
-        encode_game("seed3-1", slot, sim, Vec2::new(100.0, 12.0), &clock)
+        encode_game("seed3-1", slot, sim, Vec2::new(100.0, 12.0), &clock, "")
             .unwrap()
             .finish()
     }
@@ -950,7 +973,7 @@ mod tests {
         let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
 
         let t = Instant::now();
-        let encoded = encode_game("x", "y", &sim, Vec2::ZERO, &SimClock::default()).unwrap();
+        let encoded = encode_game("x", "y", &sim, Vec2::ZERO, &SimClock::default(), "").unwrap();
         let encode_ms = ms(t);
         let raw = encoded.raw_len();
         let t = Instant::now();
@@ -1101,5 +1124,55 @@ mod tests {
                 .error
         );
         assert_eq!(carriage_entities(&mut app), 3);
+    }
+
+    #[test]
+    fn the_chronicle_survives_save_and_load() {
+        use crate::narrator_bridge::tests::MORALE;
+        use crate::narrator_bridge::{ChronicleEntry, EntryStatus};
+        let tmp = TempDir::new("cronaca");
+        let mut app = test_app(&tmp.0);
+        let mut state = NarratorState::from_vars(|_| None);
+        state.record(
+            ChronicleEntry {
+                day: 1,
+                status: EntryStatus::Proposed,
+                draft: Some(narrator::parse(MORALE).unwrap()),
+                reason: None,
+                attempts: 1,
+                latency_ms: 1200,
+            },
+            0.0,
+        );
+        app.insert_resource(state);
+        run_command(
+            &mut app,
+            SaveCommand::Save {
+                slot: "cronaca".into(),
+            },
+        );
+        wait_saves(&mut app);
+        let run = app.world().resource::<RunInfo>().clone();
+        // Una nuova partita comincia senza cronaca...
+        run_command(
+            &mut app,
+            SaveCommand::NewGame {
+                seed: 2,
+                carriages: 3,
+                npcs: 10,
+                name: String::new(),
+            },
+        );
+        assert!(app.world().resource::<NarratorState>().chronicle.is_empty());
+        // ...e il caricamento la riporta, con le statistiche.
+        run_command(
+            &mut app,
+            SaveCommand::Load(save_file::slot_path(&run.dir, "cronaca")),
+        );
+        let state = app.world().resource::<NarratorState>();
+        assert_eq!(state.chronicle.len(), 1);
+        assert_eq!(state.chronicle[0].title(), "Morale");
+        assert_eq!(state.stats.book.len(), 1);
+        assert_eq!(state.last_asked, Some(1));
     }
 }
