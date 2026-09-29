@@ -1,7 +1,9 @@
 //! Scrittura: cattura degli eventi dal mondo, inserimento, rollback.
 
 use rusqlite::{Connection, params};
-use sim::{DeathCause, Event, EventKind, ItemKind, NpcId, RelationKind, Sex, World};
+use sim::{
+    DeathCause, DeliberationKind, Event, EventKind, ItemKind, NpcId, RelationKind, Sex, World,
+};
 
 use crate::{History, Result, set_meta};
 
@@ -284,6 +286,39 @@ pub(crate) fn columns(kind: &EventKind) -> Columns {
             c.item = Some(item);
             c.amount = Some(1);
         }
+        EventKind::DeliberationAsked { npc, kind, .. }
+        | EventKind::DeliberationResolved { npc, kind, .. } => {
+            c.npc = Some(npc);
+            c.other = kind.other();
+            if let DeliberationKind::Theft { item, market, .. } = kind {
+                c.item = Some(item);
+                c.carriage = Some(market.0);
+            }
+        }
+        EventKind::Theft {
+            npc,
+            item,
+            carriage,
+            fine,
+            ..
+        } => {
+            c.npc = Some(npc);
+            c.item = Some(item);
+            c.carriage = Some(carriage.0);
+            c.price = Some(fine);
+        }
+        EventKind::HelpAsked {
+            npc,
+            helper,
+            tokens,
+            ..
+        } => {
+            c.npc = Some(npc);
+            c.other = Some(helper);
+            c.amount = Some(tokens);
+        }
+        EventKind::ProtestCalled { place, .. } => c.carriage = Some(place.0),
+        EventKind::AdminConceded { protesters, .. } => c.amount = Some(protesters),
     }
     c
 }
@@ -306,6 +341,12 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::PlayerTook { .. } => "PlayerTook",
         EventKind::PlayerBought { .. } => "PlayerBought",
         EventKind::PlayerGave { .. } => "PlayerGave",
+        EventKind::DeliberationAsked { .. } => "DeliberationAsked",
+        EventKind::DeliberationResolved { .. } => "DeliberationResolved",
+        EventKind::Theft { .. } => "Theft",
+        EventKind::HelpAsked { .. } => "HelpAsked",
+        EventKind::ProtestCalled { .. } => "ProtestCalled",
+        EventKind::AdminConceded { .. } => "AdminConceded",
     }
 }
 
