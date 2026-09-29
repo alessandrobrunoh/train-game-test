@@ -8,6 +8,7 @@
 //!   in modo asincrono, con `UtilityBrain` come ripiego.
 
 pub mod brain;
+pub mod dataset;
 pub mod deliberation;
 pub mod eval;
 pub mod laya;
