@@ -7,16 +7,18 @@
 //! - Vicino a un bancone o agli scaffali di un Mercato, con un mercante al
 //!   lavoro: compra un oggetto (il più economico, Q per cambiare) al prezzo
 //!   del Mercato.
-//! - Vicino a un NPC sveglio: gli regala qualcosa che accetta (un vestito o un
-//!   attrezzo che gli manca, oppure cibo se ha fame). Chi diffida del
-//!   giocatore non accetta niente.
+//! - Vicino a un NPC sveglio: T apre la chat (vedi `chat.rs`); E gli regala
+//!   qualcosa che accetta (un vestito o un attrezzo che gli manca, oppure
+//!   cibo se ha fame), o apre la chat se non c'è niente da regalargli. Chi
+//!   diffida del giocatore non accetta niente.
 //! - Nella propria cabina: E sul letto per dormire fino al mattino (dalle
 //!   20:00), E sul baule per aprirlo (vedi `cabin.rs`).
 //!
 //! Tutto passa dalla sim (`World::player_*`): inventario e gettoni sono in
 //! `world.player`.
 //!
-//! Mentre la camera segue un NPC (tasto F) non si interagisce con niente.
+//! Mentre la camera segue un NPC (tasto F) o la chat è aperta non si
+//! interagisce con niente.
 //!
 //! Sopra il bersaglio compare un piccolo suggerimento ("E: prendi una
 //! razione"); dopo aver premuto E, per un attimo, l'esito.
@@ -26,6 +28,7 @@ use sim::{CarriageId, CarriageKind, ItemKind, NpcId, Regard, StationKind, World}
 
 use crate::cabin::ChestWindow;
 use crate::camera::follow_target;
+use crate::chat::{ChatCommand, ChatQueue, ChatWindow};
 use crate::player::Player;
 use crate::state::{FollowNpc, NpcSprite, Sim};
 use crate::stations::{CABIN_BED_WIDTH, CHEST_WIDTH, StationLayout};
@@ -75,11 +78,12 @@ enum TargetKind {
         items: Vec<(ItemKind, u32)>,
         merchant: bool,
     },
-    /// Un NPC a cui regalare `item`.
+    /// Un NPC a cui regalare `item` (se c'è) e con cui parlare (se `talk`).
     Npc {
         id: NpcId,
         name: String,
-        item: ItemKind,
+        item: Option<ItemKind>,
+        talk: bool,
     },
     /// Il letto della cabina del giocatore.
     Bed,
@@ -114,6 +118,8 @@ pub struct InteractionPlugin;
 impl Plugin for InteractionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InteractionState>()
+            .init_resource::<ChatWindow>()
+            .init_resource::<ChatQueue>()
             .add_systems(Startup, spawn_prompt)
             .add_systems(
                 Update,
@@ -252,13 +258,6 @@ fn find_target(
         });
     }
 
-    // Niente da regalare: inutile cercare NPC.
-    if !GIFTS
-        .iter()
-        .any(|&item| world.player.inventory.count(item) > 0)
-    {
-        return None;
-    }
     let mut near: Vec<(NpcId, Vec2)> = npcs
         .filter(|&(_, pos)| {
             let d = (pos - player).abs();
@@ -271,12 +270,17 @@ fn find_target(
         da.total_cmp(&db).then(a.0.cmp(&b.0))
     });
     near.into_iter().find_map(|(npc, pos)| {
-        let item = gift_for(world, npc)?;
+        let item = gift_for(world, npc);
+        let talk = world.can_chat(npc).is_ok();
+        if item.is_none() && !talk {
+            return None;
+        }
         Some(Target {
             kind: TargetKind::Npc {
                 id: npc,
                 name: world.npc(npc)?.name.clone(),
                 item,
+                talk,
             },
             anchor: pos + Vec2::Y * NPC_PROMPT_ABOVE,
         })
@@ -322,7 +326,19 @@ fn prompt_text(world: &World, target: &TargetKind, choice: usize) -> String {
             }
             text
         }
-        TargetKind::Npc { name, item, .. } => format!("E: dai {} a {name}", item.with_article()),
+        TargetKind::Npc {
+            name,
+            item: Some(item),
+            talk,
+            ..
+        } => {
+            let mut text = format!("E: dai {} a {name}", item.with_article());
+            if *talk {
+                text.push_str("   T: parla");
+            }
+            text
+        }
+        TargetKind::Npc { name, .. } => format!("E/T: parla con {name}"),
     }
 }
 
@@ -360,10 +376,17 @@ fn perform(world: &mut World, target: &TargetKind, choice: usize) -> Option<Stri
                 Err(e) => capitalized(&e.to_string()),
             }
         }
-        TargetKind::Npc { id, name, item } => match world.player_give(*id, *item) {
+        TargetKind::Npc {
+            id,
+            name,
+            item: Some(item),
+            ..
+        } => match world.player_give(*id, *item) {
             Ok(()) => format!("Hai dato {} a {name}", item.with_article()),
             Err(e) => format!("{name}: {e}"),
         },
+        // Niente da regalare: E apre la chat (vedi `interact`).
+        TargetKind::Npc { item: None, .. } => return None,
         TargetKind::Bed => match world.player_go_to_bed() {
             Ok(wake) => format!("Buonanotte… (sveglia alle {:02}:00)", wake.hour()),
             Err(e) => capitalized(&e.to_string()),
@@ -441,23 +464,51 @@ fn update_target(
     }
 }
 
-/// E: interagisce con il bersaglio; Q: cambia l'oggetto da comprare.
+/// L'NPC con cui parlare premendo `key` (T sempre, E se non c'è niente da
+/// regalargli), se il bersaglio è un NPC con cui si può parlare.
+fn chat_with(target: &TargetKind, key: KeyCode) -> Option<NpcId> {
+    match target {
+        TargetKind::Npc {
+            id,
+            item,
+            talk: true,
+            ..
+        } if key == KeyCode::KeyT || item.is_none() => Some(*id),
+        _ => None,
+    }
+}
+
+/// E: interagisce con il bersaglio; T: parla con l'NPC; Q: cambia
+/// l'oggetto da comprare.
 fn interact(
     keys: Res<ButtonInput<KeyCode>>,
     mut sim: ResMut<Sim>,
     mut chest: ResMut<ChestWindow>,
     mut state: ResMut<InteractionState>,
+    chat: Res<ChatWindow>,
+    mut chat_queue: ResMut<ChatQueue>,
 ) {
+    if chat.is_open() {
+        return;
+    }
     if keys.just_pressed(KeyCode::KeyQ) {
         state.choice = state.choice.wrapping_add(1);
-    }
-    if !keys.just_pressed(KeyCode::KeyE) {
-        return;
     }
     let Some(target) = state.target.clone() else {
         return;
     };
     if sim.world.player.is_asleep() {
+        return;
+    }
+    for key in [KeyCode::KeyT, KeyCode::KeyE] {
+        if keys.just_pressed(key)
+            && let Some(id) = chat_with(&target.kind, key)
+        {
+            chat_queue.0.push(ChatCommand::Open(id));
+            return;
+        }
+    }
+    if !keys.just_pressed(KeyCode::KeyE) {
         return;
     }
     if target.kind == TargetKind::Chest {
@@ -473,9 +524,11 @@ fn interact(
 }
 
 /// Posiziona il suggerimento (o l'esito) sopra il bersaglio, in coordinate schermo.
+#[allow(clippy::too_many_arguments)]
 fn update_prompt(
     time: Res<Time>,
     sim: Res<Sim>,
+    chat: Res<ChatWindow>,
     mut state: ResMut<InteractionState>,
     camera: Single<(&Camera, &Transform), With<Camera2d>>,
     root: Single<(&mut Node, &mut Visibility), With<PromptRoot>>,
@@ -488,7 +541,7 @@ fn update_prompt(
     }
     let shown = match (&state.feedback, &state.target) {
         (Some((message, anchor, _)), _) => Some((message.clone(), *anchor)),
-        (None, Some(target)) if !sim.world.player.is_asleep() => Some((
+        (None, Some(target)) if !sim.world.player.is_asleep() && !chat.is_open() => Some((
             prompt_text(&sim.world, &target.kind, state.choice),
             target.anchor,
         )),
@@ -675,16 +728,29 @@ mod tests {
         let npc = f.world.npcs[0].id;
         f.world.npcs[0].needs.hunger = 0.2;
         f.world.npcs[0].inventory.clothes = Some(0.5);
+        // The player is elsewhere for the sim: no chat, only gifts.
+        let elsewhere = f
+            .world
+            .carriages
+            .iter()
+            .find(|c| c.id != f.world.npcs[0].carriage)
+            .unwrap()
+            .id;
+        f.world.set_player_place(sim::Place {
+            carriage: elsewhere,
+            floor: 0,
+        });
         let npcs = [(npc, pos + Vec2::new(4.0, -4.0))];
         // Senza niente da dare, niente bersaglio.
         assert_eq!(target(&f, pos, &npcs), None);
 
         f.world.player.inventory.add(ItemKind::Razione, 2);
         let t = target(&f, pos, &npcs).expect("npc");
-        let TargetKind::Npc { id, item, .. } = &t.kind else {
+        let TargetKind::Npc { id, item, talk, .. } = &t.kind else {
             panic!("{t:?}");
         };
-        assert_eq!((*id, *item), (npc, ItemKind::Razione));
+        assert_eq!((*id, *item, *talk), (npc, Some(ItemKind::Razione), false));
+        assert_eq!(chat_with(&t.kind, KeyCode::KeyT), None);
         let message = perform(&mut f.world, &t.kind, 0).unwrap();
         assert!(message.starts_with("Hai dato una razione"), "{message}");
         assert_eq!(count(&f, ItemKind::Razione), 1);
@@ -703,6 +769,50 @@ mod tests {
             ..sim::PlayerTie::default()
         });
         assert_eq!(target(&f, pos, &npcs), None);
+    }
+
+    #[test]
+    fn t_talks_to_an_npc_nearby_and_e_too_without_a_gift() {
+        let mut f = fixture();
+        let i = f
+            .world
+            .npcs
+            .iter()
+            .position(|n| {
+                n.age >= 18
+                    && f.world.carriages[n.carriage.index()].kind == CarriageKind::Dormitorio
+            })
+            .unwrap();
+        let now = f.world.clock;
+        let n = &mut f.world.npcs[i];
+        if let Some(s) = n.action.station() {
+            let st = &mut f.world.carriages[n.carriage.index()].stations[s.index()];
+            st.occupancy = st.occupancy.saturating_sub(1);
+        }
+        n.floor = 0;
+        n.action = sim::Action::Idle;
+        n.action_until = now + 60;
+        n.needs.hunger = 1.0;
+        let (id, carriage) = (n.id, n.carriage);
+        f.world.set_player_place(sim::Place { carriage, floor: 0 });
+        let pos = Vec2::new(TrainLayout::carriage_center_x(carriage.index()), 12.0);
+        let npcs = [(id, pos + Vec2::new(4.0, -4.0))];
+        let t = target(&f, pos, &npcs).expect("someone to talk to");
+        let name = f.world.npc(id).unwrap().name.clone();
+        assert_eq!(
+            prompt_text(&f.world, &t.kind, 0),
+            format!("E/T: parla con {name}")
+        );
+        assert_eq!(chat_with(&t.kind, KeyCode::KeyT), Some(id));
+        assert_eq!(chat_with(&t.kind, KeyCode::KeyE), Some(id));
+        assert_eq!(perform(&mut f.world, &t.kind, 0), None);
+        // With a gift: E gives, T talks.
+        f.world.npcs[i].needs.hunger = 0.2;
+        f.world.player.inventory.add(ItemKind::Razione, 1);
+        let t = target(&f, pos, &npcs).unwrap();
+        assert!(prompt_text(&f.world, &t.kind, 0).ends_with("T: parla"));
+        assert_eq!(chat_with(&t.kind, KeyCode::KeyE), None);
+        assert_eq!(chat_with(&t.kind, KeyCode::KeyT), Some(id));
     }
 
     #[test]

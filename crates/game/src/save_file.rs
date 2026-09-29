@@ -37,8 +37,10 @@ use sim::{GameTime, UtilityBrain, World};
 /// (`Npc::floor`, `Station::floor`, `SimParams::stairs_minutes`). 8: il
 /// giocatore nella sim (`World::player`: nome, gettoni, inventario a slot,
 /// cabina e baule, ricette; `Npc::player`, `Station::owner`); il corpo non
-/// ha più l'inventario, solo la posizione fisica del giocatore.
-pub const SAVE_VERSION: u32 = 8;
+/// ha più l'inventario, solo la posizione fisica del giocatore. 9: la chat
+/// del giocatore (`PlayerCharacter::chats`, e in `PlayerTie` i tempi di
+/// saluti e insulti e l'incarico `Favour`).
+pub const SAVE_VERSION: u32 = 9;
 const MAGIC: [u8; 8] = *b"TRAINSAV";
 /// Byte fissi prima dell'intestazione: magic, versione, lunghezza.
 const PREFIX_LEN: usize = MAGIC.len() + 4 + 4;

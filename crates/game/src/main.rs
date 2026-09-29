@@ -8,6 +8,7 @@ mod bubbles;
 mod cabin;
 mod camera;
 mod characters;
+mod chat;
 mod crafting;
 mod env_art;
 mod fonts;
@@ -89,6 +90,8 @@ fn main() {
             crafting::CraftingPlugin,
             // Il giocatore nella sim: posto, cabina, baule e sonno.
             cabin::CabinPlugin,
+            // Chat con gli NPC (tasto T).
+            chat::ChatPlugin,
         ))
         // Screenshot automatici (solo con `TRAINGAME_SHOTS`).
         .add_plugins(shot::ShotPlugin)

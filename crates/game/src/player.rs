@@ -13,6 +13,7 @@ use bevy::{prelude::*, sprite::Anchor};
 use crate::characters::{
     PLAYER_CELL, PLAYER_FRAMES, PlayerFrame, player_anchor, player_frame, player_sheet,
 };
+use crate::chat::ChatWindow;
 use crate::state::FollowNpc;
 use crate::train::{FLOOR_Y, TrainLayout};
 
@@ -151,10 +152,12 @@ fn spawn_player(
 fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
     follow: Res<FollowNpc>,
+    chat: Option<Res<ChatWindow>>,
     mut input: Single<&mut PlayerInput>,
 ) {
-    // Mentre la camera segue un NPC il giocatore resta fermo.
-    if follow.0 {
+    // Mentre la camera segue un NPC, o si parla con qualcuno, il giocatore
+    // resta fermo.
+    if follow.0 || chat.is_some_and(|c| c.is_open()) {
         input.axis = 0.0;
         input.vertical = 0.0;
         input.jump_held = false;

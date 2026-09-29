@@ -25,6 +25,11 @@
 //! (`World::wants_to_talk`, per ora un amico che l'ha appena salutato; poi
 //! la chat e gli incarichi della Fase 5.4) ha un "!" giallo sopra la testa.
 //!
+//! **La chat** (`chat.rs`): le battute tra il giocatore e l'NPC con cui parla
+//! ([`ChatSays`]) compaiono come fumetti sopra le loro teste (grigio per il
+//! giocatore), per qualche secondo reale; intanto saluto e "!" di quell'NPC
+//! non si vedono.
+//!
 //! Il tasto **V** passa tra tutti i fumetti, solo quello del selezionato e
 //! nessuno ([`SpeechMode`]). L'ispettore mostra la conversazione in corso e
 //! le ultime concluse ([`conversation_section`]).
@@ -39,9 +44,11 @@ use sim::{Conversation, ConversationId, GameTime, Line, Npc, NpcId, Tone, World}
 
 use crate::art::{Canvas, Rgba};
 use crate::bubbles::{BubblesSet, DeliberationHeads};
+use crate::chat::ChatWindow;
 use crate::env_art::{px, rect, rgb};
 use crate::life_fx::head_of;
 use crate::npc_render::{NpcRenderSet, NpcSpriteIndex, NpcVisual};
+use crate::player::Player;
 use crate::saves::WorldRebuildSet;
 use crate::sim_bridge::DeliberationGrace;
 use crate::state::{NpcSprite, SelectedNpc, Sim, SimClock, WorldReplaced};
@@ -109,6 +116,7 @@ pub struct SpeechPlugin;
 impl Plugin for SpeechPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SpeechMode>()
+            .init_resource::<ChatSays>()
             .add_systems(Startup, make_art)
             .add_systems(
                 PreUpdate,
@@ -126,6 +134,8 @@ impl Plugin for SpeechPlugin {
                     update_greetings,
                     center_greet_texts,
                     update_talk_marks,
+                    update_chat_says,
+                    center_say_texts,
                 )
                     .chain()
                     .after(BubblesSet)
@@ -571,10 +581,15 @@ struct SpeechEntity;
 
 // --- Sistemi ----------------------------------------------------------------------------
 
-fn reset_speech(mut commands: Commands, parts: Query<Entity, With<SpeechEntity>>) {
+fn reset_speech(
+    mut commands: Commands,
+    parts: Query<Entity, With<SpeechEntity>>,
+    mut says: ResMut<ChatSays>,
+) {
     for entity in &parts {
         commands.entity(entity).despawn();
     }
+    *says = ChatSays::default();
 }
 
 fn speech_keys(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<SpeechMode>) {
@@ -1209,6 +1224,8 @@ type GreetOnly = (
     Without<ChatBubble>,
     Without<ChatPart>,
     Without<ChatText>,
+    Without<SayBubble>,
+    Without<SayText>,
 );
 
 /// Crea, sposta e toglie i fumetti dei saluti al giocatore.
@@ -1224,6 +1241,7 @@ fn update_greetings(
     sprites: Query<(&Transform, &NpcVisual), With<NpcSprite>>,
     mut bubbles: Query<(Entity, &mut GreetBubble, &mut Transform, &mut Sprite), GreetOnly>,
     texts: Query<&TextLayoutInfo, With<GreetText>>,
+    chat: Option<Res<ChatWindow>>,
 ) {
     let Some(art) = art else {
         return;
@@ -1231,13 +1249,18 @@ fn update_greetings(
     let real = time.elapsed_secs_f64();
     let world = &sim.world;
     let fast = !clock.paused && clock.minutes_per_second > FAST_SPEED;
+    // Chi parla col giocatore ha i fumetti della chat.
+    let chatting = chat.and_then(|c| c.npc);
     let mut shown: HashSet<(NpcId, GameTime)> = HashSet::new();
     for (entity, mut bubble, mut transform, mut sprite) in &mut bubbles {
         let alive = world
             .greeting_of(bubble.npc)
             .is_some_and(|g| g.since == bubble.since);
         let head = head_of(&index, &sprites, bubble.npc);
-        if (!alive && real - bubble.born >= GREET_SECS) || *mode == SpeechMode::Off {
+        if (!alive && real - bubble.born >= GREET_SECS)
+            || *mode == SpeechMode::Off
+            || chatting == Some(bubble.npc)
+        {
             commands.entity(entity).despawn();
             continue;
         }
@@ -1266,7 +1289,7 @@ fn update_greetings(
         return;
     }
     for greeting in world.greetings() {
-        if shown.contains(&(greeting.npc, greeting.since)) {
+        if shown.contains(&(greeting.npc, greeting.since)) || chatting == Some(greeting.npc) {
             continue;
         }
         let Some(head) = head_of(&index, &sprites, greeting.npc) else {
@@ -1351,16 +1374,21 @@ fn update_talk_marks(
     sprites: Query<(&Transform, &NpcVisual), With<NpcSprite>>,
     mut marks: Query<
         (Entity, &TalkMark, &mut Transform),
-        (Without<NpcSprite>, Without<GreetBubble>),
+        (Without<NpcSprite>, Without<GreetBubble>, Without<SayBubble>),
     >,
+    chat: Option<Res<ChatWindow>>,
 ) {
     let Some(art) = art else {
         return;
     };
     let world = &sim.world;
     let bob = (time.elapsed_secs() * MARK_BOB_SPEED).sin() * MARK_BOB;
+    let chatting = chat.and_then(|c| c.npc);
     let wanted = |id: NpcId| {
-        *mode != SpeechMode::Off && world.wants_to_talk(id) && world.greeting_of(id).is_none()
+        *mode != SpeechMode::Off
+            && world.wants_to_talk(id)
+            && world.greeting_of(id).is_none()
+            && chatting != Some(id)
     };
     let mut has_mark: HashSet<NpcId> = HashSet::new();
     for (entity, mark, mut transform) in &mut marks {
@@ -1386,6 +1414,289 @@ fn update_talk_marks(
                 Anchor::BOTTOM_CENTER,
                 Transform::from_xyz(head.x, head.y + GAP, REACTION_Z),
             ));
+        }
+    }
+}
+
+// --- Battute della chat del giocatore ------------------------------------------------------
+
+/// Chi dice una battuta della chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Sayer {
+    Player,
+    Npc(NpcId),
+}
+
+/// Una battuta della chat da mostrare in un fumetto.
+#[derive(Clone, Debug)]
+pub(crate) struct Say {
+    pub(crate) who: Sayer,
+    pub(crate) text: String,
+    serial: u64,
+}
+
+/// Battute della chat (le aggiunge `chat.rs`): una per chi parla, l'ultima.
+/// Restano finché il loro fumetto non svanisce.
+#[derive(Resource, Default)]
+pub(crate) struct ChatSays {
+    says: Vec<Say>,
+    next: u64,
+}
+
+impl ChatSays {
+    /// `who` dice `text` (al posto della sua battuta precedente).
+    pub(crate) fn say(&mut self, who: Sayer, text: String) {
+        self.says.retain(|s| s.who != who);
+        self.says.push(Say {
+            who,
+            text,
+            serial: self.next,
+        });
+        self.next += 1;
+    }
+
+    /// Le battute ancora da mostrare o in mostra.
+    pub(crate) fn pending(&self) -> impl Iterator<Item = &Say> {
+        self.says.iter()
+    }
+}
+
+/// Caratteri per riga e righe al massimo dei fumetti della chat (più lunghi
+/// di quelli tra NPC: si legge con il tempo fermo).
+const SAY_CHARS: usize = 26;
+const SAY_LINES: usize = 4;
+/// Il fumetto sopra il giocatore: quanto sopra il centro del suo corpo.
+const PLAYER_HEAD: f32 = 13.0;
+
+/// Secondi reali per cui resta una battuta della chat.
+pub(crate) fn say_secs(text: &str) -> f64 {
+    (2.5 + 0.06 * text.chars().count() as f64).clamp(GREET_SECS, 9.0)
+}
+
+/// Fumetto di una battuta della chat.
+#[derive(Component)]
+struct SayBubble {
+    who: Sayer,
+    serial: u64,
+    born: f64,
+    life: f64,
+    head: Vec2,
+    /// Da che parte si allarga: -1 a sinistra, 1 a destra (lontano
+    /// dall'interlocutore, così i due fumetti non si coprono), 0 al centro.
+    side: i8,
+    text: Entity,
+    tail: Entity,
+}
+
+/// Da che parte allargare il fumetto di chi sta in `head`, se l'altro è in `other`.
+fn side_away(head: Vec2, other: Option<Vec2>) -> i8 {
+    match other {
+        Some(o) if o.x > head.x => -1,
+        Some(_) => 1,
+        None => 0,
+    }
+}
+
+/// Ancora del fondo, x del punto di aggancio rispetto alla testa, x della
+/// codina e del testo (rispetto al punto di aggancio) per un lato.
+fn side_layout(side: i8, width: f32) -> (Anchor, f32, f32, f32) {
+    match side {
+        -1 => (Anchor::BOTTOM_RIGHT, 4.0, -6.0, -width / 2.0),
+        1 => (Anchor::BOTTOM_LEFT, -4.0, 2.0, width / 2.0),
+        _ => (Anchor::BOTTOM_CENTER, 0.0, -2.0, 0.0),
+    }
+}
+
+/// Testo (figlio) di una battuta della chat.
+#[derive(Component)]
+struct SayText;
+
+type SayOnly = (
+    Without<NpcSprite>,
+    Without<Player>,
+    Without<GreetBubble>,
+    Without<GreetText>,
+    Without<TalkMark>,
+    Without<ChatBubble>,
+    Without<ChatPart>,
+    Without<ChatText>,
+    Without<SayText>,
+    Without<SayTail>,
+);
+
+/// Crea, sposta e toglie i fumetti della chat del giocatore.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn update_chat_says(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    mut says: ResMut<ChatSays>,
+    art: Option<Res<SpeechArt>>,
+    index: Res<NpcSpriteIndex>,
+    sprites: Query<(&Transform, &NpcVisual), With<NpcSprite>>,
+    player: Query<&Transform, (With<Player>, Without<NpcSprite>, Without<SayBubble>)>,
+    mut bubbles: Query<
+        (
+            Entity,
+            &mut SayBubble,
+            &mut Transform,
+            &mut Sprite,
+            &mut Anchor,
+        ),
+        SayOnly,
+    >,
+    texts: Query<&TextLayoutInfo, With<SayText>>,
+    chat: Option<Res<ChatWindow>>,
+) {
+    let Some(art) = art else {
+        return;
+    };
+    let real = time.elapsed_secs_f64();
+    let head_of_sayer = |who: Sayer| match who {
+        Sayer::Npc(id) => head_of(&index, &sprites, id),
+        Sayer::Player => player
+            .iter()
+            .next()
+            .map(|t| t.translation.truncate() + Vec2::Y * PLAYER_HEAD),
+    };
+    // L'interlocutore: il giocatore per l'NPC, l'NPC della chat per il giocatore.
+    let chatting = chat.and_then(|c| c.npc);
+    let other_of = |who: Sayer| match who {
+        Sayer::Npc(_) => head_of_sayer(Sayer::Player),
+        Sayer::Player => chatting.and_then(|id| head_of_sayer(Sayer::Npc(id))),
+    };
+    let mut shown: HashSet<u64> = HashSet::new();
+    let mut expired: Vec<u64> = Vec::new();
+    for (entity, mut bubble, mut transform, mut sprite, mut anchor) in &mut bubbles {
+        let current = says.pending().any(|s| s.serial == bubble.serial);
+        let age = real - bubble.born;
+        if !current || age >= bubble.life {
+            commands.entity(entity).despawn();
+            if current {
+                expired.push(bubble.serial);
+            }
+            continue;
+        }
+        shown.insert(bubble.serial);
+        let head = head_of_sayer(bubble.who).unwrap_or(bubble.head);
+        bubble.head = head;
+        bubble.side = side_away(head, other_of(bubble.who));
+        let layout = texts.get(bubble.text).ok();
+        let text = says
+            .pending()
+            .find(|s| s.serial == bubble.serial)
+            .map(|s| wrap_text(&s.text, SAY_CHARS, SAY_LINES).join("\n"));
+        let size = bubble_size(text.map(Shown::Text).as_ref(), layout);
+        if sprite.custom_size != Some(size) {
+            sprite.custom_size = Some(size);
+        }
+        let fade_in = (age as f32 / FADE_SECS).min(1.0);
+        let fade_out = ((bubble.life - age) as f32 / FADE_SECS).min(1.0);
+        sprite.color = Color::WHITE.with_alpha(fade_in.min(fade_out));
+        let (wanted, dx, _, _) = side_layout(bubble.side, size.x);
+        if *anchor != wanted {
+            *anchor = wanted;
+        }
+        transform.translation =
+            Vec3::new((head.x + dx).round(), (head.y + GAP + 2.0).round(), GREET_Z);
+    }
+    if !expired.is_empty() {
+        says.says.retain(|s| !expired.contains(&s.serial));
+    }
+    for say in says.pending() {
+        if shown.contains(&say.serial) {
+            continue;
+        }
+        let Some(head) = head_of_sayer(say.who) else {
+            continue;
+        };
+        let tone = match say.who {
+            Sayer::Player => Tone::Neutral,
+            Sayer::Npc(_) => Tone::Friendly,
+        };
+        let text = wrap_text(&say.text, SAY_CHARS, SAY_LINES).join("\n");
+        let size = bubble_size(Some(&Shown::Text(text.clone())), None);
+        let side = side_away(head, other_of(say.who));
+        let (bubble_anchor, dx, tail_x, text_x) = side_layout(side, size.x);
+        let text_entity = commands
+            .spawn((
+                SayText,
+                Text2d::new(text),
+                TextFont {
+                    font_size: FontSize::Px(TEXT_SIZE),
+                    ..default()
+                },
+                TextLayout::new(Justify::Center, LineBreak::NoWrap),
+                TextColor(TEXT_COLOR),
+                Anchor::CENTER,
+                Transform::from_xyz(text_x, size.y / 2.0, 0.02).with_scale(Vec3::splat(TEXT_SCALE)),
+            ))
+            .id();
+        let tail = commands
+            .spawn((
+                SayTail,
+                Sprite::from_image(art.tail[tone.index()].clone()),
+                Anchor::TOP_LEFT,
+                Transform::from_xyz(tail_x, 1.0, 0.01),
+            ))
+            .id();
+        commands
+            .spawn((
+                Name::new("Battuta della chat"),
+                SpeechEntity,
+                SayBubble {
+                    who: say.who,
+                    serial: say.serial,
+                    born: real,
+                    life: say_secs(&say.text),
+                    head,
+                    side,
+                    text: text_entity,
+                    tail,
+                },
+                Sprite {
+                    image: art.body[tone.index()].clone(),
+                    custom_size: Some(size),
+                    image_mode: slicer(),
+                    color: Color::WHITE.with_alpha(0.0),
+                    ..default()
+                },
+                bubble_anchor,
+                Transform::from_xyz(head.x + dx, head.y + GAP + 2.0, GREET_Z),
+            ))
+            .add_children(&[tail, text_entity]);
+    }
+}
+
+/// Codina (figlia) di una battuta della chat.
+#[derive(Component)]
+struct SayTail;
+
+/// Tiene il testo al centro del suo fumetto e la codina sopra la testa
+/// (dimensioni e lato cambiano quando il testo è impaginato).
+#[allow(clippy::type_complexity)]
+fn center_say_texts(
+    bubbles: Query<(&SayBubble, &Sprite)>,
+    mut parts: ParamSet<(
+        Query<&mut Transform, With<SayText>>,
+        Query<&mut Transform, With<SayTail>>,
+    )>,
+) {
+    for (bubble, sprite) in &bubbles {
+        let Some(size) = sprite.custom_size else {
+            continue;
+        };
+        let (_, _, tail_x, text_x) = side_layout(bubble.side, size.x);
+        let wanted = Vec2::new(text_x, size.y / 2.0);
+        if let Ok(mut t) = parts.p0().get_mut(bubble.text)
+            && t.translation.truncate().distance(wanted) > 0.01
+        {
+            t.translation.x = wanted.x;
+            t.translation.y = wanted.y;
+        }
+        if let Ok(mut t) = parts.p1().get_mut(bubble.tail)
+            && (t.translation.x - tail_x).abs() > 0.01
+        {
+            t.translation.x = tail_x;
         }
     }
 }

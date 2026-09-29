@@ -4,8 +4,9 @@
 //! Porta la simulazione alla sera (chi dorme, dorme anche al piano di sopra),
 //! porta il giocatore davanti alla prima carrozza a più piani, salva uno
 //! screenshot per scena (piano terra, piano di sopra, sulla scala, vista
-//! allargata, la cabina del giocatore con un amico che lo saluta) nella
-//! cartella e chiude il gioco. Senza la variabile non fa nulla.
+//! allargata, la cabina del giocatore con un amico che lo saluta, la chat
+//! con l'amico) nella cartella e chiude il gioco. Senza la variabile non fa
+//! nulla.
 //!
 //! La camera disegna su un'immagine fuori schermo, non sulla finestra: macOS
 //! non disegna le finestre coperte o con lo schermo bloccato (screenshot
@@ -23,6 +24,7 @@ use sim::GameTime;
 
 use crate::cabin::ChestWindow;
 use crate::camera::WideView;
+use crate::chat::{ChatCommand, ChatQueue};
 use crate::inventory::InventoryWindow;
 use crate::player::{Body, Player, start_position};
 use crate::state::Sim;
@@ -95,24 +97,25 @@ enum Spot {
     Floor(usize, Option<f32>),
     /// Nella sua cabina, accanto al letto; con inventario e baule aperti.
     Cabin { windows: bool },
+    /// Nella sua cabina, in chat con l'amico.
+    Chat,
 }
 
 /// Nome del file, posto del giocatore, vista allargata.
-const SCENES: [(&str, Spot, bool); 6] = [
+const SCENES: [(&str, Spot, bool); 7] = [
     ("1-piano-terra", Spot::Floor(0, Some(160.0)), false),
     ("2-piano-sopra", Spot::Floor(1, Some(160.0)), false),
     ("3-sulla-scala", Spot::Floor(0, None), false),
     ("4-vista-allargata", Spot::Floor(1, Some(120.0)), true),
     ("5-cabina", Spot::Cabin { windows: false }, false),
     ("6-inventario-baule", Spot::Cabin { windows: true }, false),
+    ("7-chat", Spot::Chat, false),
 ];
 
 /// Un amico del giocatore sveglio nella cabina, e qualcosa nell'inventario
-/// e nel baule: la scena mostra il saluto e le finestre piene.
-fn stage_cabin(world: &mut sim::World) {
-    let Some(home) = world.player.home else {
-        return;
-    };
+/// e nel baule: la scena mostra il saluto e le finestre piene. Restituisce l'amico.
+fn stage_cabin(world: &mut sim::World) -> Option<sim::NpcId> {
+    let home = world.player.home?;
     world.set_player_place(home.place());
     if world.player.inventory.is_empty() {
         for (item, n) in [
@@ -126,13 +129,10 @@ fn stage_cabin(world: &mut sim::World) {
         world.player.chest.add(sim::ItemKind::Tessuto, 7);
         world.player.chest.add(sim::ItemKind::Coperta, 2);
     }
-    let Some(i) = world
+    let i = world
         .npcs
         .iter()
-        .position(|n| n.carriage == home.carriage && n.age >= 18)
-    else {
-        return;
-    };
+        .position(|n| n.carriage == home.carriage && n.age >= 18)?;
     let now = world.clock;
     let npc = &mut world.npcs[i];
     if let Some(s) = npc.action.station() {
@@ -143,10 +143,13 @@ fn stage_cabin(world: &mut sim::World) {
     npc.action = sim::Action::Idle;
     npc.action_since = now;
     npc.action_until = now + 60;
-    npc.player = Some(sim::PlayerTie {
-        affinity: 0.8,
-        ..sim::PlayerTie::default()
-    });
+    if npc.player.is_none() {
+        npc.player = Some(sim::PlayerTie {
+            affinity: 0.8,
+            ..sim::PlayerTie::default()
+        });
+    }
+    Some(npc.id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -158,7 +161,11 @@ fn run_script(
     mut script: ResMut<ShotScript>,
     mut sim: ResMut<Sim>,
     mut wide: ResMut<WideView>,
-    mut ui_windows: (ResMut<InventoryWindow>, ResMut<ChestWindow>),
+    mut ui_windows: (
+        ResMut<InventoryWindow>,
+        ResMut<ChestWindow>,
+        ResMut<ChatQueue>,
+    ),
     mut body: Single<&mut Body, With<Player>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -213,7 +220,24 @@ fn run_script(
             let x = TrainLayout::carriage_left(cabin.carriage.index()) + cabin.bed_x + 18.0;
             Vec2::new(x, cabin.base_y() + half_height)
         }
-        (Spot::Cabin { .. }, None) => start_position(),
+        (Spot::Chat, Some(cabin)) => {
+            let friend = stage_cabin(&mut sim.world);
+            ui_windows.0.open = false;
+            ui_windows.1.open = false;
+            if let Some(id) = friend {
+                ui_windows.2.0.extend([
+                    ChatCommand::Open(id),
+                    ChatCommand::Say(sim::Intent::Greet),
+                    ChatCommand::Say(sim::Intent::AskJob),
+                    ChatCommand::Type("ciao, quanto costa un vestito?".to_string()),
+                    ChatCommand::Say(sim::Intent::AskFavour),
+                    ChatCommand::Say(sim::Intent::AskNews),
+                ]);
+            }
+            let x = TrainLayout::carriage_left(cabin.carriage.index()) + cabin.bed_x + 18.0;
+            Vec2::new(x, cabin.base_y() + half_height)
+        }
+        (Spot::Cabin { .. } | Spot::Chat, None) => start_position(),
     };
     body.teleport(position);
     body.climbing = spot == Spot::Floor(0, None);

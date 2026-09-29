@@ -182,7 +182,7 @@ fn inventory_window(
             slot_grid(ui, inv, "inventory_slots", None);
             ui.separator();
             ui.weak(
-                "E vicino alle scorte: prendi (Q: cambia)\nE al bancone del Mercato: compra (Q: cambia)\nM: mercato, per comprare e vendere\nC: crafting\nE vicino a un NPC: regala\nNella tua cabina: E sul letto (dormi), E sul baule",
+                "E vicino alle scorte: prendi (Q: cambia)\nE al bancone del Mercato: compra (Q: cambia)\nM: mercato, per comprare e vendere\nC: crafting\nE vicino a un NPC: regala (se non accetta niente, parla)\nT vicino a un NPC: chat (saluta, chiedi, incarichi, scambia…)\nNella tua cabina: E sul letto (dormi), E sul baule",
             );
         });
     if !open {

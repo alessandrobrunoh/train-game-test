@@ -42,7 +42,7 @@ fn spawn_hud(mut commands: Commands) {
         ));
     commands.spawn((
         Text::new(
-            "A/D: muovi   Spazio/W: salta   W/S: scale   Z: vista piani   E: interagisci (in cabina: letto, baule)   Q: cambia oggetto   I: inventario   C: crafting   M: mercato   P: pausa   1-5: velocità   Click: seleziona NPC   F: segui NPC   V: fumetti   G: popolazione   H: storia   B: cervello   F5: salva   F9: carica   Esc: partite",
+            "A/D: muovi   Spazio/W: salta   W/S: scale   Z: vista piani   E: interagisci (in cabina: letto, baule)   T: parla con un NPC   Q: cambia oggetto   I: inventario   C: crafting   M: mercato   P: pausa   1-5: velocità   Click: seleziona NPC   F: segui NPC   V: fumetti   G: popolazione   H: storia   B: cervello   F5: salva   F9: carica   Esc: partite",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),
