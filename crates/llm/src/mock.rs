@@ -69,6 +69,7 @@ impl Llm for MockLlm {
             model: "mock".to_string(),
             usage: None,
             latency: self.delay,
+            reasoning_chars: 0,
         })
     }
 }

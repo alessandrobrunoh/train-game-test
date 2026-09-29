@@ -11,6 +11,7 @@
 //! | `LLM_TEMPERATURE` | Default temperature; unset: the provider's. | — |
 //! | `LLM_JSON_MODE` | Send `response_format: json_object` for JSON requests (`true`/`false`). | false |
 //! | `LLM_MAX_RETRIES` | Extra attempts on rate limits, overloads and network errors. | 1 |
+//! | `LLM_REASONING_EFFORT` | `low`, `medium` or `high`, sent as `reasoning_effort` to reasoning models (gpt-oss wants `low`: its reasoning counts against the tokens of the answer). Unset: not sent. | — |
 //!
 //! Variables already set in the process win over the `.env` file, which is
 //! searched in the current directory and its parents. The process
@@ -33,6 +34,8 @@ pub struct LlmConfig {
     pub temperature: Option<f32>,
     pub json_mode: bool,
     pub max_retries: u32,
+    /// `reasoning_effort` for reasoning models ("low", "medium", "high").
+    pub reasoning_effort: Option<String>,
 }
 
 /// Debug without the key: configs end up in logs.
@@ -48,6 +51,7 @@ impl fmt::Debug for LlmConfig {
             .field("temperature", &self.temperature)
             .field("json_mode", &self.json_mode)
             .field("max_retries", &self.max_retries)
+            .field("reasoning_effort", &self.reasoning_effort)
             .finish()
     }
 }
@@ -146,6 +150,18 @@ impl LlmConfig {
                 });
             }
         };
+        let reasoning_effort = match get("LLM_REASONING_EFFORT") {
+            None => None,
+            Some(v) => match v.to_lowercase().as_str() {
+                e @ ("low" | "medium" | "high") => Some(e.to_string()),
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        var: "LLM_REASONING_EFFORT",
+                        value: v,
+                    });
+                }
+            },
+        };
         Ok(Some(Self {
             endpoint: endpoint(&url),
             api_key: get("LLM_API_KEY"),
@@ -160,6 +176,7 @@ impl LlmConfig {
             temperature,
             json_mode,
             max_retries: number("LLM_MAX_RETRIES", get("LLM_MAX_RETRIES"), 1)?,
+            reasoning_effort,
         }))
     }
 }
@@ -266,6 +283,7 @@ mod tests {
         assert_eq!(c.temperature, None);
         assert!(!c.json_mode);
         assert_eq!(c.max_retries, 1);
+        assert_eq!(c.reasoning_effort, None);
         let full = config(&[
             ("LLM_API_URL", "http://localhost:11434/v1/chat/completions"),
             ("LLM_MODEL", "m"),
@@ -287,6 +305,7 @@ mod tests {
             ("LLM_TEMPERATURE", "0.7"),
             ("LLM_JSON_MODE", "true"),
             ("LLM_MAX_RETRIES", "0"),
+            ("LLM_REASONING_EFFORT", "Low"),
         ])
         .unwrap()
         .unwrap();
@@ -298,6 +317,7 @@ mod tests {
         );
         assert_eq!(c.temperature, Some(0.7));
         assert!(c.json_mode);
+        assert_eq!(c.reasoning_effort.as_deref(), Some("low"));
     }
 
     #[test]
@@ -311,6 +331,7 @@ mod tests {
             ("LLM_MAX_CALLS_PER_HOUR", "-1"),
             ("LLM_TEMPERATURE", "5"),
             ("LLM_JSON_MODE", "forse"),
+            ("LLM_REASONING_EFFORT", "tanto"),
         ] {
             assert!(
                 matches!(

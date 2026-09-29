@@ -51,6 +51,9 @@ impl OpenAiClient {
         if request.json && c.json_mode {
             body["response_format"] = json!({ "type": "json_object" });
         }
+        if let Some(effort) = &c.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         body
     }
 
@@ -118,6 +121,10 @@ fn parse_answer(text: &str, latency: Duration) -> Result<Response, LlmError> {
     let bad = |why: &str| LlmError::BadResponse(why.to_string());
     let v: Value = serde_json::from_str(text).map_err(|e| bad(&format!("not JSON: {e}")))?;
     let message = &v["choices"][0]["message"];
+    // Cut at `max_tokens`: the text is missing or incomplete.
+    if v["choices"][0]["finish_reason"].as_str() == Some("length") {
+        return Err(LlmError::Truncated);
+    }
     let content = message["content"]
         .as_str()
         .filter(|s| !s.trim().is_empty())
@@ -132,11 +139,18 @@ fn parse_answer(text: &str, latency: Duration) -> Result<Response, LlmError> {
             completion_tokens: n("completion_tokens"),
         }
     });
+    // Reasoning models (gpt-oss) return their thoughts apart: only the
+    // length is kept, for measurement.
+    let reasoning = ["reasoning", "reasoning_content"]
+        .iter()
+        .find_map(|k| message[*k].as_str())
+        .map_or(0, |r| r.chars().count() as u32);
     Ok(Response {
         text: content.to_string(),
         model: v["model"].as_str().unwrap_or_default().to_string(),
         usage,
         latency,
+        reasoning_chars: reasoning,
     })
 }
 
@@ -145,11 +159,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn body_sends_reasoning_effort_only_when_set() {
+        let client = |effort: Option<&'static str>| {
+            let vars = move |k: &str| match k {
+                "LLM_API_URL" => Some("http://x/v1".to_string()),
+                "LLM_MODEL" => Some("m".to_string()),
+                "LLM_REASONING_EFFORT" => effort.map(str::to_string),
+                _ => None,
+            };
+            OpenAiClient::new(LlmConfig::from_vars(vars).unwrap().unwrap())
+        };
+        let r = Request::new("s", "u");
+        assert_eq!(client(Some("low")).body(&r)["reasoning_effort"], "low");
+        assert!(client(None).body(&r).get("reasoning_effort").is_none());
+    }
+
+    #[test]
     fn answer_parsing() {
         let ok = r#"{"model":"m-1","choices":[{"message":{"role":"assistant","content":"Ciao!"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}"#;
         let r = parse_answer(ok, Duration::from_millis(5)).unwrap();
         assert_eq!(r.text, "Ciao!");
         assert_eq!(r.model, "m-1");
+        assert_eq!(r.reasoning_chars, 0);
+        let thought = r#"{"choices":[{"message":{"content":"ok","reasoning":"Penso."},"finish_reason":"stop"}]}"#;
+        assert_eq!(
+            parse_answer(thought, Duration::ZERO)
+                .unwrap()
+                .reasoning_chars,
+            6
+        );
         assert_eq!(
             r.usage,
             Some(Usage {
@@ -159,7 +197,15 @@ mod tests {
         );
         let empty = r#"{"choices":[{"message":{"content":null},"finish_reason":"length"}]}"#;
         let e = parse_answer(empty, Duration::ZERO).unwrap_err();
+        assert_eq!(e, LlmError::Truncated);
         assert!(e.to_string().contains("length"), "{e}");
+        let cut = r#"{"choices":[{"message":{"content":"{\"motivo\": \"Il tr"},"finish_reason":"length"}]}"#;
+        assert_eq!(parse_answer(cut, Duration::ZERO), Err(LlmError::Truncated));
+        let none = r#"{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}"#;
+        assert!(matches!(
+            parse_answer(none, Duration::ZERO),
+            Err(LlmError::BadResponse(_))
+        ));
         assert!(matches!(
             parse_answer("<html>", Duration::ZERO),
             Err(LlmError::BadResponse(_))

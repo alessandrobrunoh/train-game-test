@@ -99,6 +99,10 @@ pub struct Response {
     /// Wall-clock time of the call.
     #[serde(with = "millis")]
     pub latency: Duration,
+    /// Characters of reasoning a reasoning model returned apart from the
+    /// text (0 for the others). Only measured, never shown.
+    #[serde(default)]
+    pub reasoning_chars: u32,
 }
 
 mod millis {

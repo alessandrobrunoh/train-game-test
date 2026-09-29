@@ -69,7 +69,8 @@ impl<L: Llm> Llm for Recorder<L> {
 
 /// Answers from a log: each request gets the recorded answers for the same
 /// request, in order. Recorded failures come back as
-/// [`LlmError::BadResponse`]; unknown requests as [`LlmError::NotRecorded`].
+/// [`LlmError::BadResponse`] (a truncated answer as [`LlmError::Truncated`]);
+/// unknown requests as [`LlmError::NotRecorded`].
 pub struct Replay {
     answers: Mutex<HashMap<String, VecDeque<Result<Response, String>>>>,
 }
@@ -94,6 +95,7 @@ impl Llm for Replay {
             .and_then(VecDeque::pop_front)
         {
             Some(Ok(response)) => Ok(response),
+            Some(Err(error)) if error == crate::error::TRUNCATED => Err(LlmError::Truncated),
             Some(Err(error)) => Err(LlmError::BadResponse(error)),
             None => Err(LlmError::NotRecorded),
         }
@@ -123,11 +125,14 @@ mod tests {
             Ok("primo".to_string()),
             Err(LlmError::Timeout),
             Ok("terzo".to_string()),
+            Err(LlmError::Truncated),
         ]));
         let (a, b) = (Request::new("s", "a"), Request::new("s", "b"));
         let live = [rec.complete(&a), rec.complete(&b), rec.complete(&a)];
+        let c = Request::new("s", "c");
+        assert_eq!(rec.complete(&c), Err(LlmError::Truncated));
         let log = rec.take_log();
-        assert_eq!(log.len(), 3);
+        assert_eq!(log.len(), 4);
         assert!(rec.take_log().is_empty());
         // Through JSON, as in a save file.
         let json = serde_json::to_string(&log).unwrap();
@@ -139,6 +144,8 @@ mod tests {
             Err(LlmError::BadResponse("timed out".to_string()))
         );
         assert_eq!(replay.complete(&a), Err(LlmError::NotRecorded));
+        // A truncation stays a truncation, so the replay retries the same way.
+        assert_eq!(replay.complete(&c), Err(LlmError::Truncated));
         assert_eq!(live[0].as_ref().unwrap().text, "primo");
     }
 }
