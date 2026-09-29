@@ -1,0 +1,12 @@
+[package]
+name = "narrator"
+edition.workspace = true
+version.workspace = true
+
+# The Narratore: watches the train (read-only on `sim`) and asks the big LLM
+# (`llm`) for one novelty per game day. `sim` never depends on this crate.
+[dependencies]
+llm = { path = "../llm" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sim = { path = "../sim" }
