@@ -255,6 +255,7 @@ impl LoadedGame {
             inventory: PlayerInventory {
                 tokens: body.tokens,
                 items: body.items,
+                learnt_recipes: body.learnt_recipes,
             },
             clock: SimClock {
                 paused: true,
@@ -296,6 +297,7 @@ pub fn encode_game(
         player: player.to_array(),
         tokens: inventory.tokens,
         items: inventory.items,
+        learnt_recipes: &inventory.learnt_recipes,
         minutes_per_second: clock.minutes_per_second,
         paused: clock.paused,
     };

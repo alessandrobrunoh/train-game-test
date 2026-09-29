@@ -23,7 +23,7 @@ use crate::saves::SavesWindow;
 use crate::sim_bridge::{DeliberationGrace, SPEEDS, seconds_per_year};
 use crate::speech::{FAST_SPEED, SpeechMode};
 use crate::state::{FollowNpc, PointerOverUi, SelectedNpc, Sim, SimClock, SimPerf};
-use crate::storage::{item_color, plural_title, storable_items};
+use crate::storage::{item_color, kept_items, plural_title};
 /// Quanti eventi mostrare nel registro (i più recenti).
 const EVENT_LOG_LEN: usize = 50;
 /// Ogni quanti secondi reali ricalcolare statistiche e presenze.
@@ -640,6 +640,7 @@ impl EventCategory {
             EventKind::Shortage { .. } | EventKind::Restocked { .. } => EventCategory::Scarsita,
             EventKind::PlayerTook { .. }
             | EventKind::PlayerBought { .. }
+            | EventKind::PlayerSold { .. }
             | EventKind::PlayerGave { .. } => EventCategory::Giocatore,
             EventKind::DeliberationAsked { kind, .. }
             | EventKind::DeliberationResolved { kind, .. } => match kind {
@@ -783,6 +784,7 @@ pub(crate) fn event_color(kind: &EventKind) -> Color32 {
         EventKind::Retired { .. } => Color32::GRAY,
         EventKind::PlayerTook { .. }
         | EventKind::PlayerBought { .. }
+        | EventKind::PlayerSold { .. }
         | EventKind::PlayerGave { .. } => PLAYER,
         EventKind::DeliberationAsked { .. } | EventKind::DeliberationResolved { .. } => {
             Color32::GRAY
@@ -831,19 +833,17 @@ fn carriage_overview(
                 .max_height(260.0)
                 .show(ui, |ui| {
                     egui::Grid::new("carriage_grid")
-                        .num_columns(5 + ItemKind::COUNT)
+                        .num_columns(6)
                         .striped(true)
                         .spacing([10.0, 2.0])
                         .show(ui, |ui| {
                             for header in ["N.", "Nome", "Tipo", "Presenti"] {
                                 ui.strong(header);
                             }
-                            for item in ItemKind::ALL {
-                                ui.horizontal(|ui| {
-                                    item_swatch(ui, item);
-                                    ui.strong(plural_title(item));
-                                });
-                            }
+                            ui.strong("Scorte").on_hover_text(
+                                "Unità per oggetto (colore come le casse; \
+                                 passa sopra per il nome)",
+                            );
                             ui.strong("Prezzi");
                             ui.end_row();
                             for carriage in &world.carriages {
@@ -862,7 +862,13 @@ fn carriage_overview(
                                     .unwrap_or(0);
                                 ui.label(text(carriage.id.to_string()));
                                 ui.label(text(carriage.name.clone()));
-                                ui.label(text(carriage.kind.to_string()));
+                                let kind = ui.label(text(carriage.kind.to_string()));
+                                let specialties = world.specialties(carriage.id);
+                                if !specialties.is_empty() {
+                                    let names: Vec<&str> =
+                                        specialties.iter().map(|i| i.plural()).collect();
+                                    kind.on_hover_text(format!("Specialità: {}", names.join(", ")));
+                                }
                                 ui.label(text(present.to_string()));
                                 stock_cells(ui, world, carriage);
                                 ui.end_row();
@@ -872,18 +878,24 @@ fn carriage_overview(
         });
 }
 
-/// Una colonna per oggetto (vuota se la carrozza non lo tiene) e i prezzi
-/// dei Mercati.
+/// Le scorte in una cella compatta (quadratino del colore dell'oggetto e
+/// unità, solo per gli oggetti che la carrozza tiene: nei Dormitori le
+/// comodità) e i prezzi dei Mercati.
 fn stock_cells(ui: &mut egui::Ui, world: &World, carriage: &Carriage) {
-    let storable = storable_items(&world.params, carriage.kind);
-    for item in ItemKind::ALL {
-        if storable.contains(&item) {
-            let n = carriage.stock.count(item);
-            let text = RichText::new(n.to_string());
-            ui.label(if n == 0 { text.color(DANGER) } else { text });
-        } else {
-            ui.weak("·");
-        }
+    let kept = kept_items(&world.params, carriage.kind);
+    if kept.is_empty() {
+        ui.weak("·");
+    } else {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            for item in kept {
+                let n = carriage.stock.count(item);
+                item_swatch(ui, item);
+                let text = RichText::new(n.to_string());
+                ui.label(if n == 0 { text.color(DANGER) } else { text })
+                    .on_hover_text(plural_title(item));
+            }
+        });
     }
     let prices: Vec<String> = ItemKind::ALL
         .into_iter()
@@ -895,8 +907,10 @@ fn stock_cells(ui: &mut egui::Ui, world: &World, carriage: &Carriage) {
     if prices.is_empty() {
         ui.weak("·");
     } else {
-        ui.label(prices.join(" · "))
-            .on_hover_text("Prezzo in gettoni: sale quando lo scaffale si svuota");
+        ui.label(prices.join(" · ")).on_hover_text(
+            "Prezzo in gettoni: sale con la distanza dal produttore e quando lo scaffale \
+                 si svuota (M: mercato e listino)",
+        );
     }
 }
 

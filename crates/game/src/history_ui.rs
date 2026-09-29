@@ -665,6 +665,7 @@ fn player_log(ui: &mut egui::Ui, world: &World, view: &View) {
                 let (verb, extra) = match t.kind.as_str() {
                     "PlayerTook" => ("Preso", String::new()),
                     "PlayerBought" => ("Comprato", format!(" per {} gettoni", t.tokens)),
+                    "PlayerSold" => ("Venduto", format!(" per {} gettoni", t.tokens)),
                     _ => ("Regalato", String::new()),
                 };
                 ui.weak(verb);

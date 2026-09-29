@@ -1,9 +1,9 @@
 //! Interazioni del giocatore con il treno: tasto E vicino alle cose, Q per
-//! scegliere cosa comprare.
+//! scegliere cosa prendere o comprare.
 //!
-//! - Vicino al magazzino di una carrozza (non Mercato): prende un'unità
-//!   dell'oggetto più abbondante. Non si paga, ma il treno se ne accorge
-//!   (evento nel registro).
+//! - Vicino al magazzino di una carrozza (non Mercato): prende un'unità di
+//!   un oggetto (il primo del catalogo, Q per cambiare). Non si paga, ma il
+//!   treno se ne accorge (evento nel registro).
 //! - Vicino a un bancone o agli scaffali di un Mercato, con un mercante al
 //!   lavoro: compra un oggetto (il più economico, Q per cambiare) al prezzo
 //!   del Mercato.
@@ -43,20 +43,22 @@ const PROMPT_BG: Color = Color::srgba(0.05, 0.05, 0.08, 0.80);
 const PROMPT_COLOR: Color = Color::srgb(1.0, 0.92, 0.55);
 
 /// Cosa si regala, in ordine di preferenza: prima ciò che manca, poi il cibo.
-const GIFTS: [ItemKind; 4] = [
+const GIFTS: [ItemKind; 5] = [
     ItemKind::Vestito,
     ItemKind::Attrezzo,
     ItemKind::Razione,
+    ItemKind::Te,
     ItemKind::Verdura,
 ];
 
 /// Con cosa il giocatore può interagire.
 #[derive(Clone, Debug, PartialEq)]
 enum TargetKind {
-    /// Scorte di una carrozza: si prende l'oggetto più abbondante (`None` = vuote).
+    /// Scorte di una carrozza: gli oggetti con almeno un'unità, in ordine di
+    /// catalogo (vuoto = scorte vuote); se ne prende quello scelto con Q.
     Storage {
         carriage: CarriageId,
-        item: Option<ItemKind>,
+        items: Vec<ItemKind>,
     },
     /// Bancone o scaffali di un Mercato: oggetti disponibili col prezzo, dal
     /// più economico.
@@ -112,16 +114,16 @@ impl Plugin for InteractionPlugin {
 
 // --- Ricerca del bersaglio (dati puri) ---------------------------------------
 
-/// Oggetto più abbondante (unità intere) nelle scorte della carrozza.
-fn most_abundant(world: &World, carriage: CarriageId) -> Option<ItemKind> {
-    let c = world.carriage(carriage)?;
+/// Oggetti con almeno un'unità intera nelle scorte della carrozza, in
+/// ordine di catalogo.
+fn stocked_items(world: &World, carriage: CarriageId) -> Vec<ItemKind> {
+    let Some(c) = world.carriage(carriage) else {
+        return Vec::new();
+    };
     ItemKind::ALL
         .into_iter()
-        .map(|item| (item, c.stock.count(item)))
-        .filter(|&(_, n)| n > 0)
-        // A parità vince il primo in `ItemKind::ALL`.
-        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
-        .map(|(item, _)| item)
+        .filter(|&item| c.stock.count(item) > 0)
+        .collect()
 }
 
 /// Oggetti in vendita (almeno un'unità) al Mercato, dal più economico.
@@ -202,7 +204,7 @@ fn find_target(
         return Some(Target {
             kind: TargetKind::Storage {
                 carriage: id,
-                item: most_abundant(world, id),
+                items: stocked_items(world, id),
             },
             anchor: storage_anchor,
         });
@@ -239,10 +241,15 @@ fn find_target(
 /// Testo del suggerimento per un bersaglio.
 fn prompt_text(target: &TargetKind, choice: usize, tokens: u32) -> String {
     match target {
-        TargetKind::Storage {
-            item: Some(item), ..
-        } => format!("E: prendi {}", item.with_article()),
-        TargetKind::Storage { item: None, .. } => "Scorte vuote".to_string(),
+        TargetKind::Storage { items, .. } if items.is_empty() => "Scorte vuote".to_string(),
+        TargetKind::Storage { items, .. } => {
+            let item = items[choice % items.len()];
+            let mut text = format!("E: prendi {}", item.with_article());
+            if items.len() > 1 {
+                text.push_str("   Q: altro");
+            }
+            text
+        }
         TargetKind::Market {
             merchant: false, ..
         } => "Nessun mercante al bancone".to_string(),
@@ -279,17 +286,17 @@ fn perform(
     choice: usize,
 ) -> String {
     match target {
-        TargetKind::Storage {
-            carriage,
-            item: Some(item),
-        } => match world.player_take(*carriage, *item, 1) {
-            0 => "Non c'è più niente da prendere".to_string(),
-            n => {
-                inventory.add(*item, n);
-                format!("Preso: {}", item.with_article())
+        TargetKind::Storage { items, .. } if items.is_empty() => "Le scorte sono vuote".to_string(),
+        TargetKind::Storage { carriage, items } => {
+            let item = items[choice % items.len()];
+            match world.player_take(*carriage, item, 1) {
+                0 => "Non c'è più niente da prendere".to_string(),
+                n => {
+                    inventory.add(item, n);
+                    format!("Preso: {}", item.with_article())
+                }
             }
-        },
-        TargetKind::Storage { item: None, .. } => "Le scorte sono vuote".to_string(),
+        }
         TargetKind::Market { items, .. } if items.is_empty() => "Merce esaurita".to_string(),
         TargetKind::Market {
             carriage, items, ..
@@ -512,20 +519,23 @@ mod tests {
     }
 
     #[test]
-    fn takes_the_most_abundant_item_from_storage() {
+    fn takes_items_from_storage() {
         let mut f = fixture();
         let mut inv = PlayerInventory::default();
         let officina = first(&f.world, CarriageKind::Officina);
         let t = target(&f, &inv, at_storage(officina), &[]).expect("magazzino");
-        // Officina all'avvio: 20 rottami, 5 attrezzi, 5 vestiti.
+        // Officina all'avvio: rottami, attrezzi, vestiti, metallo, tessuto e
+        // le comodità per i Dormitori, in ordine di catalogo.
+        let TargetKind::Storage { carriage, items } = &t.kind else {
+            panic!("{t:?}");
+        };
+        assert_eq!(*carriage, officina);
+        assert_eq!(items[0], ItemKind::Rottame);
+        assert!(items.contains(&ItemKind::Tessuto) && items.contains(&ItemKind::Coperta));
         assert_eq!(
-            t.kind,
-            TargetKind::Storage {
-                carriage: officina,
-                item: Some(ItemKind::Rottame)
-            }
+            prompt_text(&t.kind, 0, 0),
+            "E: prendi un pezzo di rottame   Q: altro"
         );
-        assert_eq!(prompt_text(&t.kind, 0, 0), "E: prendi un pezzo di rottame");
         let message = perform(&mut f.world, &mut inv, &t.kind, 0);
         assert!(message.starts_with("Preso"), "{message}");
         assert_eq!(inv.count(ItemKind::Rottame), 1);
@@ -535,6 +545,10 @@ mod tests {
                 .count(ItemKind::Rottame),
             19
         );
+        // Q: the next item.
+        let tessuto = items.iter().position(|&i| i == ItemKind::Tessuto).unwrap();
+        perform(&mut f.world, &mut inv, &t.kind, tessuto);
+        assert_eq!(inv.count(ItemKind::Tessuto), 1);
 
         // Lontano dal magazzino (e senza niente da regalare): nessun bersaglio.
         let center = Vec2::new(TrainLayout::carriage_center_x(officina.index()), 12.0);

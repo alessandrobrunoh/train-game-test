@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use sim::{ItemKind, NpcId, Stock, UtilityBrain, World};
+use sim::{ItemKind, NpcId, RecipeDef, Stock, UtilityBrain, World};
 use sim_laya::{LayaBrain, LayaConfig};
 
 /// Gettoni con cui il giocatore comincia la partita.
@@ -104,11 +104,14 @@ pub struct PointerOverUi(pub bool);
 #[derive(Component)]
 pub struct NpcSprite(pub NpcId);
 
-/// Cosa possiede il giocatore: gettoni e oggetti (solo unità intere).
+/// Cosa possiede il giocatore: gettoni e oggetti (solo unità intere), e le
+/// ricette che ha imparato oltre a quelle di base (per chiave,
+/// `RecipeDef::key`). Nella Fase 4 passerà nella sim.
 #[derive(Resource, Debug)]
 pub struct PlayerInventory {
     pub tokens: u32,
     pub items: Stock,
+    pub learnt_recipes: Vec<String>,
 }
 
 impl Default for PlayerInventory {
@@ -116,11 +119,28 @@ impl Default for PlayerInventory {
         Self {
             tokens: PLAYER_START_TOKENS,
             items: Stock::default(),
+            learnt_recipes: Vec::new(),
         }
     }
 }
 
 impl PlayerInventory {
+    /// Se il giocatore sa fare la ricetta: quelle di base sì, le altre se
+    /// le ha imparate.
+    pub fn knows(&self, recipe: &RecipeDef) -> bool {
+        recipe.basic || self.learnt_recipes.iter().any(|k| k == recipe.key)
+    }
+
+    /// Impara una ricetta (per i dialoghi della Fase 5); falso se la sapeva già.
+    #[allow(dead_code)]
+    pub fn learn(&mut self, recipe: &RecipeDef) -> bool {
+        if self.knows(recipe) {
+            return false;
+        }
+        self.learnt_recipes.push(recipe.key.to_string());
+        true
+    }
+
     pub fn count(&self, item: ItemKind) -> u32 {
         self.items.count(item)
     }

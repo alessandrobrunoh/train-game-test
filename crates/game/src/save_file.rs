@@ -31,8 +31,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sim::{GameTime, Stock, UtilityBrain, World};
 
-/// Versione del formato dei salvataggi.
-pub const SAVE_VERSION: u32 = 4;
+/// Versione del formato dei salvataggi. 6: catalogo degli oggetti e crafting
+/// (Fase 3: `Stock` con 13 oggetti) insieme a prezzi per distanza e
+/// specialità delle carrozze (Fase 6a/6b).
+pub const SAVE_VERSION: u32 = 6;
 const MAGIC: [u8; 8] = *b"TRAINSAV";
 /// Byte fissi prima dell'intestazione: magic, versione, lunghezza.
 const PREFIX_LEN: usize = MAGIC.len() + 4 + 4;
@@ -142,6 +144,8 @@ pub struct SaveBodyRef<'a> {
     /// Inventario del giocatore.
     pub tokens: u32,
     pub items: Stock,
+    /// Ricette imparate oltre a quelle di base (chiavi).
+    pub learnt_recipes: &'a [String],
     /// Velocità del tempo (minuti di gioco al secondo) e pausa.
     pub minutes_per_second: f32,
     pub paused: bool,
@@ -155,6 +159,7 @@ pub struct SaveBody {
     pub player: [f32; 2],
     pub tokens: u32,
     pub items: Stock,
+    pub learnt_recipes: Vec<String>,
     pub minutes_per_second: f32,
     /// Se era in pausa: salvato per completezza, ma una partita caricata
     /// riparte sempre in pausa.
@@ -572,6 +577,8 @@ pub(crate) mod tests {
     fn sample(world: &World, brain: &UtilityBrain, slot: &str) -> Vec<u8> {
         let mut items = Stock::default();
         items.set(ItemKind::Razione, 3.0);
+        items.set(ItemKind::Coperta, 2.0);
+        let learnt = ["lampada".to_string()];
         let header = SaveHeader::of("seed7-100", slot, 1234, world);
         let body = SaveBodyRef {
             world,
@@ -579,6 +586,7 @@ pub(crate) mod tests {
             player: [12.5, 24.0],
             tokens: 42,
             items,
+            learnt_recipes: &learnt,
             minutes_per_second: 600.0,
             paused: false,
         };
@@ -604,6 +612,8 @@ pub(crate) mod tests {
         assert_eq!(file.body.player, [12.5, 24.0]);
         assert_eq!(file.body.tokens, 42);
         assert_eq!(file.body.items.count(ItemKind::Razione), 3);
+        assert_eq!(file.body.items.count(ItemKind::Coperta), 2);
+        assert_eq!(file.body.learnt_recipes, ["lampada"]);
         assert_eq!(file.body.minutes_per_second, 600.0);
         // Anche l'evento più vecchio e i contatori interni.
         assert_eq!(file.body.world.events_total(), world.events_total());
@@ -663,6 +673,7 @@ pub(crate) mod tests {
                 player: [0.0; 2],
                 tokens: 0,
                 items: Stock::default(),
+                learnt_recipes: &[],
                 minutes_per_second: 1.0,
                 paused: true,
             };
@@ -710,6 +721,7 @@ pub(crate) mod tests {
                 player: [0.0; 2],
                 tokens: 0,
                 items: Stock::default(),
+                learnt_recipes: &[],
                 minutes_per_second: 1.0,
                 paused: false,
             };

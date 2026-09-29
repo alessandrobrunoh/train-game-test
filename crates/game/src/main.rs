@@ -7,6 +7,7 @@ mod brain_ui;
 mod bubbles;
 mod camera;
 mod characters;
+mod crafting;
 mod env_art;
 mod fonts;
 mod history_sync;
@@ -15,6 +16,7 @@ mod hud;
 mod interaction;
 mod inventory;
 mod life_fx;
+mod market_ui;
 mod npc_render;
 mod player;
 mod population;
@@ -75,12 +77,15 @@ fn main() {
             history_ui::HistoryUiPlugin,
             brain_ui::BrainUiPlugin,
         ))
-        // Il mondo fuori dal treno (cielo, paesaggio, neve, giorno/notte) e
-        // i fumetti delle deliberazioni e dei dialoghi.
+        // Il mondo fuori dal treno (cielo, paesaggio, neve, giorno/notte), i
+        // fumetti delle deliberazioni e dei dialoghi e il crafting (tasto C).
         .add_plugins((
             background::BackgroundPlugin,
             bubbles::BubblesPlugin,
             speech::SpeechPlugin,
+            // Finestra "Mercato" e listino dei prezzi (tasto M).
+            market_ui::MarketUiPlugin,
+            crafting::CraftingPlugin,
         ))
         // Screenshot automatici (solo con `TRAINGAME_SHOTS`).
         .add_plugins(shot::ShotPlugin)

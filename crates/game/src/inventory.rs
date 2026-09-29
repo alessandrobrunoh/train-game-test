@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Align2};
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
-use sim::ItemKind;
+use sim::{ItemCategory, ItemKind};
 
 use crate::state::PlayerInventory;
 use crate::storage::plural_title;
@@ -65,22 +65,37 @@ fn inventory_window(
             if owned.is_empty() {
                 ui.weak("Nessun oggetto.");
             } else {
+                // Per categoria: materie prime, semilavorati, consumabili, durevoli.
                 egui::Grid::new("inventory_grid")
                     .num_columns(2)
                     .spacing([16.0, 2.0])
                     .show(ui, |ui| {
-                        for (item, n) in owned {
-                            ui.horizontal(|ui| {
-                                item_swatch(ui, item);
-                                ui.label(plural_title(item));
-                            });
-                            ui.label(n.to_string());
+                        for category in ItemCategory::ALL {
+                            let mut items = owned
+                                .iter()
+                                .filter(|(item, _)| item.category() == category)
+                                .peekable();
+                            if items.peek().is_none() {
+                                continue;
+                            }
+                            ui.weak(category.name());
                             ui.end_row();
+                            for &(item, n) in items {
+                                ui.horizontal(|ui| {
+                                    item_swatch(ui, item);
+                                    ui.label(plural_title(item))
+                                        .on_hover_text(item.description());
+                                });
+                                ui.label(n.to_string());
+                                ui.end_row();
+                            }
                         }
                     });
             }
             ui.separator();
-            ui.weak("E vicino alle scorte: prendi\nE al bancone del Mercato: compra (Q: cambia)\nE vicino a un NPC: regala");
+            ui.weak(
+                "E vicino alle scorte: prendi (Q: cambia)\nE al bancone del Mercato: compra (Q: cambia)\nM: mercato, per comprare e vendere\nC: crafting\nE vicino a un NPC: regala",
+            );
         });
     if !open {
         window.open = false;

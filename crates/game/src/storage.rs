@@ -2,11 +2,16 @@
 //!
 //! Ogni carrozza con scorte (`Carriage::stock`) ha una zona magazzino vicino
 //! alla testata destra: uno scaffale con una griglia di casse. Le colonne sono
-//! divise tra gli oggetti che la carrozza può tenere e le casse visibili sono
-//! proporzionali a scorta / capienza, disegnate per tipo di oggetto (cassette
-//! di verdura, scatole di razioni, mucchi di rottami... vedi `prop_art.rs`). Sopra c'è
-//! un'etichetta con le quantità (solo quelle non nulle) e, nei Mercati, i
-//! prezzi; sui banconi dei Mercati è esposta la merce disponibile.
+//! divise tra gli oggetti che la carrozza può tenere (con più oggetti che
+//! colonne, le colonne si dividono in due: sotto un oggetto, sopra un altro)
+//! e le casse visibili sono proporzionali a scorta / capienza, disegnate per
+//! tipo di oggetto (cassette di verdura, scatole di razioni, mucchi di
+//! rottami... vedi `prop_art.rs`). Sopra c'è un'etichetta con le quantità
+//! (solo quelle non nulle) e, nei Mercati, i prezzi; sui banconi dei Mercati
+//! è esposta la merce disponibile.
+//!
+//! Le comodità dei Dormitori (coperte, lampade, giocattoli) sono "in uso" sui
+//! letti e non su uno scaffale: i Dormitori restano senza magazzino.
 //!
 //! Tutto viene creato all'avvio e poi aggiornato poche volte al secondo, solo
 //! per le carrozze della finestra visibile, cambiando visibilità e testo.
@@ -53,19 +58,27 @@ pub fn storage_range() -> (f32, f32) {
     (right - STORAGE_WIDTH, right)
 }
 
-/// Oggetti che una carrozza di tipo `kind` tiene in magazzino, in ordine.
-pub fn storable_items(params: &SimParams, kind: CarriageKind) -> Vec<ItemKind> {
+/// Oggetti che una carrozza di tipo `kind` tiene, in ordine (anche le
+/// comodità in uso nei Dormitori).
+pub fn kept_items(params: &SimParams, kind: CarriageKind) -> Vec<ItemKind> {
     ItemKind::ALL
         .into_iter()
         .filter(|&item| params.storage_cap(kind, item) > 0.0)
         .collect()
 }
 
+/// Oggetti sullo scaffale di una carrozza di tipo `kind`, in ordine: quelli
+/// che tiene, tranne nei Dormitori (lì le comodità sono in uso, sui letti).
+pub fn storable_items(params: &SimParams, kind: CarriageKind) -> Vec<ItemKind> {
+    if kind == CarriageKind::Dormitorio {
+        return Vec::new();
+    }
+    kept_items(params, kind)
+}
+
 /// Vero se la carrozza ha un magazzino (i Dormitori no).
 pub fn has_storage(params: &SimParams, kind: CarriageKind) -> bool {
-    ItemKind::ALL
-        .into_iter()
-        .any(|item| params.storage_cap(kind, item) > 0.0)
+    !storable_items(params, kind).is_empty()
 }
 
 /// Colore di un oggetto (casse, merce, interfaccia).
@@ -76,6 +89,14 @@ pub fn item_color(item: ItemKind) -> Color {
         ItemKind::Rottame => Color::srgb(0.55, 0.40, 0.32),
         ItemKind::Attrezzo => Color::srgb(0.62, 0.68, 0.78),
         ItemKind::Vestito => Color::srgb(0.78, 0.32, 0.38),
+        ItemKind::Cotone => Color::srgb(0.93, 0.91, 0.85),
+        ItemKind::Erbe => Color::srgb(0.25, 0.55, 0.43),
+        ItemKind::Metallo => Color::srgb(0.47, 0.49, 0.55),
+        ItemKind::Tessuto => Color::srgb(0.38, 0.53, 0.77),
+        ItemKind::Te => Color::srgb(0.80, 0.37, 0.24),
+        ItemKind::Coperta => Color::srgb(0.59, 0.30, 0.52),
+        ItemKind::Lampada => Color::srgb(0.98, 0.84, 0.40),
+        ItemKind::Giocattolo => Color::srgb(0.93, 0.58, 0.68),
     }
 }
 
@@ -102,6 +123,79 @@ fn columns_for(items: &[ItemKind]) -> Vec<(ItemKind, usize)> {
         columns[0].1 += COLUMNS - used;
     }
     columns
+}
+
+/// Righe della parte bassa di una colonna divisa in due (la parte alta ha le altre).
+const SPLIT_ROWS: usize = 3;
+
+/// Gruppo di casse di un oggetto sullo scaffale: `cols` colonne da `col` e
+/// `rows` righe da `row` (dal basso), riempite dal basso una riga alla volta.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Block {
+    item: ItemKind,
+    col: usize,
+    cols: usize,
+    row: usize,
+    rows: usize,
+}
+
+impl Block {
+    fn slots(&self) -> usize {
+        self.cols * self.rows
+    }
+
+    /// Colonna e riga della cassa numero `rank` del gruppo.
+    fn cell(&self, rank: usize) -> (usize, usize) {
+        (self.col + rank % self.cols, self.row + rank / self.cols)
+    }
+}
+
+/// Casse dello scaffale per ogni oggetto. Fino a [`COLUMNS`] oggetti, colonne
+/// intere ([`columns_for`]); con di più, le ultime colonne si dividono in due
+/// (sotto [`SPLIT_ROWS`] righe per un oggetto, sopra le altre per il
+/// successivo), fino a due oggetti per colonna. Gli oggetti oltre restano
+/// solo nell'etichetta.
+fn blocks_for(items: &[ItemKind]) -> Vec<Block> {
+    if items.len() <= COLUMNS {
+        let mut col = 0;
+        return columns_for(items)
+            .into_iter()
+            .map(|(item, cols)| {
+                let block = Block {
+                    item,
+                    col,
+                    cols,
+                    row: 0,
+                    rows: ROWS,
+                };
+                col += cols;
+                block
+            })
+            .collect();
+    }
+    let split = (items.len() - COLUMNS).min(COLUMNS);
+    let whole = COLUMNS - split;
+    let mut blocks = Vec::new();
+    let mut rest = items.iter().copied();
+    for col in 0..COLUMNS {
+        let halves: &[(usize, usize)] = if col < whole {
+            &[(0, ROWS)]
+        } else {
+            &[(0, SPLIT_ROWS), (SPLIT_ROWS, ROWS - SPLIT_ROWS)]
+        };
+        for &(row, rows) in halves {
+            if let Some(item) = rest.next() {
+                blocks.push(Block {
+                    item,
+                    col,
+                    cols: 1,
+                    row,
+                    rows,
+                });
+            }
+        }
+    }
+    blocks
 }
 
 /// Casse piene da mostrare per una scorta: proporzionali a scorta / capienza,
@@ -131,11 +225,21 @@ fn label_text(world: &World, carriage: CarriageId) -> String {
         lines.push(line);
     }
     if lines.is_empty() {
-        "Scorte vuote".to_string()
-    } else {
-        lines.join("\n")
+        return "Scorte vuote".to_string();
     }
+    // Con tanti oggetti due per riga, perché l'etichetta non diventi una torre.
+    if lines.len() > LABEL_LINES {
+        return lines
+            .chunks(2)
+            .map(|pair| pair.join("   "))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    lines.join("\n")
 }
+
+/// Oltre queste righe l'etichetta mette due oggetti per riga.
+const LABEL_LINES: usize = 4;
 
 /// Una cassa dello scaffale: visibile se l'oggetto riempie più di `rank` casse.
 #[derive(Component)]
@@ -282,15 +386,15 @@ fn spawn_storage_entities(
                     Transform::from_xyz((x0 + x1) / 2.0, STORAGE_HEIGHT / 2.0, Z_SHELF),
                 ));
 
-                // Casse: ogni oggetto ha le sue colonne, riempite dal basso una
-                // riga alla volta (così sembra una pila).
-                let mut first_col = 0;
-                for (item, cols) in columns_for(&items) {
-                    let slots = cols * ROWS;
+                // Casse: ogni oggetto ha il suo gruppo di celle, riempito dal
+                // basso una riga alla volta (così sembra una pila).
+                for block in blocks_for(&items) {
+                    let item = block.item;
+                    let slots = block.slots();
                     let cap = world.params.storage_cap(c.kind, item);
                     let shown = crates_shown(c.stock.get(item), cap, slots);
                     for rank in 0..slots {
-                        let (row, col) = (rank / cols, first_col + rank % cols);
+                        let (col, row) = block.cell(rank);
                         // Casse alterne un po' più scure: si distinguono meglio.
                         let tint = if (row + col) % 2 == 0 { 1.0 } else { 0.88 };
                         let x = x0
@@ -317,7 +421,6 @@ fn spawn_storage_entities(
                             },
                         ));
                     }
-                    first_col += cols;
                 }
 
                 // Etichetta, allineata a destra sopra lo scaffale. Font grande
@@ -477,12 +580,16 @@ mod tests {
         let world = World::generate(42, 20, 400);
         let find = |kind| world.carriages.iter().find(|c| c.kind == kind).unwrap().id;
         let mensa = label_text(&world, find(CarriageKind::Mensa));
-        assert_eq!(mensa, "Razioni 100");
+        assert_eq!(mensa, "Razioni 100\nTè 20");
         let market = find(CarriageKind::Mercato);
         let price = world.price(market, ItemKind::Attrezzo).unwrap();
         let text = label_text(&world, market);
         assert!(text.contains(&format!("Attrezzi 10 · {price} g")), "{text}");
         assert!(text.contains("Vestiti 10"), "{text}");
+        // Officina: many items, two per line.
+        let officina = label_text(&world, find(CarriageKind::Officina));
+        assert!(officina.lines().count() <= 4, "{officina}");
+        assert!(officina.contains("Coperte 5"), "{officina}");
     }
 
     #[test]
@@ -491,5 +598,33 @@ mod tests {
         for kind in CarriageKind::ALL {
             assert_eq!(has_storage(&params, kind), kind != CarriageKind::Dormitorio);
         }
+        // The Dormitori still keep their comfort goods (not on a shelf).
+        assert!(kept_items(&params, CarriageKind::Dormitorio).contains(&ItemKind::Coperta));
+    }
+
+    #[test]
+    fn every_shelf_item_gets_its_own_cells() {
+        let params = SimParams::default();
+        for kind in CarriageKind::ALL {
+            let items = storable_items(&params, kind);
+            let blocks = blocks_for(&items);
+            assert_eq!(blocks.len(), items.len().min(2 * COLUMNS), "{kind:?}");
+            let mut cells = Vec::new();
+            for b in &blocks {
+                assert!(b.slots() >= 2, "{kind:?}: {b:?}");
+                for rank in 0..b.slots() {
+                    let (col, row) = b.cell(rank);
+                    assert!(col < COLUMNS && row < ROWS, "{kind:?}: {b:?}");
+                    cells.push((col, row));
+                }
+            }
+            let n = cells.len();
+            cells.sort_unstable();
+            cells.dedup();
+            assert_eq!(cells.len(), n, "{kind:?}: overlapping crates");
+        }
+        // Eight items: every column split in two.
+        let eight = blocks_for(&ItemKind::ALL[..8]);
+        assert!(eight.iter().all(|b| b.cols == 1 && b.rows < ROWS));
     }
 }

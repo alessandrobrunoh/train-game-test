@@ -532,6 +532,160 @@ pub fn crate_art(item: ItemKind) -> Canvas {
                 ('E', rgb(64, 88, 140)),
             ],
         ),
+        // Balla di cotone legata con lo spago.
+        ItemKind::Cotone => Canvas::from_rows(
+            &[
+                ".wWwWw.", //
+                "wWwwwWw", //
+                "ttttttt", //
+                "wWwWwWw", //
+                "WwwWwwW", //
+                "ttttttt", //
+                ".wWwWw.", //
+            ],
+            &[
+                ('w', rgb(238, 234, 222)),
+                ('W', rgb(206, 200, 186)),
+                ('t', rgb(150, 110, 64)),
+            ],
+        ),
+        // Mazzi di erbe in un cesto.
+        ItemKind::Erbe => Canvas::from_rows(
+            &[
+                "g.G.g.G", //
+                "GgLgGlg", //
+                ".gGlGg.", //
+                "bbbbbbb", //
+                "bBbBbBb", //
+                "BbBbBbB", //
+                "DDDDDDD", //
+            ],
+            &[
+                ('g', rgb(64, 140, 110)),
+                ('G', rgb(40, 100, 80)),
+                ('L', rgb(150, 196, 120)),
+                ('l', rgb(120, 170, 100)),
+                ('b', rgb(186, 146, 84)),
+                ('B', rgb(150, 112, 60)),
+                ('D', rgb(104, 74, 42)),
+            ],
+        ),
+        // Lingotti di metallo impilati.
+        ItemKind::Metallo => Canvas::from_rows(
+            &[
+                "..mMm..", //
+                "..sSs..", //
+                ".mMmMm.", //
+                ".sSsSs.", //
+                "mMmMmMm", //
+                "sSsSsSs", //
+                "ddddddd", //
+            ],
+            &[
+                ('m', rgb(196, 202, 212)),
+                ('M', rgb(232, 236, 242)),
+                ('s', rgb(132, 138, 150)),
+                ('S', rgb(110, 116, 128)),
+                ('d', rgb(70, 74, 82)),
+            ],
+        ),
+        // Pezze di stoffa piegate, di tre colori.
+        ItemKind::Tessuto => Canvas::from_rows(
+            &[
+                ".......", //
+                "bbbbbbb", //
+                "BBBBBBB", //
+                "yyyyyyy", //
+                "YYYYYYY", //
+                "ppppppp", //
+                "PPPPPPP", //
+            ],
+            &[
+                ('b', rgb(96, 136, 196)),
+                ('B', rgb(64, 98, 152)),
+                ('y', rgb(224, 184, 92)),
+                ('Y', rgb(182, 142, 62)),
+                ('p', rgb(154, 104, 164)),
+                ('P', rgb(112, 72, 122)),
+            ],
+        ),
+        // Teiera di terracotta con la tazza.
+        ItemKind::Te => Canvas::from_rows(
+            &[
+                "...K...", //
+                "..LLL..", //
+                "hTTTTT.", //
+                "hTwTTTs", //
+                "hTTTTs.", //
+                ".TTTT..", //
+                "..ccc..", //
+            ],
+            &[
+                ('K', rgb(230, 200, 120)),
+                ('L', rgb(168, 70, 50)),
+                ('T', rgb(204, 94, 62)),
+                ('w', rgb(242, 204, 184)),
+                ('h', rgb(150, 60, 40)),
+                ('s', rgb(190, 84, 56)),
+                ('c', rgb(236, 232, 220)),
+            ],
+        ),
+        // Due coperte piegate, a quadri.
+        ItemKind::Coperta => Canvas::from_rows(
+            &[
+                ".......", //
+                "ggggggg", //
+                "gwgwgwg", //
+                "GGGGGGG", //
+                "rrrrrrr", //
+                "rwrwrwr", //
+                "RRRRRRR", //
+            ],
+            &[
+                ('g', rgb(150, 76, 132)),
+                ('G', rgb(110, 52, 96)),
+                ('r', rgb(92, 112, 70)),
+                ('R', rgb(64, 80, 48)),
+                ('w', rgb(226, 214, 190)),
+            ],
+        ),
+        // Lanterna con la fiamma accesa.
+        ItemKind::Lampada => Canvas::from_rows(
+            &[
+                "...h...", //
+                "..MMM..", //
+                ".MyYyM.", //
+                ".MYFYM.", //
+                ".MyYyM.", //
+                "..MMM..", //
+                ".MMMMM.", //
+            ],
+            &[
+                ('h', rgb(126, 126, 134)),
+                ('M', rgb(86, 86, 94)),
+                ('y', rgb(246, 214, 116)),
+                ('Y', rgb(255, 238, 170)),
+                ('F', rgb(255, 150, 56)),
+            ],
+        ),
+        // Orsacchiotto di pezza.
+        ItemKind::Giocattolo => Canvas::from_rows(
+            &[
+                ".b...b.", //
+                ".bbbbb.", //
+                "bbebebb", //
+                ".bbnbb.", //
+                "..bbb..", //
+                ".bBbBb.", //
+                ".b...b.", //
+            ],
+            &[
+                ('b', rgb(176, 114, 62)),
+                ('B', rgb(226, 150, 170)),
+                ('e', rgb(40, 30, 30)),
+                ('n', rgb(70, 44, 32)),
+            ],
+        ),
     }
 }
 
