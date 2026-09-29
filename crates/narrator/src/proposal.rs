@@ -21,17 +21,40 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::appearance::Appearance;
+use crate::panel::Panel;
+use crate::statistic::Statistic;
+
 /// Why the Narratore proposes a novelty: the need or tension of the train it
 /// answers. Shown to the player in the chronicle.
 pub type Rationale = String;
 
-/// A whole answer of the model: the reason, then the novelty.
+/// A whole answer of the model: the reason, the novelty and optionally a
+/// panel for the player to follow or use it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Draft {
     #[serde(rename = "motivo")]
     pub rationale: Rationale,
     #[serde(rename = "novita")]
     pub proposal: Proposal,
+    /// Custom UI attached to the novelty (see [`crate::panel`]).
+    #[serde(
+        rename = "interfaccia",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub panel: Option<Panel>,
+}
+
+impl Draft {
+    /// A draft without a panel.
+    pub fn new(rationale: impl Into<String>, proposal: Proposal) -> Self {
+        Self {
+            rationale: rationale.into(),
+            proposal,
+            panel: None,
+        }
+    }
 }
 
 /// One novelty for the train.
@@ -60,6 +83,9 @@ pub enum Proposal {
         /// Job name.
         #[serde(rename = "lavoro")]
         made_by_job: String,
+        /// How its icon looks (see [`crate::appearance`]).
+        #[serde(rename = "aspetto", default, skip_serializing_if = "Option::is_none")]
+        appearance: Option<Appearance>,
     },
     /// A new way to make an existing item (or one proposed before).
     #[serde(rename = "ricetta")]
@@ -105,6 +131,10 @@ pub enum Proposal {
         #[serde(rename = "effetti", default)]
         effects: Vec<Effect>,
     },
+    /// A new derived number that measures a tension of the train (see
+    /// [`crate::statistic`]).
+    #[serde(rename = "statistica")]
+    Statistic(Statistic),
 }
 
 fn default_stack() -> u32 {
@@ -187,6 +217,27 @@ pub enum Need {
 }
 
 impl Need {
+    pub const ALL: [Need; 3] = [Need::Satiety, Need::Energy, Need::Social];
+
+    /// The JSON key: "sazieta", "energia", "socialita".
+    pub fn key(self) -> &'static str {
+        match self {
+            Need::Satiety => "sazieta",
+            Need::Energy => "energia",
+            Need::Social => "socialita",
+        }
+    }
+
+    /// A need from its key or a synonym, case and accents ignored.
+    pub fn parse(text: &str) -> Option<Need> {
+        match crate::guard::normalize(text).as_str() {
+            "sazieta" | "fame" | "cibo" => Some(Need::Satiety),
+            "energia" | "sonno" | "stanchezza" => Some(Need::Energy),
+            "socialita" | "compagnia" | "solitudine" => Some(Need::Social),
+            _ => None,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Need::Satiety => "sazietà",
@@ -204,6 +255,7 @@ impl Proposal {
             Proposal::NewRecipe { .. } => "ricetta",
             Proposal::NewJob { .. } => "lavoro",
             Proposal::Event { .. } => "evento",
+            Proposal::Statistic(_) => "statistica",
         }
     }
 
@@ -214,6 +266,27 @@ impl Proposal {
             | Proposal::NewRecipe { name, .. }
             | Proposal::NewJob { name, .. } => name,
             Proposal::Event { title, .. } => title,
+            Proposal::Statistic(s) => &s.name,
+        }
+    }
+
+    /// The description (for a recipe, what it makes).
+    pub fn description(&self) -> String {
+        match self {
+            Proposal::NewItem { description, .. }
+            | Proposal::NewJob { description, .. }
+            | Proposal::Event { description, .. } => description.clone(),
+            Proposal::NewRecipe {
+                inputs,
+                output,
+                output_qty,
+                job,
+                ..
+            } => format!(
+                "{} → {output_qty} {output}, la fa {job}",
+                ingredients(inputs)
+            ),
+            Proposal::Statistic(s) => s.description.clone(),
         }
     }
 }
@@ -240,6 +313,7 @@ impl fmt::Display for Proposal {
                 stack_limit,
                 made_from,
                 made_by_job,
+                appearance,
             } => {
                 writeln!(
                     f,
@@ -247,7 +321,14 @@ impl fmt::Display for Proposal {
                     category.name()
                 )?;
                 writeln!(f, "  {description}")?;
-                write!(f, "  Lo fa: {made_by_job}, con {}", ingredients(made_from))
+                write!(f, "  Lo fa: {made_by_job}, con {}", ingredients(made_from))?;
+                if let Some(a) = appearance {
+                    write!(f, "\n  Aspetto: {} {}", a.shape, a.colour)?;
+                    if let Some(d) = &a.detail {
+                        write!(f, " con {d}")?;
+                    }
+                }
+                Ok(())
             }
             Proposal::NewRecipe {
                 name,
@@ -283,6 +364,24 @@ impl fmt::Display for Proposal {
                 }
                 Ok(())
             }
+            Proposal::Statistic(s) => {
+                let unit = s.unit.as_deref().map_or(String::new(), |u| format!(" {u}"));
+                writeln!(
+                    f,
+                    "Nuova statistica «{}» (da {} a {}{unit})",
+                    s.name, s.scale[0], s.scale[1]
+                )?;
+                writeln!(f, "  {}", s.description)?;
+                write!(f, "  Formula: {}", s.formula)?;
+                for t in &s.thresholds {
+                    match (t.below, t.above) {
+                        (Some(b), _) => write!(f, "\n  Sotto {b}: {}", t.text)?,
+                        (None, Some(a)) => write!(f, "\n  Sopra {a}: {}", t.text)?,
+                        (None, None) => write!(f, "\n  Soglia senza limite: {}", t.text)?,
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -315,7 +414,11 @@ impl fmt::Display for Effect {
 impl fmt::Display for Draft {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{}", self.proposal)?;
-        write!(f, "  Perché: {}", self.rationale)
+        write!(f, "  Perché: {}", self.rationale)?;
+        if let Some(p) = &self.panel {
+            write!(f, "\n  {p}")?;
+        }
+        Ok(())
     }
 }
 

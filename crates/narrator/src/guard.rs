@@ -9,10 +9,16 @@
 //! Names are compared the way the Custode will resolve them to keys: case,
 //! accents, apostrophes and extra spaces don't matter ([`normalize`]).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
+use crate::appearance::{Appearance, COLOURS, DETAILS, SHAPES};
+use crate::panel::{Action, ELEMENT_KINDS, Element, MAX_ELEMENTS, Panel};
 use crate::proposal::{Draft, Effect, Ingredient, Proposal};
+use crate::sources::{ListSource, Source};
+use crate::statistic::{
+    Formula, MAX_SCALE, MAX_TERMS, MAX_THRESHOLDS, MAX_WEIGHT, Statistic, cycle,
+};
 use crate::summary::Catalog;
 
 /// Most effects an event may have, unless configured otherwise.
@@ -68,6 +74,10 @@ pub struct Known {
     recipes: HashMap<String, String>,
     jobs: HashMap<String, String>,
     carriages: HashMap<String, String>,
+    /// Derived statistics: key → name.
+    stats: HashMap<String, String>,
+    /// Statistic key → keys of the statistics its formula reads.
+    stat_deps: BTreeMap<String, Vec<String>>,
     /// Key → what already uses the name ("oggetto «verdura»").
     taken: HashMap<String, String>,
     /// (output, sorted inputs) as item keys → recipe name.
@@ -140,8 +150,23 @@ impl Known {
                 self.jobs.insert(normalize(&name), name.clone());
             }
             Proposal::Event { .. } => {}
+            Proposal::Statistic(stat) => {
+                let key = normalize(&name);
+                self.stats.insert(key.clone(), name.clone());
+                let deps = stat
+                    .formula
+                    .stat_refs()
+                    .into_iter()
+                    .map(normalize)
+                    .collect();
+                self.stat_deps.insert(key, deps);
+            }
         }
         self.take(&name, &format!("la novità ({})", proposal.kind_name()));
+    }
+
+    pub fn stat(&self, name: &str) -> Option<&str> {
+        self.stats.get(&normalize(name)).map(String::as_str)
     }
 
     pub fn item(&self, name: &str) -> Option<&str> {
@@ -172,7 +197,18 @@ impl Known {
 /// event.
 pub fn precheck(draft: &Draft, known: &Known, max_effects: usize) -> Result<(), Rejection> {
     text("il motivo", &draft.rationale, 10, 300)?;
-    match &draft.proposal {
+    novelty(&draft.proposal, known, max_effects)?;
+    if let Some(p) = &draft.panel {
+        // The panel may refer to the novelty itself.
+        let mut with_own = known.clone();
+        with_own.add(&draft.proposal);
+        panel(p, &with_own)?;
+    }
+    Ok(())
+}
+
+fn novelty(proposal: &Proposal, known: &Known, max_effects: usize) -> Result<(), Rejection> {
+    match proposal {
         Proposal::NewItem {
             name,
             description,
@@ -181,6 +217,7 @@ pub fn precheck(draft: &Draft, known: &Known, max_effects: usize) -> Result<(), 
             made_from,
             made_by_job,
             category,
+            appearance: look,
         } => {
             new_name(name, known)?;
             text("la descrizione", description, 10, 240)?;
@@ -192,7 +229,11 @@ pub fn precheck(draft: &Draft, known: &Known, max_effects: usize) -> Result<(), 
                     "l'oggetto «{name}» non è una materia prima: servono degli ingredienti"
                 ));
             }
-            ingredients(made_from, known)
+            ingredients(made_from, known)?;
+            match look {
+                Some(a) => appearance(a),
+                None => Ok(()),
+            }
         }
         Proposal::NewRecipe {
             name,
@@ -278,6 +319,7 @@ pub fn precheck(draft: &Draft, known: &Known, max_effects: usize) -> Result<(), 
             }
             Ok(())
         }
+        Proposal::Statistic(stat) => statistic(stat, known),
     }
 }
 
@@ -410,6 +452,198 @@ fn effect(e: &Effect, known: &Known) -> Result<(), Rejection> {
     Ok(())
 }
 
+/// A value from a closed list, or a rejection that lists it.
+fn one_of(what: &str, value: &str, allowed: &[&str]) -> Result<(), Rejection> {
+    if allowed.contains(&normalize(value).as_str()) {
+        return Ok(());
+    }
+    reject(format!(
+        "{what} «{value}» non esiste; valori ammessi: {}",
+        allowed.join(", ")
+    ))
+}
+
+fn appearance(a: &Appearance) -> Result<(), Rejection> {
+    one_of("la forma", &a.shape, &SHAPES)?;
+    one_of("il colore", &a.colour, &COLOURS)?;
+    if a.detail().is_err() {
+        one_of(
+            "il dettaglio",
+            a.detail.as_deref().unwrap_or_default(),
+            &DETAILS,
+        )?;
+    }
+    Ok(())
+}
+
+/// A name referred to by a source, a list or an action exists (in the
+/// catalog or among the accepted novelties).
+fn reference(kind: &str, name: &str, known: &Known) -> Result<(), Rejection> {
+    let (found, what, list) = match kind {
+        "oggetto" => (known.item(name).is_some(), "l'oggetto", &known.items),
+        "lavoro" => (known.job(name).is_some(), "il lavoro", &known.jobs),
+        "carrozza" => (
+            known.carriage(name).is_some(),
+            "il tipo di carrozza",
+            &known.carriages,
+        ),
+        "statistica" => (known.stat(name).is_some(), "la statistica", &known.stats),
+        "ricetta" => (
+            known.recipe(name).is_some() || known.item(name).is_some(),
+            "la ricetta",
+            &known.recipes,
+        ),
+        _ => (false, "il nome", &known.items),
+    };
+    if found {
+        return Ok(());
+    }
+    let listed = Known::list(list);
+    reject(if listed.is_empty() {
+        format!("{what} «{name}» non esiste (non ce ne sono ancora)")
+    } else {
+        format!("{what} «{name}» non esiste; esistenti: {listed}")
+    })
+}
+
+fn source(s: &Source, known: &Known) -> Result<(), Rejection> {
+    if let Source::Invalid(why) = s {
+        return reject(why.clone());
+    }
+    for (kind, name) in s.references() {
+        reference(kind, name, known)?;
+    }
+    Ok(())
+}
+
+fn finite(what: &str, v: f32) -> Result<(), Rejection> {
+    if !v.is_finite() || v.abs() > MAX_SCALE {
+        return reject(format!(
+            "{what} deve essere un numero tra -{MAX_SCALE} e {MAX_SCALE}"
+        ));
+    }
+    Ok(())
+}
+
+fn panel(p: &Panel, known: &Known) -> Result<(), Rejection> {
+    text("il titolo del pannello", &p.title, 3, 40)?;
+    if p.elements.is_empty() || p.elements.len() > MAX_ELEMENTS {
+        return reject(format!(
+            "un pannello deve avere da 1 a {MAX_ELEMENTS} elementi (ne ha {})",
+            p.elements.len()
+        ));
+    }
+    for e in &p.elements {
+        match e {
+            Element::Text { text: t } => text("il testo del pannello", t, 1, 160)?,
+            Element::Value {
+                label, source: s, ..
+            } => {
+                text("l'etichetta", label, 1, 32)?;
+                source(s, known)?;
+            }
+            Element::Bar {
+                label,
+                source: s,
+                min,
+                max,
+            } => {
+                text("l'etichetta", label, 1, 32)?;
+                source(s, known)?;
+                finite("il minimo della barra", *min)?;
+                finite("il massimo della barra", *max)?;
+                if min >= max {
+                    return reject(format!(
+                        "la barra «{label}» ha il minimo ({min}) non sotto il massimo ({max})"
+                    ));
+                }
+            }
+            Element::List { label, source: s } => {
+                text("l'etichetta", label, 1, 32)?;
+                if let ListSource::Invalid(why) = s {
+                    return reject(why.clone());
+                }
+                for (kind, name) in s.references() {
+                    reference(kind, name, known)?;
+                }
+            }
+            Element::Button { label, action } => {
+                text("l'etichetta del pulsante", label, 1, 32)?;
+                if let Action::Invalid(why) = action {
+                    return reject(why.clone());
+                }
+                if let Some((kind, name)) = action.reference() {
+                    reference(kind, name, known)?;
+                }
+            }
+            Element::Unknown => {
+                return reject(format!(
+                    "tipo di elemento sconosciuto; tipi ammessi: {}",
+                    ELEMENT_KINDS.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn statistic(stat: &Statistic, known: &Known) -> Result<(), Rejection> {
+    new_name(&stat.name, known)?;
+    text("la descrizione", &stat.description, 10, 240)?;
+    if let Some(unit) = &stat.unit {
+        text("l'unità", unit, 0, 12)?;
+    }
+    let [lo, hi] = stat.scale;
+    finite("la scala", lo)?;
+    finite("la scala", hi)?;
+    if lo >= hi {
+        return reject(format!(
+            "la scala [{lo}, {hi}] deve andare da un minimo a un massimo più grande"
+        ));
+    }
+    if let Formula::Invalid(why) = &stat.formula {
+        return reject(why.clone());
+    }
+    let terms = stat.formula.terms();
+    if terms.is_empty() || terms.len() > MAX_TERMS {
+        return reject(format!(
+            "una formula deve avere da 1 a {MAX_TERMS} termini (ne ha {})",
+            terms.len()
+        ));
+    }
+    let own = normalize(&stat.name);
+    for t in terms {
+        if !t.weight.is_finite() || t.weight == 0.0 || t.weight.abs() > MAX_WEIGHT {
+            return reject(format!(
+                "il peso {} deve essere tra -{MAX_WEIGHT} e {MAX_WEIGHT} e non zero",
+                t.weight
+            ));
+        }
+        // Reading itself is a cycle, not a missing name.
+        if matches!(&t.source, Source::Stat { name } if normalize(name) == own) {
+            return reject(format!(
+                "la statistica «{}» non può leggere sé stessa",
+                stat.name
+            ));
+        }
+        source(&t.source, known)?;
+    }
+    if let Some(path) = cycle(&stat.name, &stat.formula.stat_refs(), &known.stat_deps) {
+        return reject(format!("ciclo tra statistiche: {}", path.join(" → ")));
+    }
+    if stat.thresholds.len() > MAX_THRESHOLDS {
+        return reject(format!("al massimo {MAX_THRESHOLDS} soglie"));
+    }
+    for th in &stat.thresholds {
+        text("il testo di una soglia", &th.text, 3, 100)?;
+        match (th.below, th.above) {
+            (Some(v), None) | (None, Some(v)) => finite("una soglia", v)?,
+            _ => return reject("ogni soglia ha «sotto» oppure «sopra» (uno solo) e un «testo»"),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +655,7 @@ mod tests {
 
     fn item(name: &str, job: &str, from: &[(&str, u32)]) -> Draft {
         Draft {
+            panel: None,
             rationale: "Serve qualcosa contro il freddo.".into(),
             proposal: Proposal::NewItem {
                 name: name.into(),
@@ -436,6 +671,7 @@ mod tests {
                     })
                     .collect(),
                 made_by_job: job.into(),
+                appearance: None,
             },
         }
     }
@@ -468,6 +704,7 @@ mod tests {
         assert!(why(&item("Water Bottle", "operaio", &[("metallo", 1)])).contains("italiano"));
         assert!(why(&item("Borraccia", "operaio", &[])).contains("ingredienti"));
         let event = Draft {
+            panel: None,
             rationale: "Serve una scossa al treno.".into(),
             proposal: Proposal::Event {
                 title: "La gelata".into(),
@@ -497,6 +734,7 @@ mod tests {
                 .contains("novità")
         );
         let recipe = Draft {
+            panel: None,
             rationale: "Più borracce per tutti.".into(),
             proposal: Proposal::NewRecipe {
                 name: "battere una borraccia".into(),
@@ -514,6 +752,7 @@ mod tests {
         // Metal from scrap exists already ("fondere il rottame"), whatever
         // the name and the quantities.
         let copy = Draft {
+            panel: None,
             rationale: "Il metallo è finito.".into(),
             proposal: Proposal::NewRecipe {
                 name: "Recupero Metallo".into(),

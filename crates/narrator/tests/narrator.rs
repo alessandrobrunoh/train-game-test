@@ -198,7 +198,10 @@ fn never_blocks_and_one_per_day() {
 fn errors_become_failed_outcomes() {
     let llm = Arc::new(MockLlm::scripted([Err(LlmError::Timeout)]));
     let o = ask(&mut narrator(llm), 1);
-    assert_eq!(o.verdict, Verdict::Failed("timed out".to_string()));
+    assert_eq!(
+        o.verdict,
+        Verdict::Failed("il modello non ha risposto in tempo".to_string())
+    );
 }
 
 #[test]
@@ -231,4 +234,41 @@ fn record_then_replay_gives_the_same_outcomes() {
             .count(),
         3
     );
+}
+
+#[test]
+fn a_truncated_answer_is_asked_again_once_with_more_room() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let llm = Arc::new(MockLlm::new(move |r| {
+        log.lock().unwrap().push(r.clone());
+        match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => Err(LlmError::Truncated),
+            _ => Ok(item_json("Sciarpa grezza")),
+        }
+    }));
+    let mut n = narrator(llm);
+    let o = ask(&mut n, 1);
+    assert!(matches!(o.verdict, Verdict::Accepted(_)), "{o:?}");
+    assert_eq!(o.attempts, 2);
+    let requests = seen.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first = requests[0].max_tokens.unwrap();
+    assert_eq!(requests[1].max_tokens, Some(first * 2));
+    let note = &requests[1].messages.last().unwrap().content;
+    assert!(note.contains("sii più breve"), "{note}");
+    assert!(n.exchanges()[0].verdict.starts_with("errore"));
+
+    // Truncated twice: a failure that says why.
+    let llm = Arc::new(MockLlm::scripted([
+        Err(LlmError::Truncated),
+        Err(LlmError::Truncated),
+    ]));
+    let o = ask(&mut narrator(llm.clone()), 1);
+    assert_eq!(
+        o.verdict,
+        Verdict::Failed("risposta troncata (il modello ha finito i token)".to_string())
+    );
+    assert_eq!(llm.calls(), 2);
 }

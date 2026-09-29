@@ -141,7 +141,12 @@ fn main() {
     } else {
         match (LlmConfig::load(), NarratorConfig::from_env()) {
             (Ok(Some(c)), Ok(Some(config))) => {
-                println!("Modello: {} su {}", c.model, c.endpoint);
+                println!(
+                    "Modello: {} su {} (reasoning_effort: {})",
+                    c.model,
+                    c.endpoint,
+                    c.reasoning_effort.as_deref().unwrap_or("non mandato")
+                );
                 config
             }
             (Err(e), _) | (_, Err(e)) => {
@@ -327,5 +332,61 @@ fn print_stats(narrator: &Narrator, outcomes: &[NarratorOutcome]) {
                 m
             });
     println!("Novità accettate per tipo: {kinds:?}");
+    let accepted: Vec<&narrator::Draft> = outcomes
+        .iter()
+        .filter_map(|o| match &o.verdict {
+            Verdict::Accepted(d) => Some(d),
+            _ => None,
+        })
+        .collect();
+    let panels = accepted.iter().filter(|d| d.panel.is_some()).count();
+    let elements: usize = accepted
+        .iter()
+        .filter_map(|d| d.panel.as_ref())
+        .map(|p| p.elements.len())
+        .sum();
+    let items = accepted
+        .iter()
+        .filter(|d| matches!(d.proposal, narrator::Proposal::NewItem { .. }))
+        .count();
+    let looks = accepted
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.proposal,
+                narrator::Proposal::NewItem {
+                    appearance: Some(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    println!(
+        "Pannelli: {panels}/{} novità accettate ({elements} elementi); aspetto: {looks}/{items} oggetti",
+        accepted.len()
+    );
+    let rejected_first: Vec<&str> = ex
+        .iter()
+        .filter(|e| e.attempt == 1 && e.verdict.starts_with("rifiutata"))
+        .map(|e| e.verdict.as_str())
+        .collect();
+    let truncated = ex
+        .iter()
+        .filter(|e| e.verdict.contains("truncated"))
+        .count();
+    let reasoning: Vec<u32> = ex
+        .iter()
+        .filter(|e| e.answer.is_some())
+        .map(|e| e.reasoning_chars)
+        .collect();
+    println!(
+        "Risposte troncate: {truncated}/{} chiamate; ragionamento medio {:.0} caratteri",
+        ex.len(),
+        reasoning.iter().sum::<u32>() as f64 / reasoning.len().max(1) as f64
+    );
+    println!("Rifiuti al primo tentativo: {}", rejected_first.len());
+    for r in rejected_first {
+        println!("  - {}", r.chars().take(200).collect::<String>());
+    }
     println!("Nessuna proposta è stata applicata al mondo (serve il Custode, A2).");
 }
