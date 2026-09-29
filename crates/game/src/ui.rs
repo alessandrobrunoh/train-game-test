@@ -452,6 +452,7 @@ fn npc_details(
         wanted.join(", ")
     };
     field(ui, "Vuole comprare", &wants);
+    crate::market_ui::npc_goods(ui, world, npc);
 
     if let Some(context) = world.npc_context(npc.id) {
         egui::CollapsingHeader::new("Contesto per il cervello")
@@ -913,7 +914,7 @@ fn carriage_overview(
 /// unità, solo per gli oggetti che la carrozza tiene: nei Dormitori le
 /// comodità) e i prezzi dei Mercati.
 fn stock_cells(ui: &mut egui::Ui, world: &World, carriage: &Carriage) {
-    let kept = kept_items(&world.params, carriage.kind);
+    let kept = kept_items(world, carriage.kind);
     if kept.is_empty() {
         ui.weak("·");
     } else {
@@ -928,8 +929,9 @@ fn stock_cells(ui: &mut egui::Ui, world: &World, carriage: &Carriage) {
             }
         });
     }
-    let prices: Vec<String> = ItemKind::ALL
-        .into_iter()
+    let prices: Vec<String> = world
+        .catalog()
+        .kinds()
         .filter_map(|item| {
             let price = world.price(carriage.id, item)?;
             Some(format!("{} {price}", item.name()))

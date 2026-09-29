@@ -611,6 +611,30 @@ impl ItemIcons {
     }
 }
 
+/// L'immagine di un oggetto in una lista: la sua icona 16×16 se ha un
+/// aspetto (gli oggetti aggiunti dal Custode), altrimenti il quadratino del
+/// suo colore (lo stesso delle casse nel mondo).
+pub fn item_badge(
+    ui: &mut egui::Ui,
+    icons: &mut ItemIcons,
+    world: &sim::World,
+    item: sim::ItemKind,
+) -> egui::Response {
+    if let Some(look) = world
+        .catalog()
+        .get_item(item)
+        .and_then(|d| d.appearance.as_ref())
+    {
+        let texture = icons.item(ui.ctx(), look);
+        return show_icon(ui, texture, 16.0);
+    }
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+    let [r, g, b, a] = crate::storage::item_color(item).to_srgba().to_u8_array();
+    ui.painter()
+        .rect_filled(rect, 1.0, egui::Color32::from_rgba_unmultiplied(r, g, b, a));
+    response
+}
+
 /// Mostra un'icona `size` × `size` (multiplo di 16 per restare nitida).
 pub fn show_icon(ui: &mut egui::Ui, texture: egui::TextureId, size: f32) -> egui::Response {
     ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(

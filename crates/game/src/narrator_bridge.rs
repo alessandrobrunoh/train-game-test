@@ -1,5 +1,5 @@
 //! Il Narratore nel gioco (A3 di "Direzione nuova" in
-//! `docs/piano-vita-ed-economia.md`).
+//! `docs/piano-vita-ed-economia.md`) e il suo passaggio al Custode (A2).
 //!
 //! [`NarratorState`] avvolge un `narrator::Narrator` costruito da `.env`
 //! (spento se `LLM_API_URL` manca: il gioco va avanti come prima). Ogni
@@ -10,28 +10,38 @@
 //! giorno in cui la richiesta precedente è ancora in volo si salta
 //! (`Requested::Busy`), e il budget orario di `.env` resta il tetto.
 //!
+//! **Il Custode.** Una bozza che passa il controllo del Narratore si
+//! consegna al mondo con `World::schedule` per la **prossima ora piena** di
+//! gioco: in quel minuto la sim la esamina (`World::review`) e, se ha senso,
+//! la fa entrare nel mondo (`World::apply`); l'esito resta nel mondo
+//! (`World::decisions`), e con esso nel salvataggio. La cronaca segue
+//! l'esito ([`NarratorState::sync`]): "entrata nel mondo (giorno X, ore Y)"
+//! o "respinta dal Custode: motivo".
+//!
 //! Tiene:
-//! - la **cronaca**: ogni esito con giorno, verdetto, bozza e motivo;
-//! - il `Known` aggiornato con le bozze accettate (come se il Custode le
-//!   avesse applicate: le prossime proposte possono citarle);
-//! - il registro delle **statistiche derivate** ([`StatsRegistry`]), con lo
-//!   storico campionato una volta per ora di gioco (al massimo
-//!   [`HISTORY_CAP`] campioni ciascuna).
+//! - la **cronaca**: ogni esito con giorno, verdetto, bozza e motivo, e il
+//!   numero con cui la bozza è stata consegnata al Custode;
+//! - il `Known` aggiornato con le bozze accettate (le prossime proposte
+//!   possono citarle anche prima che entrino nel mondo).
 //!
-//! **Niente viene applicato al mondo**: tutto qui legge `Sim` e non lo
-//! modifica. Le proposte aspettano il Custode (A2).
+//! Le statistiche derivate e il loro storico sono nel mondo
+//! (`World::statistics`). Cronaca e pausa finiscono nella parte "gioco" del
+//! salvataggio, come JSON ([`NarratorState::save_json`], vedi `save_file.rs`).
 //!
-//! Cronaca e storico finiscono nella parte "gioco" del salvataggio, come JSON
-//! ([`NarratorState::save_json`], vedi `save_file.rs`).
+//! **Voci "proposta" di una cronaca vecchia** (accettate prima che il
+//! Custode esistesse, senza numero): al caricamento si consegnano al Custode
+//! per la prossima ora piena, come una bozza appena accettata; lo storico
+//! delle statistiche salvato con la cronaca passa al mondo quando la
+//! statistica ci entra.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use bevy::prelude::*;
 use llm::LlmConfig;
 use narrator::{
-    Catalog, Draft, Known, Narrator, NarratorConfig, NarratorOutcome, Proposal, Requested,
-    StatBook, Verdict, WorldSummary,
+    Catalog, Draft, Known, Narrator, NarratorConfig, NarratorOutcome, Requested, Verdict,
+    WorldSummary,
 };
 use serde::{Deserialize, Serialize};
 use sim::{GameTime, MINUTES_PER_HOUR, World};
@@ -41,23 +51,38 @@ use crate::state::Sim;
 
 /// Ora del giorno da cui si chiede la novità del giorno.
 pub const REQUEST_HOUR: u32 = 6;
-/// Campioni tenuti per statistica (10 giorni di ore).
-pub const HISTORY_CAP: usize = 240;
 /// Secondi reali per cui resta visibile l'avviso di una novità.
 pub const TOAST_SECS: f64 = 10.0;
 /// Minuti di gioco dopo una richiesta fallita prima dell'unico nuovo
 /// tentativo dello stesso giorno.
 pub const RETRY_AFTER_MINUTES: u64 = 120;
 
+/// La prossima ora piena dopo `t` (il minuto fissato in cui il Custode
+/// esamina una bozza).
+pub fn next_full_hour(t: GameTime) -> GameTime {
+    GameTime((t.minutes() / MINUTES_PER_HOUR + 1) * MINUTES_PER_HOUR)
+}
+
 // --- Cronaca -----------------------------------------------------------------------
 
 /// Come è finita la richiesta di un giorno.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryStatus {
-    /// Passata il controllo: aspetta il Custode.
+    /// Passata il controllo del Narratore, non ancora consegnata al Custode
+    /// (solo nelle cronache di prima del Custode: al caricamento si
+    /// consegna).
     #[serde(rename = "proposta")]
     Proposed,
-    /// Rifiutata dal controllo anche al secondo tentativo.
+    /// Consegnata al Custode: aspetta il suo minuto (`at`).
+    #[serde(rename = "in_arrivo")]
+    Scheduled,
+    /// Entrata nel mondo.
+    #[serde(rename = "entrata")]
+    Applied,
+    /// Respinta dal Custode (il motivo in `reason`).
+    #[serde(rename = "respinta")]
+    Refused,
+    /// Rifiutata dal controllo del Narratore anche al secondo tentativo.
     #[serde(rename = "rifiutata")]
     Rejected,
     /// Nessuna risposta usabile (rete, budget…).
@@ -73,13 +98,22 @@ pub struct ChronicleEntry {
     /// La bozza (anche rifiutata, se il JSON era valido).
     #[serde(default)]
     pub draft: Option<Draft>,
-    /// Perché è stata rifiutata o è fallita.
+    /// Perché è stata rifiutata, respinta o è fallita.
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
     pub attempts: u8,
     #[serde(default)]
     pub latency_ms: u64,
+    /// Il numero della consegna al Custode (`World::schedule`).
+    #[serde(default)]
+    pub seq: Option<u32>,
+    /// Il minuto in cui il Custode la esamina (o l'ha esaminata).
+    #[serde(default)]
+    pub at: Option<GameTime>,
+    /// Cosa è entrato nel mondo, detto dal Custode.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 impl ChronicleEntry {
@@ -98,6 +132,9 @@ impl ChronicleEntry {
             reason,
             attempts: o.attempts,
             latency_ms: o.latency.as_millis() as u64,
+            seq: None,
+            at: None,
+            summary: None,
         }
     }
 
@@ -110,10 +147,18 @@ impl ChronicleEntry {
         }
     }
 
+    /// La bozza, se il Narratore l'ha accettata (entrata, in arrivo o
+    /// respinta dal Custode dopo).
     pub fn accepted(&self) -> Option<&Draft> {
-        (self.status == EntryStatus::Proposed)
-            .then_some(self.draft.as_ref())
-            .flatten()
+        matches!(
+            self.status,
+            EntryStatus::Proposed
+                | EntryStatus::Scheduled
+                | EntryStatus::Applied
+                | EntryStatus::Refused
+        )
+        .then_some(self.draft.as_ref())
+        .flatten()
     }
 }
 
@@ -125,54 +170,6 @@ pub struct NoveltyToast {
     pub shown_at: f64,
 }
 
-// --- Statistiche derivate ------------------------------------------------------------
-
-/// Le statistiche accettate e il loro storico (ora di gioco, valore).
-#[derive(Clone, Debug, Default)]
-pub struct StatsRegistry {
-    pub book: StatBook,
-    history: BTreeMap<String, VecDeque<(u64, f32)>>,
-    /// Ultima ora di gioco campionata (minuti / 60).
-    last_hour: Option<u64>,
-}
-
-impl StatsRegistry {
-    pub fn add(&mut self, stat: narrator::Statistic) {
-        self.book.add(stat);
-    }
-
-    /// Campiona tutte le statistiche se è cominciata un'altra ora di gioco;
-    /// restituisce vero se ha campionato. Chi non si può leggere (in attesa
-    /// del Custode) non ha il campione.
-    pub fn sample(&mut self, world: &World) -> bool {
-        let hour = world.clock.minutes() / MINUTES_PER_HOUR;
-        if self.last_hour == Some(hour) || self.book.is_empty() {
-            return false;
-        }
-        self.last_hour = Some(hour);
-        for stat in self.book.iter() {
-            let Some(v) = self.book.read(&stat.name, world).value() else {
-                continue;
-            };
-            let h = self.history.entry(key(&stat.name)).or_default();
-            h.push_back((hour, v));
-            while h.len() > HISTORY_CAP {
-                h.pop_front();
-            }
-        }
-        true
-    }
-
-    /// Lo storico di una statistica, dal più vecchio.
-    pub fn history(&self, name: &str) -> impl Iterator<Item = (u64, f32)> + '_ {
-        self.history.get(&key(name)).into_iter().flatten().copied()
-    }
-}
-
-fn key(name: &str) -> String {
-    narrator::guard::normalize(name)
-}
-
 // --- Salvataggio -------------------------------------------------------------------------
 
 /// Cosa del Narratore va nel salvataggio (JSON dentro il corpo postcard: i
@@ -181,8 +178,9 @@ fn key(name: &str) -> String {
 pub struct NarratorSave {
     #[serde(default)]
     pub chronicle: Vec<ChronicleEntry>,
-    /// Chiave della statistica → (ora di gioco, valore).
-    #[serde(default)]
+    /// Storico delle statistiche di una cronaca di prima del Custode
+    /// (chiave → (ora di gioco, valore)); ora lo storico è nel mondo.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub history: BTreeMap<String, Vec<(u64, f32)>>,
     #[serde(default)]
     pub paused: bool,
@@ -207,7 +205,9 @@ pub struct NarratorState {
     pub chronicle: Vec<ChronicleEntry>,
     /// Il catalogo più le novità accettate.
     pub known: Known,
-    pub stats: StatsRegistry,
+    /// Storico di statistiche di una cronaca vecchia, in attesa che la
+    /// statistica entri nel mondo.
+    legacy_history: BTreeMap<String, Vec<(u64, f32)>>,
     /// Ultimo giorno di gioco per cui si è chiesto (o saltato).
     pub last_asked: Option<u64>,
     /// Com'è andata l'ultima richiesta.
@@ -230,7 +230,7 @@ impl NarratorState {
             paused: false,
             chronicle: Vec::new(),
             known: Known::from_catalog(&Catalog::of_sim()),
-            stats: StatsRegistry::default(),
+            legacy_history: BTreeMap::new(),
             last_asked: None,
             last_request: None,
             toast: None,
@@ -348,28 +348,36 @@ impl NarratorState {
         Some(result)
     }
 
-    /// Raccoglie un esito arrivato (senza aspettare) e lo mette in cronaca.
-    /// Una richiesta fallita di oggi si riprova una volta, più tardi.
-    pub fn poll(&mut self, now: f64, clock: GameTime) -> Option<&ChronicleEntry> {
+    /// Raccoglie un esito arrivato (senza aspettare) e lo mette in cronaca;
+    /// una bozza accettata va al Custode. Una richiesta fallita di oggi si
+    /// riprova una volta, più tardi.
+    pub fn poll(&mut self, now: f64, world: &mut World) -> Option<&ChronicleEntry> {
         let outcome = self.narrator_mut()?.poll()?;
         let entry = ChronicleEntry::from_outcome(&outcome);
+        let clock = world.clock;
         if entry.status == EntryStatus::Failed
             && entry.day == clock.day()
             && self.retried_day != Some(entry.day)
         {
             self.retry_after = Some(clock + RETRY_AFTER_MINUTES);
         }
-        self.record(entry, now);
+        self.record(entry, now, Some(world));
         self.chronicle.last()
     }
 
-    /// Aggiunge una voce: se accettata, aggiorna `known` e le statistiche e
-    /// mostra l'avviso.
-    pub fn record(&mut self, entry: ChronicleEntry, now: f64) {
-        if let Some(draft) = entry.accepted() {
-            self.accept(draft);
+    /// Aggiunge una voce: se accettata, aggiorna `known`, la consegna al
+    /// Custode di `world` (per la prossima ora piena) e mostra l'avviso.
+    pub fn record(&mut self, mut entry: ChronicleEntry, now: f64, world: Option<&mut World>) {
+        if let Some(draft) = entry.accepted().cloned() {
+            self.known.add(&draft.proposal);
+            if let Some(world) = world {
+                deliver(&mut entry, world);
+            }
+            let when = entry.at.map_or(String::new(), |t| {
+                format!(" (entra alle {:02}:00)", t.hour())
+            });
             self.toast = Some(NoveltyToast {
-                text: format!("Novità sul treno: «{}»", draft.proposal.name()),
+                text: format!("Novità sul treno: «{}»{when}", draft.proposal.name()),
                 shown_at: now,
             });
             info!("Narratore, giorno {}: {}", entry.day, draft.proposal.name());
@@ -384,32 +392,95 @@ impl NarratorState {
         self.chronicle.push(entry);
     }
 
-    fn accept(&mut self, draft: &Draft) {
-        self.known.add(&draft.proposal);
-        if let Proposal::Statistic(stat) = &draft.proposal {
-            self.stats.add(stat.clone());
+    /// Aggiorna la cronaca con le decisioni del Custode (ogni frame, costa
+    /// poco): le voci in arrivo diventano entrate o respinte, con l'avviso.
+    pub fn sync(&mut self, world: &mut World, now: f64) {
+        let mut toast = None;
+        let mut refused: Vec<(String, String)> = Vec::new();
+        for entry in self.chronicle.iter_mut() {
+            if entry.status != EntryStatus::Scheduled {
+                continue;
+            }
+            let Some(decision) = entry.seq.and_then(|seq| world.decision(seq)) else {
+                continue;
+            };
+            entry.at = Some(decision.at);
+            let name = entry.title();
+            match &decision.result {
+                Ok(applied) => {
+                    entry.status = EntryStatus::Applied;
+                    entry.summary = Some(applied.summary.clone());
+                    toast = Some(format!("Entrata nel mondo: «{name}»"));
+                }
+                Err(why) => {
+                    entry.status = EntryStatus::Refused;
+                    entry.reason = Some(why.0.clone());
+                    toast = Some(format!("Respinta dal Custode: «{name}»"));
+                    refused.push((name, why.0.clone()));
+                }
+            }
+        }
+        // What the Custode refused doesn't exist: the Narratore must not
+        // refer to it (and learns why).
+        if !refused.is_empty() {
+            self.rebuild_known(world);
+            if let Some(n) = self.narrator_mut() {
+                for (name, why) in &refused {
+                    n.refused(name, why);
+                }
+            }
+        }
+        if let Some(text) = toast {
+            self.toast = Some(NoveltyToast {
+                text,
+                shown_at: now,
+            });
+        }
+        // Lo storico di una cronaca vecchia, quando la statistica entra.
+        if !self.legacy_history.is_empty() {
+            let names: Vec<String> = self
+                .legacy_history
+                .keys()
+                .filter(|k| world.statistics().get(k).is_some())
+                .cloned()
+                .collect();
+            for name in names {
+                if let Some(h) = self.legacy_history.remove(&name) {
+                    world.adopt_statistic_history(&name, h);
+                }
+            }
         }
     }
 
-    /// Cronaca, storico e pausa in JSON, per il salvataggio.
+    /// `known` dal catalogo del mondo più le bozze accettate che il Custode
+    /// non ha respinto.
+    fn rebuild_known(&mut self, world: &World) {
+        self.known = Known::from_catalog(&Catalog::of(world.catalog()));
+        for entry in &self.chronicle {
+            if entry.status != EntryStatus::Refused
+                && let Some(d) = entry.accepted()
+            {
+                self.known.add(&d.proposal);
+            }
+        }
+    }
+
+    /// Cronaca e pausa in JSON, per il salvataggio.
     pub fn save_json(&self) -> String {
         let save = NarratorSave {
             chronicle: self.chronicle.clone(),
-            history: self
-                .stats
-                .history
-                .iter()
-                .map(|(k, v)| (k.clone(), v.iter().copied().collect()))
-                .collect(),
+            history: self.legacy_history.clone(),
             paused: self.paused,
         };
         serde_json::to_string(&save).unwrap_or_default()
     }
 
-    /// Sostituisce cronaca e statistiche con quelle di un salvataggio (vuoto
-    /// o illeggibile: una partita nuova). Il Narratore dimentica il resto e
-    /// una richiesta in volo si scarta.
-    pub fn restore_json(&mut self, json: &str) {
+    /// Sostituisce la cronaca con quella di un salvataggio (vuoto o
+    /// illeggibile: una partita nuova) per il mondo `world` appena caricato.
+    /// Il Narratore dimentica il resto e una richiesta in volo si scarta. Le
+    /// voci "proposta" di una cronaca di prima del Custode si consegnano al
+    /// Custode per la prossima ora piena.
+    pub fn restore_json(&mut self, json: &str, world: &mut World) {
         let save: NarratorSave = if json.trim().is_empty() {
             NarratorSave::default()
         } else {
@@ -420,21 +491,19 @@ impl NarratorState {
         };
         self.chronicle = save.chronicle;
         self.paused = save.paused;
-        self.known = Known::from_catalog(&Catalog::of_sim());
-        self.stats = StatsRegistry::default();
+        self.legacy_history = save.history;
         let accepted: Vec<(u64, Draft)> = self
             .chronicle
             .iter()
+            .filter(|e| e.status != EntryStatus::Refused)
             .filter_map(|e| Some((e.day, e.accepted()?.clone())))
             .collect();
-        for (_, draft) in &accepted {
-            self.accept(draft);
+        self.rebuild_known(world);
+        for entry in self.chronicle.iter_mut() {
+            if entry.status == EntryStatus::Proposed {
+                deliver(entry, world);
+            }
         }
-        self.stats.history = save
-            .history
-            .into_iter()
-            .map(|(k, v)| (k, v.into_iter().collect()))
-            .collect();
         self.last_asked = self.chronicle.iter().map(|e| e.day).max();
         self.last_request = None;
         self.toast = None;
@@ -444,7 +513,21 @@ impl NarratorState {
         if let Some(n) = self.narrator_mut() {
             n.restore(accepted, last);
         }
+        self.sync(world, 0.0);
+        self.toast = None;
     }
+}
+
+/// Consegna la bozza di `entry` al Custode di `world`, per la prossima ora
+/// piena.
+fn deliver(entry: &mut ChronicleEntry, world: &mut World) {
+    let Some(draft) = entry.draft.clone() else {
+        return;
+    };
+    let at = next_full_hour(world.clock);
+    entry.seq = Some(world.schedule(draft, at));
+    entry.at = Some(at);
+    entry.status = EntryStatus::Scheduled;
 }
 
 // --- Plugin ---------------------------------------------------------------------------------
@@ -462,18 +545,23 @@ impl Plugin for NarratorBridgePlugin {
     }
 }
 
-/// Chiede, raccoglie e campiona: ogni frame, senza mai aspettare.
-fn narrate(time: Res<Time<Real>>, sim: Res<Sim>, mut state: ResMut<NarratorState>) {
-    let world = &sim.world;
+/// Chiede, raccoglie e segue il Custode: ogni frame, senza mai aspettare.
+fn narrate(time: Res<Time<Real>>, mut sim: ResMut<Sim>, mut state: ResMut<NarratorState>) {
+    let now = time.elapsed_secs_f64();
     if state.is_on() {
-        state.poll(time.elapsed_secs_f64(), world.clock);
+        state.poll(now, &mut sim.world);
         // Chiede solo se è l'ora (o il momento di riprovare): altrimenti
         // non fa niente e non costruisce il riassunto.
-        state.maybe_request(world, false);
+        state.maybe_request(&sim.world, false);
     }
-    let hour = world.clock.minutes() / MINUTES_PER_HOUR;
-    if !state.stats.book.is_empty() && state.stats.last_hour != Some(hour) {
-        state.stats.sample(world);
+    // Solo se qualcosa aspetta il Custode (non tocca il mondo altrimenti).
+    if state
+        .chronicle
+        .iter()
+        .any(|e| e.status == EntryStatus::Scheduled)
+        || !state.legacy_history.is_empty()
+    {
+        state.sync(&mut sim.world, now);
     }
 }
 
@@ -530,6 +618,30 @@ pub(crate) mod tests {
         assert_eq!(state.last_request, None);
     }
 
+    /// Un oggetto, come lo scrive il modello.
+    pub(crate) const BORRACCIA: &str = r#"{"motivo": "In coda si beve poco e male.", "novita": {"tipo": "oggetto", "nome": "Borraccia di latta", "descrizione": "Una borraccia battuta a mano: tiene l'acqua calda.", "categoria": "durevole", "valore": 14, "pila": 3, "ingredienti": [{"oggetto": "metallo", "qta": 1}], "lavoro": "operaio", "aspetto": {"forma": "bottiglia", "colore": "grigio", "dettaglio": "etichetta"}}}"#;
+
+    fn wait_chronicle(app: &mut App, n: usize) {
+        for _ in 0..200 {
+            if app.world().resource::<NarratorState>().chronicle.len() >= n {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            app.update();
+        }
+        panic!("nessun esito");
+    }
+
+    /// Fa girare il mondo di `minutes` minuti (come farebbe il gioco) e un frame.
+    fn advance(app: &mut App, minutes: u64) {
+        {
+            let mut sim = app.world_mut().resource_mut::<Sim>();
+            let Sim { world, brain } = &mut *sim;
+            world.run(brain, minutes);
+        }
+        app.update();
+    }
+
     #[test]
     fn asks_at_six_and_shows_the_toast() {
         let mut app = app(mock_state(MORALE));
@@ -546,27 +658,104 @@ pub(crate) mod tests {
             app.world().resource::<NarratorState>().last_request,
             Some(Requested::Sent)
         );
-        for _ in 0..200 {
-            if !app.world().resource::<NarratorState>().chronicle.is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-            app.update();
-        }
+        wait_chronicle(&mut app, 1);
         let state = app.world().resource::<NarratorState>();
         assert_eq!(state.chronicle.len(), 1);
         let entry = &state.chronicle[0];
-        assert_eq!((entry.day, entry.status), (2, EntryStatus::Proposed));
+        assert_eq!((entry.day, entry.status), (2, EntryStatus::Scheduled));
+        assert_eq!(entry.at, Some(GameTime::from_dhm(2, 7, 0)));
         assert_eq!(
             state.toast.as_ref().unwrap().text,
-            "Novità sul treno: «Morale»"
+            "Novità sul treno: «Morale» (entra alle 07:00)"
         );
         assert!(state.known.stat("morale").is_some());
-        assert_eq!(state.stats.book.len(), 1);
+        assert_eq!(app.world().resource::<Sim>().world.pending().len(), 1);
         // Una volta sola al giorno.
         app.update();
         assert_eq!(app.world().resource::<NarratorState>().chronicle.len(), 1);
         assert!(!app.world().resource::<NarratorState>().busy());
+    }
+
+    #[test]
+    fn an_accepted_proposal_becomes_real_at_the_next_full_hour() {
+        let mut app = app(mock_state(BORRACCIA));
+        set_clock(&mut app, GameTime::from_dhm(1, 6, 20));
+        app.update();
+        wait_chronicle(&mut app, 1);
+        {
+            let state = app.world().resource::<NarratorState>();
+            assert_eq!(state.chronicle[0].status, EntryStatus::Scheduled);
+            let world = &app.world().resource::<Sim>().world;
+            assert!(world.catalog().find_item("borraccia di latta").is_none());
+        }
+        // 06:59: not yet.
+        advance(&mut app, 39);
+        assert_eq!(
+            app.world().resource::<NarratorState>().chronicle[0].status,
+            EntryStatus::Scheduled
+        );
+        // 07:00 passes: the Custode applies it, the chronicle follows.
+        advance(&mut app, 2);
+        let state = app.world().resource::<NarratorState>();
+        let entry = &state.chronicle[0];
+        assert_eq!(entry.status, EntryStatus::Applied, "{:?}", entry.reason);
+        assert_eq!(entry.at, Some(GameTime::from_dhm(1, 7, 0)));
+        assert!(
+            entry
+                .summary
+                .as_deref()
+                .unwrap()
+                .contains("borraccia di latta")
+        );
+        assert_eq!(
+            state.toast.as_ref().unwrap().text,
+            "Entrata nel mondo: «Borraccia di latta»"
+        );
+        let world = &app.world().resource::<Sim>().world;
+        let item = world
+            .catalog()
+            .find_item("Borracce di latta")
+            .expect("real");
+        assert_eq!(
+            world
+                .catalog()
+                .item(item)
+                .appearance
+                .as_ref()
+                .unwrap()
+                .shape,
+            "bottiglia"
+        );
+        assert_eq!(world.applied().count(), 1);
+        // The chronicle's status reads "entrata nel mondo (giorno 1, ore 07:00)".
+        assert_eq!(
+            crate::chronicle_ui::status_line(entry).0,
+            "entrata nel mondo (giorno 1, ore 07:00)"
+        );
+    }
+
+    #[test]
+    fn a_refused_proposal_says_why() {
+        let bad = r#"{"motivo": "Serve metallo.", "novita": {"tipo": "oggetto", "nome": "Pepita", "descrizione": "Metallo trovato nel nulla.", "categoria": "materia_prima", "valore": 3, "ingredienti": [], "lavoro": "operaio"}}"#;
+        let mut app = app(mock_state(bad));
+        set_clock(&mut app, GameTime::from_dhm(1, 6, 0));
+        app.update();
+        wait_chronicle(&mut app, 1);
+        advance(&mut app, 61);
+        let state = app.world().resource::<NarratorState>();
+        let entry = &state.chronicle[0];
+        assert_eq!(entry.status, EntryStatus::Refused);
+        assert!(
+            entry.reason.as_deref().unwrap().contains("Serra"),
+            "{entry:?}"
+        );
+        assert!(
+            crate::chronicle_ui::status_line(entry)
+                .0
+                .starts_with("respinta dal Custode: ")
+        );
+        // It doesn't exist: the next proposals can't refer to it.
+        assert!(state.known.item("pepita").is_none());
     }
 
     #[test]
@@ -606,7 +795,7 @@ pub(crate) mod tests {
         app.update();
         wait(&mut app, 2);
         let state = app.world().resource::<NarratorState>();
-        assert_eq!(state.chronicle[1].status, EntryStatus::Proposed);
+        assert_eq!(state.chronicle[1].status, EntryStatus::Scheduled);
         assert_eq!(state.retried_day, Some(2));
         // Una volta sola.
         set_clock(&mut app, GameTime::from_dhm(2, 12, 0));
@@ -635,8 +824,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn statistics_history_is_sampled_hourly() {
+    fn statistics_live_in_the_world_and_are_sampled_hourly() {
         let mut state = mock_state(MORALE);
+        let mut world = World::generate(5, 8, 60);
+        let mut brain = UtilityBrain::new(5);
         state.record(
             ChronicleEntry {
                 day: 1,
@@ -645,32 +836,30 @@ pub(crate) mod tests {
                 reason: None,
                 attempts: 1,
                 latency_ms: 0,
+                seq: None,
+                at: None,
+                summary: None,
             },
             0.0,
+            Some(&mut world),
         );
-        let mut world = World::generate(5, 8, 60);
-        let mut brain = UtilityBrain::new(5);
-        assert!(state.stats.sample(&world));
-        assert!(!state.stats.sample(&world), "same hour");
-        for _ in 0..3 {
+        assert!(world.statistics().is_empty(), "not before the full hour");
+        for _ in 0..4 {
             world.run(&mut brain, 60);
-            assert!(state.stats.sample(&world));
         }
-        let h: Vec<(u64, f32)> = state.stats.history("MORALE").collect();
-        assert_eq!(h.len(), 4);
+        state.sync(&mut world, 0.0);
+        assert_eq!(state.chronicle[0].status, EntryStatus::Applied);
+        assert_eq!(world.statistics().len(), 1);
+        let h: Vec<(u64, f32)> = world.statistics().history("MORALE").collect();
+        assert!(h.len() >= 3, "{h:?}");
         assert!(h.windows(2).all(|w| w[1].0 == w[0].0 + 1));
         assert!(h.iter().all(|(_, v)| (0.0..=100.0).contains(v)));
-        // Tetto allo storico.
-        for _ in 0..HISTORY_CAP {
-            world.run(&mut brain, 60);
-            state.stats.sample(&world);
-        }
-        assert_eq!(state.stats.history("morale").count(), HISTORY_CAP);
     }
 
     #[test]
     fn chronicle_survives_json() {
         let mut state = mock_state(MORALE);
+        let mut world = World::generate(5, 8, 60);
         state.record(
             ChronicleEntry {
                 day: 3,
@@ -679,8 +868,12 @@ pub(crate) mod tests {
                 reason: None,
                 attempts: 2,
                 latency_ms: 1300,
+                seq: None,
+                at: None,
+                summary: None,
             },
             0.0,
+            Some(&mut world),
         );
         state.record(
             ChronicleEntry {
@@ -690,24 +883,50 @@ pub(crate) mod tests {
                 reason: Some("nella risposta non c'è un oggetto JSON".into()),
                 attempts: 2,
                 latency_ms: 900,
+                seq: None,
+                at: None,
+                summary: None,
             },
             0.0,
+            None,
         );
-        state.stats.sample(&World::generate(5, 8, 60));
         state.paused = true;
         let json = state.save_json();
         let mut again = mock_state(MORALE);
-        again.restore_json(&json);
+        again.restore_json(&json, &mut world);
         assert_eq!(again.chronicle, state.chronicle);
         assert!(again.paused);
         assert_eq!(again.last_asked, Some(4));
-        assert_eq!(again.stats.book.len(), 1);
-        assert_eq!(again.stats.history("morale").count(), 1);
         assert!(again.known.stat("Morale").is_some());
+        // Still waiting for its hour: not delivered twice.
+        assert_eq!(world.pending().len(), 1);
         // Vuoto o rotto: una partita nuova.
-        again.restore_json("");
-        assert!(again.chronicle.is_empty() && again.stats.book.is_empty());
-        again.restore_json("{rotto");
+        again.restore_json("", &mut world);
         assert!(again.chronicle.is_empty());
+        again.restore_json("{rotto", &mut world);
+        assert!(again.chronicle.is_empty());
+    }
+
+    #[test]
+    fn old_proposals_go_to_the_custode_on_load() {
+        // A chronicle saved before the Custode: "proposta", no number, and
+        // the statistics' history kept by the game.
+        let old = format!(
+            r#"{{"chronicle": [{{"day": 2, "status": "proposta", "draft": {MORALE}, "attempts": 1, "latency_ms": 900}}], "history": {{"morale": [[4, 50.0], [5, 51.0]]}}, "paused": false}}"#
+        );
+        let mut world = World::generate(5, 8, 60);
+        let mut brain = UtilityBrain::new(5);
+        let mut state = mock_state(MORALE);
+        state.restore_json(&old, &mut world);
+        let entry = &state.chronicle[0];
+        assert_eq!(entry.status, EntryStatus::Scheduled);
+        assert_eq!(entry.at, Some(GameTime::from_dhm(1, 7, 0)));
+        world.run(&mut brain, 61);
+        state.sync(&mut world, 0.0);
+        assert_eq!(state.chronicle[0].status, EntryStatus::Applied);
+        // The old history went to the world, before the new samples.
+        let h: Vec<(u64, f32)> = world.statistics().history("Morale").collect();
+        assert_eq!(&h[..2], &[(4, 50.0), (5, 51.0)]);
+        assert!(h.len() >= 3);
     }
 }

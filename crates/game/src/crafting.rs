@@ -1,7 +1,8 @@
 //! Finestra "Crafting" (tasto C): le ricette che il giocatore può fare nella
 //! carrozza dove si trova, con gli ingredienti che ha e quelli che servono.
 //!
-//! Le ricette sono le stesse degli NPC (`sim::RECIPES`) e si fanno solo dove
+//! Le ricette sono le stesse degli NPC (il catalogo del mondo, con quelle
+//! che il Custode ha aggiunto) e si fanno solo dove
 //! c'è la loro postazione (aiuole in Serra, cucina in Mensa, banchi da lavoro
 //! in Officina). Quelle di base si conoscono dall'inizio; le altre si
 //! imparano (più avanti, parlando con gli NPC) e intanto compaiono come "da
@@ -18,12 +19,14 @@
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Align2, Color32, RichText};
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
-use sim::{CarriageId, GameTime, ItemKind, RECIPES, RecipeDef, World};
+use sim::{CarriageId, GameTime, ItemKind, RecipeId, World};
+
+use crate::item_icons::{ItemIcons, item_badge};
 
 use crate::player::Player;
 use crate::state::{Sim, WorldReplaced};
 use crate::train::{TrainLayout, TrainLocation};
-use crate::ui::{MARGIN, PointerCheck, item_swatch};
+use crate::ui::{MARGIN, PointerCheck};
 
 const HAVE: Color32 = Color32::from_rgb(110, 190, 110);
 const MISSING: Color32 = Color32::from_rgb(230, 80, 80);
@@ -39,13 +42,13 @@ pub(crate) struct CraftingWindow {
     message: Option<String>,
     /// Ricetta in evidenza, chiesta da un pannello del Narratore
     /// (`ai_ui.rs`): compare in cima alla finestra.
-    pub(crate) focus: Option<&'static RecipeDef>,
+    pub(crate) focus: Option<RecipeId>,
 }
 
 /// Un lavoro al banco: finisce a `until` (tempo di gioco).
 #[derive(Clone, Copy, Debug)]
 struct CraftJob {
-    recipe: &'static RecipeDef,
+    recipe: RecipeId,
     carriage: CarriageId,
     since: GameTime,
     until: GameTime,
@@ -98,12 +101,10 @@ fn amount_label(item: ItemKind, n: u32) -> String {
 }
 
 /// Perché il giocatore non può iniziare `recipe` adesso (None: può).
-fn blocker(
-    world: &World,
-    recipe: &RecipeDef,
-    here: Option<CarriageId>,
-    busy: bool,
-) -> Option<String> {
+fn blocker(world: &World, id: RecipeId, here: Option<CarriageId>, busy: bool) -> Option<String> {
+    let Some(recipe) = world.catalog().get_recipe(id) else {
+        return Some("Ricetta sconosciuta".to_string());
+    };
     let inventory = &world.player.inventory;
     if !world.player.knows(recipe) {
         return Some("Non conosci ancora questa ricetta".to_string());
@@ -112,7 +113,7 @@ fn blocker(
         .and_then(|c| world.carriage(c))
         .is_some_and(|c| c.stations.iter().any(|s| s.kind == recipe.station));
     if !here_ok {
-        return Some(format!("Serve {}", station_place(recipe)));
+        return Some(format!("Serve {}", station_place(world, id)));
     }
     for (item, needed) in recipe.player_inputs(&world.params) {
         let have = inventory.count(item);
@@ -129,16 +130,19 @@ fn blocker(
 }
 
 /// "un banco da lavoro (Officina)".
-fn station_place(recipe: &RecipeDef) -> String {
-    let places: Vec<&str> = recipe.places().map(|k| k.name()).collect();
-    format!("{} ({})", recipe.station.name(), places.join(", "))
+fn station_place(world: &World, id: RecipeId) -> String {
+    let cat = world.catalog();
+    let places: Vec<&str> = cat.places(id).map(|k| k.name()).collect();
+    format!("{} ({})", cat.recipe(id).station.name(), places.join(", "))
 }
 
 /// Il lavoro è finito (o annullato): chiede alla sim di fare la ricetta.
 fn finish(world: &mut World, job: &CraftJob) -> String {
-    match world.player_craft(job.recipe, job.carriage) {
-        Ok(n) => format!("Fatto: {}", amount_label(job.recipe.output, n)),
-        Err(e) => format!("Non riuscito: {e}"),
+    let output = world.catalog().get_recipe(job.recipe).map(|r| r.output);
+    match (world.player_craft(job.recipe, job.carriage), output) {
+        (Ok(n), Some(output)) => format!("Fatto: {}", amount_label(output, n)),
+        (Ok(n), None) => format!("Fatto: {n}"),
+        (Err(e), _) => format!("Non riuscito: {e}"),
     }
 }
 
@@ -187,6 +191,7 @@ fn crafting_window(
     layout: Res<TrainLayout>,
     player: Single<&Transform, With<Player>>,
     mut window: ResMut<CraftingWindow>,
+    mut icons: ResMut<ItemIcons>,
 ) {
     if !window.open {
         return;
@@ -225,7 +230,12 @@ fn crafting_window(
                             .desired_width(WIDTH - 90.0)
                             .text(format!(
                                 "{}: {} min",
-                                capitalized(job.recipe.name),
+                                capitalized(
+                                    world
+                                        .catalog()
+                                        .get_recipe(job.recipe)
+                                        .map_or("lavoro", |r| &r.name)
+                                ),
                                 total - done
                             )),
                     );
@@ -244,13 +254,13 @@ fn crafting_window(
                         clear_focus = true;
                     }
                 });
-                if recipe_row(ui, world, recipe, here, window.job.is_some()) {
+                if recipe_row(ui, &mut icons, world, recipe, here, window.job.is_some()) {
                     start = Some(recipe);
                 }
             }
             ui.separator();
 
-            let local: Vec<&'static RecipeDef> = here.map_or(Vec::new(), |c| world.recipes_at(c));
+            let local: Vec<RecipeId> = here.map_or(Vec::new(), |c| world.recipes_at(c));
             egui::ScrollArea::vertical()
                 .max_height(max_height)
                 .show(ui, |ui| {
@@ -261,20 +271,21 @@ fn crafting_window(
                         );
                     }
                     for &recipe in &local {
-                        if recipe_row(ui, world, recipe, here, window.job.is_some()) {
+                        if recipe_row(ui, &mut icons, world, recipe, here, window.job.is_some()) {
                             start = Some(recipe);
                         }
                     }
-                    let elsewhere: Vec<&RecipeDef> = RECIPES
-                        .iter()
-                        .filter(|r| !local.iter().any(|l| l.key == r.key))
+                    let elsewhere: Vec<RecipeId> = world
+                        .catalog()
+                        .recipe_ids()
+                        .filter(|r| !local.contains(r))
                         .collect();
                     if !elsewhere.is_empty() {
                         egui::CollapsingHeader::new(format!("Altre ricette ({})", elsewhere.len()))
                             .default_open(local.is_empty())
                             .show(ui, |ui| {
                                 for recipe in elsewhere {
-                                    recipe_row(ui, world, recipe, here, true);
+                                    recipe_row(ui, &mut icons, world, recipe, here, true);
                                 }
                             });
                     }
@@ -292,7 +303,10 @@ fn crafting_window(
         window.message = Some("Lavoro annullato".to_string());
     }
     if let (Some(recipe), Some(carriage)) = (start, here) {
-        let minutes = recipe.player_minutes(&world.params);
+        let minutes = world
+            .catalog()
+            .get_recipe(recipe)
+            .map_or(1, |r| r.player_minutes(&world.params));
         window.job = Some(CraftJob {
             recipe,
             carriage,
@@ -307,30 +321,40 @@ fn crafting_window(
 /// pulsante "Crea". Restituisce vero se è stato premuto.
 fn recipe_row(
     ui: &mut egui::Ui,
+    icons: &mut ItemIcons,
     world: &World,
-    recipe: &'static RecipeDef,
+    id: RecipeId,
     here: Option<CarriageId>,
     busy: bool,
 ) -> bool {
+    let Some(recipe) = world.catalog().get_recipe(id) else {
+        return false;
+    };
     let p = &world.params;
     let inventory = &world.player.inventory;
     let known = world.player.knows(recipe);
-    let blocked = blocker(world, recipe, here, busy);
+    let blocked = blocker(world, id, here, busy);
+    let describe = |item: ItemKind| {
+        world
+            .catalog()
+            .get_item(item)
+            .map_or(String::new(), |d| d.description.to_string())
+    };
     let mut clicked = false;
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(WIDTH - 24.0);
         ui.horizontal(|ui| {
-            item_swatch(ui, recipe.output);
+            item_badge(ui, icons, world, recipe.output);
             let title = if known {
                 format!(
                     "{} → {}",
-                    capitalized(recipe.name),
+                    capitalized(&recipe.name),
                     amount_label(recipe.output, recipe.batch)
                 )
             } else {
                 format!("??? → {}", amount_label(recipe.output, recipe.batch))
             };
-            ui.strong(title).on_hover_text(recipe.output.description());
+            ui.strong(title).on_hover_text(describe(recipe.output));
         });
         ui.horizontal_wrapped(|ui| {
             let inputs = recipe.player_inputs(p);
@@ -339,19 +363,19 @@ fn recipe_row(
             }
             for (item, needed) in inputs {
                 let have = inventory.count(item);
-                item_swatch(ui, item);
+                item_badge(ui, icons, world, item);
                 ui.label(
                     RichText::new(format!("{} {have}/{needed}", capitalized(item.name())))
                         .color(if have >= needed { HAVE } else { MISSING }),
                 )
-                .on_hover_text(item.description());
+                .on_hover_text(describe(item));
             }
         });
         ui.horizontal(|ui| {
             ui.weak(format!(
                 "{} min · {}",
                 recipe.player_minutes(p),
-                station_place(recipe)
+                station_place(world, id)
             ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let button = ui.add_enabled(blocked.is_none(), egui::Button::new("Crea"));
@@ -371,7 +395,7 @@ fn recipe_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim::{CarriageKind, INVENTORY_SLOTS, SlotInventory};
+    use sim::{CarriageKind, INVENTORY_SLOTS, RecipeDef, SlotInventory};
 
     fn first(world: &World, kind: CarriageKind) -> CarriageId {
         world.carriages.iter().find(|c| c.kind == kind).unwrap().id
@@ -389,8 +413,8 @@ mod tests {
         let mut world = World::generate(3, 10, 40);
         let officina = first(&world, CarriageKind::Officina);
         let mensa = first(&world, CarriageKind::Mensa);
-        let coperta = RecipeDef::by_key("coperta").unwrap();
-        let lampada = RecipeDef::by_key("lampada").unwrap();
+        let coperta = world.catalog().recipe_by_key("coperta").unwrap();
+        let lampada = world.catalog().recipe_by_key("lampada").unwrap();
         with_items(&mut world, &[(ItemKind::Tessuto, 2)]);
         assert_eq!(blocker(&world, coperta, Some(officina), false), None);
         assert!(
@@ -407,8 +431,9 @@ mod tests {
         // Not basic: must be learnt first.
         let unknown = blocker(&world, lampada, Some(officina), false).unwrap();
         assert!(unknown.contains("conosci"), "{unknown}");
-        assert!(world.player.learn(lampada));
-        assert!(world.player.knows(lampada));
+        let def: RecipeDef = world.catalog().recipe(lampada).clone();
+        assert!(world.player.learn(&def));
+        assert!(world.player.knows(&def));
     }
 
     #[test]
@@ -417,7 +442,7 @@ mod tests {
         let officina = first(&world, CarriageKind::Officina);
         with_items(&mut world, &[(ItemKind::Tessuto, 2)]);
         let job = CraftJob {
-            recipe: RecipeDef::by_key("coperta").unwrap(),
+            recipe: world.catalog().recipe_by_key("coperta").unwrap(),
             carriage: officina,
             since: world.clock,
             until: world.clock + 60,

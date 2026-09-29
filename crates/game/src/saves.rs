@@ -388,7 +388,7 @@ impl GameAccess<'_, '_> {
         self.follow.0 = false;
         self.autosave.next_day = None;
         if let Some(narrator) = self.narrator.as_mut() {
-            narrator.restore_json(&game.narrator);
+            narrator.restore_json(&game.narrator, &mut self.sim.world);
         }
         if let Ok((mut body, mut transform)) = self.player.single_mut() {
             body.teleport(player);
@@ -1141,8 +1141,12 @@ mod tests {
                 reason: None,
                 attempts: 1,
                 latency_ms: 1200,
+                seq: None,
+                at: None,
+                summary: None,
             },
             0.0,
+            Some(&mut app.world_mut().resource_mut::<crate::state::Sim>().world),
         );
         app.insert_resource(state);
         run_command(
@@ -1172,7 +1176,14 @@ mod tests {
         let state = app.world().resource::<NarratorState>();
         assert_eq!(state.chronicle.len(), 1);
         assert_eq!(state.chronicle[0].title(), "Morale");
-        assert_eq!(state.stats.book.len(), 1);
+        // Consegnata al Custode: la statistica è (o sarà all'ora piena) nel mondo.
+        assert!(state.chronicle[0].seq.is_some());
+        let world = &app.world().resource::<crate::state::Sim>().world;
+        assert!(
+            world.statistics().get("Morale").is_some() || !world.pending().is_empty(),
+            "{:?}",
+            world.decisions()
+        );
         assert_eq!(state.last_asked, Some(1));
     }
 }

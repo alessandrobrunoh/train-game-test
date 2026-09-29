@@ -197,9 +197,23 @@ pub fn appearance_of(
         stage,
         sex,
         look: look_of(id),
-        job: job.filter(|_| matches!(stage, Stage::Adult | Stage::Elder)),
+        job: job
+            .filter(|_| matches!(stage, Stage::Adult | Stage::Elder))
+            .map(uniform),
         dressed,
     }
+}
+
+/// The builtin job whose uniform a job wears: a job the Custode added
+/// dresses like the builtin job of its workplace (the Operai's otherwise).
+fn uniform(job: Job) -> Job {
+    if job.is_builtin() {
+        return job;
+    }
+    Job::BUILTIN
+        .into_iter()
+        .find(|j| j.workplace_kind() == job.workplace_kind())
+        .unwrap_or(Job::Operaio)
 }
 
 /// Tratti fisici e gusti di un look.
@@ -316,11 +330,11 @@ fn blend(a: Rgba, b: Rgba, t: f32) -> Rgba {
 }
 
 fn job_color(job: Job) -> Rgba {
-    match job {
-        Job::Contadino => FARMER_OVERALLS.0,
-        Job::Cuoco => COOK_WHITE.0,
-        Job::Operaio => WORKER_OVERALLS.0,
-        Job::Mercante => MERCHANT_VEST.0,
+    match uniform(job).code() {
+        "Contadino" => FARMER_OVERALLS.0,
+        "Cuoco" => COOK_WHITE.0,
+        "Mercante" => MERCHANT_VEST.0,
+        _ => WORKER_OVERALLS.0,
     }
 }
 
@@ -390,35 +404,35 @@ fn paint(key: &AppearanceKey) -> Paint {
     if p.skirt {
         p.pants = p.shirt;
     }
-    match key.job {
-        Some(Job::Contadino) => {
+    match key.job.map(|j| uniform(j).code()) {
+        Some("Contadino") => {
             p.shirt = FARMER_SHIRT;
             p.pants = FARMER_OVERALLS;
             p.accent = FARMER_OVERALLS;
             p.garment = Garment::Overalls;
             p.skirt = false;
         }
-        Some(Job::Operaio) => {
+        Some("Operaio") => {
             p.shirt = WORKER_SHIRT;
             p.pants = WORKER_OVERALLS;
             p.accent = WORKER_OVERALLS;
             p.garment = Garment::Overalls;
             p.skirt = false;
         }
-        Some(Job::Cuoco) => {
+        Some("Cuoco") => {
             p.shirt = COOK_SHIRT;
             p.pants = COOK_PANTS;
             p.accent = COOK_WHITE;
             p.garment = Garment::Apron;
             p.toque = true;
         }
-        Some(Job::Mercante) => {
+        Some("Mercante") => {
             p.shirt = MERCHANT_SHIRT;
             p.accent = MERCHANT_VEST;
             p.pants = MERCHANT_PANTS;
             p.garment = Garment::Vest;
         }
-        None => {}
+        _ => {}
     }
     if p.garment != Garment::Plain {
         p.belt = false;
@@ -784,8 +798,8 @@ fn work_pose(job: Option<Job>, frame: Frame) -> Pose {
     let base = Pose::default();
     let second = matches!(frame, Frame::Work1 | Frame::Tool1);
     let tool = matches!(frame, Frame::Tool0 | Frame::Tool1);
-    match job {
-        Some(Job::Contadino) if tool => {
+    match job.map(|j| uniform(j).code()) {
+        Some("Contadino") if tool => {
             if second {
                 Pose {
                     lean: 1,
@@ -803,13 +817,13 @@ fn work_pose(job: Option<Job>, frame: Frame) -> Pose {
                 }
             }
         }
-        Some(Job::Contadino) => Pose {
+        Some("Contadino") => Pose {
             lean: 1,
             near: if second { Arm::To(2, 3) } else { Arm::To(3, 4) },
             far: if second { Arm::To(3, 4) } else { Arm::To(2, 3) },
             ..base
         },
-        Some(Job::Operaio) if tool => {
+        Some("Operaio") if tool => {
             if second {
                 Pose {
                     near: Arm::To(4, 1),
@@ -824,17 +838,17 @@ fn work_pose(job: Option<Job>, frame: Frame) -> Pose {
                 }
             }
         }
-        Some(Job::Operaio) => Pose {
+        Some("Operaio") => Pose {
             near: Arm::To(4, if second { 2 } else { 1 }),
             far: Arm::To(3, if second { 1 } else { 2 }),
             ..base
         },
-        Some(Job::Cuoco) => Pose {
+        Some("Cuoco") => Pose {
             near: if second { Arm::To(3, 2) } else { Arm::To(4, 1) },
             held: Held::Ladle,
             ..base
         },
-        Some(Job::Mercante) => Pose {
+        Some("Mercante") => Pose {
             near: if second {
                 Arm::To(4, 0)
             } else {
@@ -844,7 +858,7 @@ fn work_pose(job: Option<Job>, frame: Frame) -> Pose {
             mouth: !second,
             ..base
         },
-        None => base,
+        _ => base,
     }
 }
 
@@ -1941,7 +1955,7 @@ mod tests {
         let rags = paint(&bare);
         assert!(saturation(rags.shirt.0) < saturation(dressed.pants.0));
         assert_eq!(rags.garment, Garment::Rags);
-        for job in Job::ALL {
+        for job in Job::BUILTIN {
             let a = key(Stage::Adult, Sex::Female, 1, Some(job), true);
             let b = key(Stage::Adult, Sex::Female, 1, None, true);
             assert_ne!(sheet(&a), sheet(&b), "{job:?}");

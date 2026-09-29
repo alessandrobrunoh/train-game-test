@@ -5,9 +5,12 @@
 //! budget) e "In pausa" (niente richieste finché è spuntato).
 //!
 //! Sotto, le voci dalla più recente: icona (quella procedurale per gli
-//! oggetti), nome, tipo e giorno, descrizione, "Perché: …" e lo stato
-//! ("proposta — in attesa del Custode" o "rifiutata: motivo"). Aprendo una
-//! voce si vede il suo pannello (`ai_ui::render_panel`), dal vivo.
+//! oggetti), nome, tipo e giorno, descrizione, "Perché: …" e lo stato:
+//! "entra nel mondo alle 14:00" (consegnata al Custode per la prossima ora
+//! piena), "entrata nel mondo (giorno 3, ore 14:00)" con cosa è cambiato,
+//! "respinta dal Custode: motivo" o "rifiutata: motivo" (dal controllo del
+//! Narratore). Aprendo una voce si vede il suo pannello
+//! (`ai_ui::render_panel`), dal vivo.
 //!
 //! Quando arriva una novità compare in alto "Novità sul treno: «Nome»";
 //! un click apre la cronaca.
@@ -26,6 +29,7 @@ use crate::ui::PointerCheck;
 const WIDTH: f32 = 440.0;
 const ICON_SIZE: f32 = 32.0;
 const PROPOSED: Color32 = Color32::from_rgb(230, 200, 110);
+const APPLIED: Color32 = Color32::from_rgb(130, 210, 130);
 const REJECTED: Color32 = Color32::from_rgb(230, 110, 100);
 const ON: Color32 = Color32::from_rgb(120, 200, 120);
 const OFF: Color32 = Color32::from_rgb(170, 170, 170);
@@ -66,14 +70,44 @@ fn toggle_chronicle(keys: Res<ButtonInput<KeyCode>>, mut window: ResMut<Chronicl
     }
 }
 
-/// Il senso di "in attesa del Custode".
-pub const CUSTODE_HINT: &str =
-    "Il Custode, che farà entrare le novità nel mondo, non esiste ancora (passo A2)";
+/// Cosa fa il Custode, nel suggerimento dello stato.
+pub const CUSTODE_HINT: &str = "Il Custode esamina ogni novità accettata alla prossima ora piena \
+     di gioco: se ha senso la fa entrare nel mondo, se no la respinge con un motivo.";
+
+/// "giorno 3, ore 14:00".
+fn when(t: sim::GameTime) -> String {
+    format!("giorno {}, ore {:02}:{:02}", t.day(), t.hour(), t.minute())
+}
 
 /// Lo stato di una voce e il suo colore.
 pub fn status_line(entry: &ChronicleEntry) -> (String, Color32) {
     match entry.status {
-        EntryStatus::Proposed => ("proposta — in attesa del Custode".to_string(), PROPOSED),
+        EntryStatus::Proposed => ("accettata — va al Custode".to_string(), PROPOSED),
+        EntryStatus::Scheduled => (
+            match entry.at {
+                Some(t) => format!(
+                    "entra nel mondo alle {:02}:00 (giorno {})",
+                    t.hour(),
+                    t.day()
+                ),
+                None => "va al Custode".to_string(),
+            },
+            PROPOSED,
+        ),
+        EntryStatus::Applied => (
+            match entry.at {
+                Some(t) => format!("entrata nel mondo ({})", when(t)),
+                None => "entrata nel mondo".to_string(),
+            },
+            APPLIED,
+        ),
+        EntryStatus::Refused => (
+            format!(
+                "respinta dal Custode: {}",
+                entry.reason.as_deref().unwrap_or("?")
+            ),
+            REJECTED,
+        ),
         EntryStatus::Rejected => (
             format!("rifiutata: {}", entry.reason.as_deref().unwrap_or("?")),
             REJECTED,
@@ -105,7 +139,6 @@ fn entry_ui(
     index: usize,
     open_by_default: bool,
     sim: &Sim,
-    state: &NarratorState,
     icons: &mut ItemIcons,
 ) -> Option<narrator::Action> {
     let mut pressed = None;
@@ -130,8 +163,14 @@ fn entry_ui(
         }
         let (status, colour) = status_line(entry);
         let label = ui.add(egui::Label::new(RichText::new(status).color(colour)).wrap());
-        if entry.status == EntryStatus::Proposed {
+        if matches!(
+            entry.status,
+            EntryStatus::Proposed | EntryStatus::Scheduled | EntryStatus::Refused
+        ) {
             label.on_hover_text(CUSTODE_HINT);
+        }
+        if let Some(summary) = &entry.summary {
+            ui.add(egui::Label::new(RichText::new(summary).color(APPLIED).small()).wrap());
         }
         let Some(d) = &entry.draft else {
             return;
@@ -151,7 +190,7 @@ fn entry_ui(
         })
         .body(|ui| {
             if let Some(panel) = &d.panel {
-                pressed = render_panel(ui, panel, &sim.world, &state.stats);
+                pressed = render_panel(ui, panel, &sim.world);
             }
             egui::CollapsingHeader::new("La bozza per il Custode")
                 .id_salt(("bozza", index))
@@ -234,7 +273,7 @@ fn chronicle_window(
             } else {
                 ui.weak("Imposta LLM_API_URL e LLM_MODEL in .env per accenderlo.");
             }
-            ui.weak("Le proposte non cambiano ancora il mondo: aspettano il Custode.");
+            ui.weak("Le novità accettate entrano nel mondo alla prossima ora piena, se il Custode le approva.");
             ui.separator();
             if state.chronicle.is_empty() {
                 ui.weak("Ancora niente: il Narratore propone una novità al giorno, dalle 6:00.");
@@ -250,7 +289,7 @@ fn chronicle_window(
                         state_ref.chronicle.iter().enumerate().rev().enumerate()
                     {
                         if let Some(a) =
-                            entry_ui(ui, entry, i, rank < expanded, &sim, state_ref, &mut icons)
+                            entry_ui(ui, entry, i, rank < expanded, &sim, &mut icons)
                         {
                             queue.0.push(a);
                         }
@@ -319,13 +358,24 @@ mod tests {
     fn status_lines() {
         let mut e = ChronicleEntry {
             day: 1,
-            status: EntryStatus::Proposed,
+            status: EntryStatus::Scheduled,
             draft: None,
             reason: None,
             attempts: 1,
             latency_ms: 0,
+            seq: Some(0),
+            at: Some(sim::GameTime::from_dhm(2, 14, 0)),
+            summary: None,
         };
-        assert_eq!(status_line(&e).0, "proposta — in attesa del Custode");
+        assert_eq!(status_line(&e).0, "entra nel mondo alle 14:00 (giorno 2)");
+        e.status = EntryStatus::Applied;
+        assert_eq!(status_line(&e).0, "entrata nel mondo (giorno 2, ore 14:00)");
+        e.status = EntryStatus::Refused;
+        e.reason = Some("il Mercante non fabbrica oggetti".into());
+        assert_eq!(
+            status_line(&e).0,
+            "respinta dal Custode: il Mercante non fabbrica oggetti"
+        );
         e.status = EntryStatus::Rejected;
         e.reason = Some("il nome «Tè» esiste già".into());
         assert_eq!(status_line(&e).0, "rifiutata: il nome «Tè» esiste già");

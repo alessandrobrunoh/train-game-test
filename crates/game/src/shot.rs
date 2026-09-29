@@ -137,8 +137,9 @@ const FIXTURES: [(u64, &str); 6] = [
     ),
 ];
 
-/// Mette la cronaca di prova nel Narratore (e un rifiuto, per vederlo).
-fn stage_chronicle(state: &mut NarratorState, now: f64) {
+/// Mette la cronaca di prova nel Narratore (e un rifiuto, per vederlo): le
+/// bozze accettate vanno al Custode di `world`, che le esamina all'ora piena.
+fn stage_chronicle(state: &mut NarratorState, world: &mut sim::World, now: f64) {
     for (day, answer) in FIXTURES {
         let draft = narrator::parse(answer).expect("a valid fixture");
         state.record(
@@ -149,8 +150,12 @@ fn stage_chronicle(state: &mut NarratorState, now: f64) {
                 reason: None,
                 attempts: 1,
                 latency_ms: 1300,
+                seq: None,
+                at: None,
+                summary: None,
             },
             now,
+            Some(world),
         );
         if day == 3 {
             state.record(
@@ -161,8 +166,12 @@ fn stage_chronicle(state: &mut NarratorState, now: f64) {
                     reason: Some("la carrozza «Cisterna» non esiste; tipi di carrozza: Dormitorio, Mensa, Mercato, Officina, Serra".into()),
                     attempts: 2,
                     latency_ms: 2600,
+                    seq: None,
+                    at: None,
+                    summary: None,
                 },
                 now,
+                None,
             );
         }
     }
@@ -201,6 +210,8 @@ enum Spot {
     Chat,
     /// Le finestre del Narratore: cronaca (N), statistiche (K), icone.
     Narrator(NarratorView),
+    /// Nel primo Mercato, con la scheda "Banchi" aperta.
+    Market,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -211,7 +222,7 @@ enum NarratorView {
 }
 
 /// Nome del file, posto del giocatore, vista allargata.
-const SCENES: [(&str, Spot, bool); 10] = [
+const SCENES: [(&str, Spot, bool); 11] = [
     ("1-piano-terra", Spot::Floor(0, Some(160.0)), false),
     ("2-piano-sopra", Spot::Floor(1, Some(160.0)), false),
     ("3-sulla-scala", Spot::Floor(0, None), false),
@@ -222,6 +233,7 @@ const SCENES: [(&str, Spot, bool); 10] = [
     ("8-cronaca", Spot::Narrator(NarratorView::Chronicle), false),
     ("9-statistiche", Spot::Narrator(NarratorView::Stats), false),
     ("10-icone", Spot::Narrator(NarratorView::Icons), false),
+    ("11-banchi", Spot::Market, false),
 ];
 
 /// Un amico del giocatore sveglio nella cabina, e qualcosa nell'inventario
@@ -240,6 +252,15 @@ fn stage_cabin(world: &mut sim::World) -> Option<sim::NpcId> {
         }
         world.player.chest.add(sim::ItemKind::Tessuto, 7);
         world.player.chest.add(sim::ItemKind::Coperta, 2);
+        // Gli oggetti che il Custode ha fatto entrare nel mondo, con la loro icona.
+        let added: Vec<sim::ItemKind> = world
+            .catalog()
+            .kinds()
+            .filter(|k| !k.is_builtin())
+            .collect();
+        for item in added {
+            world.player.inventory.add(item, 2);
+        }
     }
     let i = world
         .npcs
@@ -264,6 +285,34 @@ fn stage_cabin(world: &mut sim::World) -> Option<sim::NpcId> {
     Some(npc.id)
 }
 
+/// Il giocatore nel Mercato `market` con un banco aperto (un oggetto del
+/// Custode, se c'è) e un NPC che vende lì: la scheda "Banchi" piena.
+fn stage_stalls(world: &mut sim::World, market: sim::CarriageId) {
+    world.set_player_place(sim::Place {
+        carriage: market,
+        floor: 0,
+    });
+    let added = world.catalog().kinds().find(|k| !k.is_builtin());
+    let item = added.unwrap_or(sim::ItemKind::Rottame);
+    if world.player.inventory.count(item) == 0 {
+        world.player.inventory.add(item, 3);
+    }
+    let quote = world.quote(market, item).unwrap_or(5);
+    let _ = world.player_list_for_sale(market, item, 2, quote + 2);
+    // Un NPC sveglio nel Mercato mette in vendita della verdura.
+    if let Some(i) = world
+        .npcs
+        .iter()
+        .position(|n| n.age >= 18 && n.action == sim::Action::Idle)
+    {
+        let id = world.npcs[i].id;
+        world.npcs[i].carriage = market;
+        world.npcs[i].floor = 0;
+        world.npcs[i].inventory.items.add(sim::ItemKind::Verdura, 4);
+        let _ = world.list_for_sale(sim::Seller::Npc(id), market, sim::ItemKind::Verdura, 4, 3);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_script(
     mut commands: Commands,
@@ -277,6 +326,7 @@ fn run_script(
         ResMut<InventoryWindow>,
         ResMut<ChestWindow>,
         ResMut<ChatQueue>,
+        ResMut<crate::market_ui::MarketWindow>,
     ),
     mut body: Single<&mut Body, With<Player>>,
     mut exit: MessageWriter<AppExit>,
@@ -292,19 +342,21 @@ fn run_script(
         return;
     }
     if script.scene == 0 {
+        let now = time.elapsed_secs_f64();
+        let Sim { world, brain } = &mut *sim;
         if !script.real
             && let Some(state) = narrator.0.as_mut()
         {
-            stage_chronicle(state, time.elapsed_secs_f64());
+            stage_chronicle(state, world, now);
         }
-        let Sim { world, brain } = &mut *sim;
         let evening = GameTime::from_dhm(1, EVENING.0, EVENING.1);
-        // Ora per ora, così le statistiche hanno uno storico.
+        // Ora per ora: il Custode esamina le bozze all'ora piena e le
+        // statistiche hanno uno storico.
         while world.clock < evening {
             let minutes = evening.since(world.clock).min(60);
             world.run(brain, minutes);
             if let Some(state) = narrator.0.as_mut() {
-                state.stats.sample(world);
+                state.sync(world, now);
             }
         }
     }
@@ -372,6 +424,28 @@ fn run_script(
             Vec2::new(x, cabin.base_y() + half_height)
         }
         (Spot::Cabin { .. } | Spot::Chat, None) => start_position(),
+        (Spot::Market, _) => {
+            narrator.1.open = false;
+            narrator.3.0 = false;
+            ui_windows.0.open = false;
+            let world = &mut sim.world;
+            let market = world
+                .carriages
+                .iter()
+                .find(|c| c.kind == sim::CarriageKind::Mercato)
+                .map(|c| c.id);
+            match market {
+                Some(m) => {
+                    stage_stalls(world, m);
+                    ui_windows.3.show_stalls();
+                    Vec2::new(
+                        TrainLayout::carriage_left(m.index()) + 160.0,
+                        floor_y(0) + half_height,
+                    )
+                }
+                None => start_position(),
+            }
+        }
         (Spot::Narrator(view), _) => {
             ui_windows.2.0.push(ChatCommand::Close);
             narrator.1.open = view == NarratorView::Chronicle;

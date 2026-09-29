@@ -118,7 +118,12 @@ fn close_chest_away(sim: Res<Sim>, mut chest: ResMut<ChestWindow>) {
     }
 }
 
-fn chest_window(mut contexts: EguiContexts, mut sim: ResMut<Sim>, mut chest: ResMut<ChestWindow>) {
+fn chest_window(
+    mut contexts: EguiContexts,
+    mut sim: ResMut<Sim>,
+    mut chest: ResMut<ChestWindow>,
+    mut icons: ResMut<crate::item_icons::ItemIcons>,
+) {
     if !chest.open {
         return;
     }
@@ -146,6 +151,8 @@ fn chest_window(mut contexts: EguiContexts, mut sim: ResMut<Sim>, mut chest: Res
                     ));
                     store = slot_grid(
                         ui,
+                        &sim.world,
+                        &mut icons,
                         &player.inventory,
                         "chest_inventory",
                         Some("Clic: metti nel baule"),
@@ -156,6 +163,8 @@ fn chest_window(mut contexts: EguiContexts, mut sim: ResMut<Sim>, mut chest: Res
                     ui.strong(format!("Baule ({} liberi)", player.chest.free_slots()));
                     retrieve = slot_grid(
                         ui,
+                        &sim.world,
+                        &mut icons,
                         &player.chest,
                         "chest_slots",
                         Some("Clic: prendi dal baule"),

@@ -506,8 +506,8 @@ pub fn shelf(w: i32, h: i32, rows: i32) -> Canvas {
 
 /// Modello di una cassa (7×7) per tipo di oggetto.
 pub fn crate_art(item: ItemKind) -> Canvas {
-    match item {
-        ItemKind::Verdura => Canvas::from_rows(
+    match item.code() {
+        "Verdura" => Canvas::from_rows(
             &[
                 ".gGlGg.", //
                 "gGlgGlg", //
@@ -527,7 +527,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
                 ('D', rgb(106, 74, 44)),
             ],
         ),
-        ItemKind::Razione => Canvas::from_rows(
+        "Razione" => Canvas::from_rows(
             &[
                 "yyyyyyy", //
                 "YYYtYYY", //
@@ -546,7 +546,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
                 ('d', rgb(150, 110, 64)),
             ],
         ),
-        ItemKind::Rottame => Canvas::from_rows(
+        "Rottame" => Canvas::from_rows(
             &[
                 "...s...", //
                 "..oOs..", //
@@ -563,7 +563,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
                 ('s', rgb(150, 156, 166)),
             ],
         ),
-        ItemKind::Attrezzo => Canvas::from_rows(
+        "Attrezzo" => Canvas::from_rows(
             &[
                 "bbbbbbb", //
                 "bmbbbmb", //
@@ -580,7 +580,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
                 ('h', rgb(180, 60, 44)),
             ],
         ),
-        ItemKind::Vestito => Canvas::from_rows(
+        "Vestito" => Canvas::from_rows(
             &[
                 ".......", //
                 ".ccccc.", //
@@ -598,7 +598,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
             ],
         ),
         // Balla di cotone legata con lo spago.
-        ItemKind::Cotone => Canvas::from_rows(
+        "Cotone" => Canvas::from_rows(
             &[
                 ".wWwWw.", //
                 "wWwwwWw", //
@@ -615,7 +615,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
             ],
         ),
         // Mazzi di erbe in un cesto.
-        ItemKind::Erbe => Canvas::from_rows(
+        "Erbe" => Canvas::from_rows(
             &[
                 "g.G.g.G", //
                 "GgLgGlg", //
@@ -636,7 +636,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
             ],
         ),
         // Lingotti di metallo impilati.
-        ItemKind::Metallo => Canvas::from_rows(
+        "Metallo" => Canvas::from_rows(
             &[
                 "..mMm..", //
                 "..sSs..", //
@@ -655,7 +655,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
             ],
         ),
         // Pezze di stoffa piegate, di tre colori.
-        ItemKind::Tessuto => Canvas::from_rows(
+        "Tessuto" => Canvas::from_rows(
             &[
                 ".......", //
                 "bbbbbbb", //
@@ -675,7 +675,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
             ],
         ),
         // Teiera di terracotta con la tazza.
-        ItemKind::Te => Canvas::from_rows(
+        "Te" => Canvas::from_rows(
             &[
                 "...K...", //
                 "..LLL..", //
@@ -696,7 +696,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
             ],
         ),
         // Due coperte piegate, a quadri.
-        ItemKind::Coperta => Canvas::from_rows(
+        "Coperta" => Canvas::from_rows(
             &[
                 ".......", //
                 "ggggggg", //
@@ -715,7 +715,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
             ],
         ),
         // Lanterna con la fiamma accesa.
-        ItemKind::Lampada => Canvas::from_rows(
+        "Lampada" => Canvas::from_rows(
             &[
                 "...h...", //
                 "..MMM..", //
@@ -734,7 +734,7 @@ pub fn crate_art(item: ItemKind) -> Canvas {
             ],
         ),
         // Orsacchiotto di pezza.
-        ItemKind::Giocattolo => Canvas::from_rows(
+        "Giocattolo" => Canvas::from_rows(
             &[
                 ".b...b.", //
                 ".bbbbb.", //
@@ -751,13 +751,37 @@ pub fn crate_art(item: ItemKind) -> Canvas {
                 ('n', rgb(70, 44, 32)),
             ],
         ),
+        // An item the Custode added: a crate in its colour.
+        _ => {
+            let [r, g, b] = crate::storage::item_rgb(item);
+            let (base, dark) = (rgb(r, g, b), shade(rgb(r, g, b), 0.7));
+            Canvas::from_rows(
+                &[
+                    ".ccccc.", //
+                    "cCcCcCc", //
+                    "WWWWWWW", //
+                    "wdwdwdw", //
+                    "WWWWWWW", //
+                    "wdwdwdw", //
+                    "DDDDDDD", //
+                ],
+                &[
+                    ('c', base),
+                    ('C', dark),
+                    ('W', rgb(150, 104, 62)),
+                    ('w', rgb(122, 82, 48)),
+                    ('d', rgb(96, 64, 38)),
+                    ('D', rgb(80, 52, 30)),
+                ],
+            )
+        }
     }
 }
 
 /// Merce esposta sui banconi del Mercato (solo attrezzi e vestiti).
 pub fn good_art(item: ItemKind) -> Canvas {
     match item {
-        ItemKind::Attrezzo => Canvas::from_rows(
+        item if item == ItemKind::Attrezzo => Canvas::from_rows(
             &[
                 "mm....", //
                 "mhhhhh", //
@@ -783,7 +807,7 @@ mod tests {
 
     #[test]
     fn crate_templates_share_one_size() {
-        for item in ItemKind::ALL {
+        for item in ItemKind::BUILTIN {
             let c = crate_art(item);
             assert_eq!(
                 (c.width as i32, c.height as i32),

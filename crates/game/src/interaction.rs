@@ -138,8 +138,9 @@ fn stocked_items(world: &World, carriage: CarriageId) -> Vec<ItemKind> {
     let Some(c) = world.carriage(carriage) else {
         return Vec::new();
     };
-    ItemKind::ALL
-        .into_iter()
+    world
+        .catalog()
+        .kinds()
         .filter(|&item| c.stock.count(item) > 0)
         .collect()
 }
@@ -149,8 +150,9 @@ fn market_items(world: &World, carriage: CarriageId) -> Vec<(ItemKind, u32)> {
     let Some(c) = world.carriage(carriage) else {
         return Vec::new();
     };
-    let mut items: Vec<(ItemKind, u32)> = ItemKind::ALL
-        .into_iter()
+    let mut items: Vec<(ItemKind, u32)> = world
+        .catalog()
+        .kinds()
         .filter(|&item| c.stock.count(item) >= 1)
         .filter_map(|item| Some((item, world.player_price(carriage, item)?)))
         .collect();

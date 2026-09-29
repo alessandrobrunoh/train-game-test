@@ -21,8 +21,35 @@ impl Plugin for StatePlugin {
             .init_resource::<FollowNpc>()
             .init_resource::<SimPerf>()
             .init_resource::<PointerOverUi>()
-            .add_message::<WorldReplaced>();
+            .add_message::<WorldReplaced>()
+            .add_message::<CatalogChanged>()
+            .add_systems(
+                PreUpdate,
+                watch_catalog.before(crate::saves::WorldRebuildSet),
+            );
     }
+}
+
+/// Manda [`CatalogChanged`] quando il Custode ha aggiunto oggetti, lavori o
+/// postazioni al mondo.
+fn watch_catalog(
+    sim: Option<Res<Sim>>,
+    mut last: Local<Option<(usize, usize, usize)>>,
+    mut changed: MessageWriter<CatalogChanged>,
+) {
+    let Some(sim) = sim else {
+        return;
+    };
+    let world = &sim.world;
+    let now = (
+        world.catalog().item_count(),
+        world.catalog().job_count(),
+        world.carriages.iter().map(|c| c.stations.len()).sum(),
+    );
+    if last.is_some_and(|l| l != now) {
+        changed.write(CatalogChanged);
+    }
+    *last = Some(now);
 }
 
 /// Il cervello degli NPC: `UtilityBrain`, più Laya quando il giocatore lo
@@ -121,6 +148,12 @@ pub struct RunInfo {
 /// sprite, selezione) deve ricostruirlo. `RunInfo` è già aggiornato.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct WorldReplaced;
+
+/// Inviato quando il Custode ha fatto crescere il mondo (oggetti nuovi nei
+/// magazzini, postazioni per un lavoro nuovo): postazioni e magazzini si
+/// ridisegnano, il resto no.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct CatalogChanged;
 
 #[cfg(test)]
 mod tests {

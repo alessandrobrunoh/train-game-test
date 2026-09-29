@@ -486,9 +486,10 @@ impl Plugin for StationsPlugin {
             .add_systems(Startup, spawn_stations)
             .add_systems(
                 PreUpdate,
-                rebuild_stations
-                    .in_set(WorldRebuildSet)
-                    .run_if(on_message::<WorldReplaced>),
+                rebuild_stations.in_set(WorldRebuildSet).run_if(
+                    on_message::<WorldReplaced>
+                        .or_eager(on_message::<crate::state::CatalogChanged>),
+                ),
             )
             .add_systems(Update, animate_stations);
     }

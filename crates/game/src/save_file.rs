@@ -21,11 +21,10 @@
 //! ai tipi serializzati della sim (`World`, `UtilityBrain`, ...) richiede di
 //! alzare [`SAVE_VERSION`]. I file di un'altra versione vengono rifiutati.
 //!
-//! Eccezione: l'ultimo campo del corpo, `narrator` (cronaca e statistiche
-//! del Narratore, in JSON), si è aggiunto senza cambiare versione. Un corpo
-//! della versione 9 che non lo ha si legge lo stesso ([`SaveBodyV9`]: il
-//! campo resta vuoto), e un gioco più vecchio ignora i byte in più. Dentro
-//! il JSON i campi nuovi si aggiungono con `#[serde(default)]`.
+//! L'ultimo campo del corpo, `narrator` (la cronaca del Narratore), è JSON:
+//! dentro il JSON i campi nuovi si aggiungono con `#[serde(default)]` senza
+//! cambiare versione. Anche la parte del Custode nel mondo (proposte,
+//! decisioni, statistiche) viaggia come testo JSON dentro il `World`.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -45,8 +44,13 @@ use sim::{GameTime, UtilityBrain, World};
 /// cabina e baule, ricette; `Npc::player`, `Station::owner`); il corpo non
 /// ha più l'inventario, solo la posizione fisica del giocatore. 9: la chat
 /// del giocatore (`PlayerCharacter::chats`, e in `PlayerTie` i tempi di
-/// saluti e insulti e l'incarico `Favour`).
-pub const SAVE_VERSION: u32 = 9;
+/// saluti e insulti e l'incarico `Favour`). 10: i cataloghi ampliabili e
+/// il Custode (A2): `ItemKind` e `Job` diventano id con i loro nomi (quelli
+/// aggiunti viaggiano con la loro descrizione), `Stock` e i contatori per
+/// oggetto e per lavoro diventano liste, il mondo tiene il catalogo
+/// aggiunto (`World::catalog`) e il Custode (proposte in attesa, decisioni,
+/// statistiche con lo storico).
+pub const SAVE_VERSION: u32 = 10;
 const MAGIC: [u8; 8] = *b"TRAINSAV";
 /// Byte fissi prima dell'intestazione: magic, versione, lunghezza.
 const PREFIX_LEN: usize = MAGIC.len() + 4 + 4;
@@ -173,32 +177,9 @@ pub struct SaveBody {
     /// riparte sempre in pausa.
     #[allow(dead_code)]
     pub paused: bool,
-    /// Vuoto nei salvataggi senza Narratore (versione 9 prima della cronaca).
+    /// La cronaca del Narratore, in JSON (vuota senza Narratore).
     #[serde(default)]
     pub narrator: String,
-}
-
-/// Il corpo com'era prima del campo `narrator` (stessa versione 9).
-#[derive(Deserialize)]
-struct SaveBodyV9 {
-    world: World,
-    brain: UtilityBrain,
-    player: [f32; 2],
-    minutes_per_second: f32,
-    paused: bool,
-}
-
-impl From<SaveBodyV9> for SaveBody {
-    fn from(b: SaveBodyV9) -> Self {
-        Self {
-            world: b.world,
-            brain: b.brain,
-            player: b.player,
-            minutes_per_second: b.minutes_per_second,
-            paused: b.paused,
-            narrator: String::new(),
-        }
-    }
 }
 
 /// Un salvataggio completo (la versione è quella del file, [`SAVE_VERSION`]).
@@ -284,13 +265,7 @@ pub fn decode(bytes: &[u8]) -> Result<SaveFile, SaveError> {
     if raw.len() != raw_len {
         return Err(corrupt("lunghezza del corpo errata"));
     }
-    // postcard non ha campi facoltativi: senza `narrator` si rilegge come v9.
-    let body: SaveBody = match postcard::from_bytes(&raw) {
-        Ok(body) => body,
-        Err(e) => postcard::from_bytes::<SaveBodyV9>(&raw)
-            .map(SaveBody::from)
-            .map_err(|_| corrupt(e))?,
-    };
+    let body: SaveBody = postcard::from_bytes(&raw).map_err(corrupt)?;
     Ok(SaveFile { header, body })
 }
 
@@ -664,33 +639,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reads_version_9_bodies_without_the_narrator() {
-        #[derive(Serialize)]
-        struct OldBody<'a> {
-            world: &'a World,
-            brain: &'a UtilityBrain,
-            player: [f32; 2],
-            minutes_per_second: f32,
-            paused: bool,
-        }
+    fn refuses_saves_from_before_the_custode() {
+        // Version 9 (before the runtime catalogs) is another format.
         let world = World::generate(1, 3, 10);
-        let brain = UtilityBrain::new(1);
-        let header = SaveHeader::of("x", "vecchio", 0, &world);
-        let old = OldBody {
-            world: &world,
-            brain: &brain,
-            player: [1.0, 2.0],
-            minutes_per_second: 10.0,
-            paused: true,
-        };
-        let encoded = EncodedSave {
-            header: postcard::to_allocvec(&header).unwrap(),
-            body: postcard::to_allocvec(&old).unwrap(),
-        };
-        let file = decode(&encoded.finish()).unwrap();
-        assert_eq!(file.body.narrator, "");
-        assert_eq!(file.body.player, [1.0, 2.0]);
-        assert_eq!(world_bytes(&file.body.world), world_bytes(&world));
+        let mut bytes = sample(&world, &UtilityBrain::new(1), "x");
+        bytes[8..12].copy_from_slice(&9u32.to_le_bytes());
+        assert!(matches!(decode(&bytes), Err(SaveError::Version(9))));
     }
 
     #[test]

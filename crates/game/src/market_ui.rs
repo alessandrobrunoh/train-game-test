@@ -7,6 +7,13 @@
 //!   (`World::player_buy`) e Vendi (`World::player_sell`, pagato dalla cassa
 //!   del treno a una parte del prezzo). Si compra e si vende solo stando nel
 //!   Mercato, con un mercante al bancone.
+//! - Scheda **Banchi**: i banchi aperti di quel Mercato (chiunque vende
+//!   qualunque oggetto, anche quelli aggiunti dal Custode): venditore,
+//!   quantità, prezzo l'uno e Compra (`World::player_buy_listing`); sotto,
+//!   "Metti in vendita" (un oggetto dell'inventario, quanti, a che prezzo:
+//!   di base la quotazione del Mercato, `World::player_list_for_sale`) e "I
+//!   miei banchi" con Ritira (`World::player_withdraw`). I banchi non hanno
+//!   bisogno del mercante, ma del giocatore nel Mercato.
 //! - Scheda **Listino**: tabella oggetti × Mercati, ogni riga colorata dal
 //!   Mercato più economico (verde) al più caro (rosso), e sotto il grafico
 //!   dello storico dei prezzi di un oggetto nei vari Mercati.
@@ -18,8 +25,9 @@ use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, RichText};
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use egui_plot::{Corner, Legend, Line, Plot, Points};
-use sim::{CarriageId, ItemKind, MarketQuote, Trend, World};
+use sim::{CarriageId, ItemKind, ListingId, MarketQuote, OfferSource, Seller, Trend, World};
 
+use crate::item_icons::{ItemIcons, item_badge};
 use crate::player::Player;
 use crate::state::Sim;
 use crate::storage::plural_title;
@@ -66,6 +74,10 @@ pub(crate) struct MarketWindow {
     chart_item: Option<ItemKind>,
     /// Esito dell'ultimo acquisto o vendita.
     message: Option<String>,
+    /// "Metti in vendita": oggetto, quantità, prezzo l'uno (0: la quotazione).
+    sell_item: Option<ItemKind>,
+    sell_qty: u32,
+    sell_price: u32,
 }
 
 impl MarketWindow {
@@ -76,12 +88,19 @@ impl MarketWindow {
         self.tab = Tab::Listino;
         self.chart_item = Some(item);
     }
+
+    /// Apre la scheda "Banchi" (gli screenshot).
+    pub(crate) fn show_stalls(&mut self) {
+        self.open = true;
+        self.tab = Tab::Banchi;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Tab {
     #[default]
     Mercato,
+    Banchi,
     Listino,
 }
 
@@ -90,6 +109,14 @@ enum Tab {
 enum Trade {
     Buy(ItemKind),
     Sell(ItemKind),
+    /// Un'unità di un banco.
+    BuyListing(ListingId),
+    List {
+        item: ItemKind,
+        qty: u32,
+        price: u32,
+    },
+    Withdraw(ListingId),
 }
 
 // --- Dati puri ----------------------------------------------------------------
@@ -195,7 +222,53 @@ fn perform(world: &mut World, market: CarriageId, trade: Trade) -> String {
                 Err(e) => capitalized(&e.to_string()),
             }
         }
+        Trade::BuyListing(id) => {
+            let item = world.listing(id).map(|l| l.item);
+            match (world.player_buy_listing(id, 1), item) {
+                (Ok(sale), Some(item)) => format!(
+                    "Comprato {} al banco per {} gettoni",
+                    item.with_article(),
+                    sale.paid
+                ),
+                (Ok(sale), None) => format!("Comprato per {} gettoni", sale.paid),
+                (Err(e), _) => capitalized(&e.to_string()),
+            }
+        }
+        Trade::List { item, qty, price } => {
+            match world.player_list_for_sale(market, item, qty, price) {
+                Ok(_) => format!(
+                    "In vendita: {qty} {} a {price} gettoni l'uno",
+                    if qty == 1 { item.name() } else { item.plural() }
+                ),
+                Err(e) => capitalized(&e.to_string()),
+            }
+        }
+        Trade::Withdraw(id) => match world.player_withdraw(id) {
+            Ok(n) => format!("Ritirati {n} dal banco"),
+            Err(e) => capitalized(&e.to_string()),
+        },
     }
+}
+
+/// Perché il giocatore non può comprare dal banco (None: può).
+fn listing_blocker(
+    world: &World,
+    market: CarriageId,
+    here: CarriageId,
+    item: ItemKind,
+    seller: Seller,
+    price: u32,
+) -> Option<String> {
+    if market != here {
+        return Some("Vai al Mercato per comprare ai banchi".to_string());
+    }
+    if seller == Seller::Player {
+        return Some("È il tuo banco".to_string());
+    }
+    if world.player.tokens < price {
+        return Some(format!("Servono {price} gettoni"));
+    }
+    (world.player.inventory.room_for(item) == 0).then(|| "L'inventario è pieno".to_string())
 }
 
 fn capitalized(text: &str) -> String {
@@ -228,6 +301,7 @@ fn market_window(
     layout: Option<Res<TrainLayout>>,
     player: Query<&Transform, With<Player>>,
     mut window: ResMut<MarketWindow>,
+    mut icons: ResMut<ItemIcons>,
 ) {
     if !window.open {
         return;
@@ -257,6 +331,7 @@ fn market_window(
             let world = &sim.world;
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut window.tab, Tab::Mercato, "Mercato");
+                ui.selectable_value(&mut window.tab, Tab::Banchi, "Banchi");
                 ui.selectable_value(&mut window.tab, Tab::Listino, "Listino");
             });
             ui.separator();
@@ -267,7 +342,10 @@ fn market_window(
             market = Some(nearest);
             match window.tab {
                 Tab::Mercato => {
-                    trade = market_tab(ui, world, nearest, here, &window.message);
+                    trade = market_tab(ui, &mut icons, world, nearest, here, &window.message);
+                }
+                Tab::Banchi => {
+                    trade = stalls_tab(ui, &mut icons, world, nearest, here, &mut window);
                 }
                 Tab::Listino => {
                     let chart_item = &mut window.chart_item;
@@ -287,6 +365,7 @@ fn market_window(
 /// Scheda "Mercato": restituisce l'acquisto o la vendita chiesti.
 fn market_tab(
     ui: &mut egui::Ui,
+    icons: &mut ItemIcons,
     world: &World,
     market: CarriageId,
     here: CarriageId,
@@ -333,7 +412,7 @@ fn market_tab(
             ui.end_row();
             for q in &quotes {
                 ui.horizontal(|ui| {
-                    item_swatch(ui, q.item);
+                    item_badge(ui, icons, world, q.item);
                     ui.label(plural_title(q.item));
                 });
                 let price = ui.strong(format!("{} g", q.player_price));
@@ -378,7 +457,7 @@ fn market_tab(
                         response.on_disabled_hover_text(why);
                     }
                     let sell = sell_blocker(q, ready, owned);
-                    let label = format!("Vendi ({} g)", q.buyback);
+                    let label = format!("Vendi subito ({} g)", q.buyback);
                     let response = ui.add_enabled(sell.is_none(), egui::Button::new(label));
                     if response.clicked() {
                         trade = Some(Trade::Sell(q.item));
@@ -408,6 +487,224 @@ fn market_tab(
     trade
 }
 
+/// Nell'ispettore: cosa porta con sé un NPC e i suoi banchi aperti.
+pub(crate) fn npc_goods(ui: &mut egui::Ui, world: &World, npc: &sim::Npc) {
+    let carried = npc.inventory.items.items();
+    let listings = world.listings_of(Seller::Npc(npc.id));
+    if carried.is_empty() && listings.is_empty() {
+        return;
+    }
+    let name = |item: ItemKind, n: u32| {
+        let word = if n == 1 { item.name() } else { item.plural() };
+        let new = if item.is_builtin() { "" } else { " ✦" };
+        format!("{n} {word}{new}")
+    };
+    if !carried.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("Porta con sé:");
+            for &(item, n) in &carried {
+                item_swatch(ui, item);
+                let label = ui.label(name(item, n));
+                if let Some(def) = world.catalog().get_item(item) {
+                    label.on_hover_text(def.description.as_ref());
+                }
+            }
+        });
+    }
+    for l in listings {
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("Banco:");
+            item_swatch(ui, l.item);
+            ui.label(format!(
+                "{} a {} g in {}",
+                name(l.item, l.qty),
+                l.price_each,
+                market_name(world, l.market)
+            ));
+        });
+    }
+}
+
+/// Scheda "Banchi": offerte dei banchi, "Metti in vendita", "I miei banchi".
+fn stalls_tab(
+    ui: &mut egui::Ui,
+    icons: &mut ItemIcons,
+    world: &World,
+    market: CarriageId,
+    here: CarriageId,
+    window: &mut MarketWindow,
+) -> Option<Trade> {
+    let mut trade = None;
+    let player = &world.player;
+    ui.horizontal(|ui| {
+        ui.strong(world.carriage_label(market));
+        if market == here {
+            ui.label(RichText::new("sei qui").color(CHEAP));
+        } else {
+            ui.weak(format!("a {}", distance_text(market.distance(here))));
+        }
+        ui.separator();
+        ui.label(format!("Hai {} gettoni", player.tokens));
+    });
+    ui.separator();
+    ui.strong("Banchi di questo Mercato");
+    let offers = world.market_offers(market);
+    let rows: Vec<(ItemKind, ListingId, Seller, u32, u32)> = offers
+        .iter()
+        .flat_map(|o| {
+            o.offers.iter().filter_map(move |offer| match offer.source {
+                OfferSource::Listing(id) => {
+                    Some((o.item, id, offer.seller, offer.qty, offer.price))
+                }
+                OfferSource::Shelf => None,
+            })
+        })
+        .collect();
+    if rows.is_empty() {
+        ui.weak("Nessun banco aperto qui.");
+    } else {
+        egui::ScrollArea::vertical()
+            .id_salt("banchi")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                egui::Grid::new("stalls_grid")
+                    .num_columns(5)
+                    .striped(true)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        for header in ["Oggetto", "Venditore", "Quanti", "Prezzo l'uno", ""] {
+                            ui.strong(header);
+                        }
+                        ui.end_row();
+                        for &(item, id, seller, qty, price) in &rows {
+                            ui.horizontal(|ui| {
+                                item_badge(ui, icons, world, item);
+                                let name = ui.label(plural_title(item));
+                                if let Some(def) = world.catalog().get_item(item) {
+                                    name.on_hover_text(def.description.as_ref());
+                                }
+                            });
+                            let who = world.seller_name(seller);
+                            if seller == Seller::Player {
+                                ui.label(RichText::new(who).color(CHEAP));
+                            } else {
+                                ui.label(who);
+                            }
+                            ui.label(qty.to_string());
+                            ui.strong(format!("{price} g"));
+                            let why = listing_blocker(world, market, here, item, seller, price);
+                            let button = ui.add_enabled(why.is_none(), egui::Button::new("Compra"));
+                            if button.clicked() {
+                                trade = Some(Trade::BuyListing(id));
+                            }
+                            if let Some(why) = why {
+                                button.on_disabled_hover_text(why);
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+    ui.separator();
+    ui.strong("Metti in vendita");
+    let owned = player.inventory.items();
+    if owned.is_empty() {
+        ui.weak("L'inventario è vuoto.");
+    } else {
+        if window
+            .sell_item
+            .is_none_or(|i| !owned.iter().any(|&(o, _)| o == i))
+        {
+            window.sell_item = owned.first().map(|&(i, _)| i);
+            window.sell_price = 0;
+        }
+        let item = window.sell_item.unwrap_or(owned[0].0);
+        let have = player.inventory.count(item);
+        let quote = world.quote(market, item).unwrap_or(1).max(1);
+        ui.horizontal(|ui| {
+            item_badge(ui, icons, world, item);
+            egui::ComboBox::from_id_salt("sell_item")
+                .selected_text(plural_title(item))
+                .show_ui(ui, |ui| {
+                    for &(o, n) in &owned {
+                        if ui
+                            .selectable_label(o == item, format!("{} ({n})", plural_title(o)))
+                            .clicked()
+                        {
+                            window.sell_item = Some(o);
+                            window.sell_price = 0;
+                        }
+                    }
+                });
+            window.sell_qty = window.sell_qty.clamp(1, have.max(1));
+            ui.add(
+                egui::DragValue::new(&mut window.sell_qty)
+                    .range(1..=have.max(1))
+                    .prefix("quanti: "),
+            );
+            if window.sell_price == 0 {
+                window.sell_price = quote;
+            }
+            ui.add(
+                egui::DragValue::new(&mut window.sell_price)
+                    .range(1..=9999)
+                    .prefix("a ")
+                    .suffix(" g l'uno"),
+            )
+            .on_hover_text(format!("Quotazione del Mercato: {quote} g"));
+        });
+        let why = (market != here).then(|| "Vai al Mercato per aprire un banco".to_string());
+        let button = ui.add_enabled(why.is_none(), egui::Button::new("Metti in vendita"));
+        if button.clicked() {
+            trade = Some(Trade::List {
+                item,
+                qty: window.sell_qty.min(have),
+                price: window.sell_price.max(1),
+            });
+        }
+        if let Some(why) = why {
+            button.on_disabled_hover_text(why);
+        }
+    }
+    ui.separator();
+    ui.strong("I miei banchi");
+    let mine = world.listings_of(Seller::Player);
+    if mine.is_empty() {
+        ui.weak(
+            "Nessuno: ciò che non vendi torna nell'inventario (o nel baule) dopo qualche giorno.",
+        );
+    }
+    for l in mine {
+        ui.horizontal(|ui| {
+            item_badge(ui, icons, world, l.item);
+            ui.label(format!(
+                "{} {} a {} g in {}",
+                l.qty,
+                if l.qty == 1 {
+                    l.item.name()
+                } else {
+                    l.item.plural()
+                },
+                l.price_each,
+                market_name(world, l.market)
+            ));
+            let why = (l.market != here).then(|| "Vai a quel Mercato per ritirarlo".to_string());
+            let button = ui.add_enabled(why.is_none(), egui::Button::new("Ritira"));
+            if button.clicked() {
+                trade = Some(Trade::Withdraw(l.id));
+            }
+            if let Some(why) = why {
+                button.on_disabled_hover_text(why);
+            }
+        });
+    }
+    if let Some(message) = &window.message {
+        ui.separator();
+        ui.label(message);
+    }
+    trade
+}
+
 /// Scheda "Listino": tabella oggetti × Mercati e storico dei prezzi.
 fn price_list(
     ui: &mut egui::Ui,
@@ -417,8 +714,9 @@ fn price_list(
 ) {
     let markets = world.markets();
     let quotes: Vec<Vec<MarketQuote>> = markets.iter().map(|&m| world.market_quotes(m)).collect();
-    let items: Vec<ItemKind> = ItemKind::ALL
-        .into_iter()
+    let items: Vec<ItemKind> = world
+        .catalog()
+        .kinds()
         .filter(|&item| quotes.iter().flatten().any(|q| q.item == item))
         .collect();
     let quote = |k: usize, item: ItemKind| quotes[k].iter().find(|q| q.item == item);
@@ -641,5 +939,59 @@ mod tests {
             market_name(&world, market),
             format!("«{}» ({})", world.carriages[market.index()].name, market)
         );
+    }
+
+    #[test]
+    fn the_player_lists_withdraws_and_buys_at_the_stalls() {
+        let mut world = World::generate(4, 10, 60);
+        let market = world
+            .carriages
+            .iter()
+            .find(|c| c.kind == CarriageKind::Mercato)
+            .unwrap()
+            .id;
+        world.set_player_place(sim::Place {
+            carriage: market,
+            floor: 0,
+        });
+        world.player.inventory.add(ItemKind::Rottame, 5);
+        let money = world.money_supply();
+        let msg = perform(
+            &mut world,
+            market,
+            Trade::List {
+                item: ItemKind::Rottame,
+                qty: 3,
+                price: 4,
+            },
+        );
+        assert!(msg.starts_with("In vendita: 3 rottami"), "{msg}");
+        assert_eq!(world.player.inventory.count(ItemKind::Rottame), 2);
+        let mine = world.listings_of(Seller::Player)[0].id;
+        // Its own listing can't be bought by the player.
+        assert!(
+            listing_blocker(&world, market, market, ItemKind::Rottame, Seller::Player, 4).is_some()
+        );
+        let msg = perform(&mut world, market, Trade::Withdraw(mine));
+        assert_eq!(msg, "Ritirati 3 dal banco");
+        assert_eq!(world.player.inventory.count(ItemKind::Rottame), 5);
+        // An NPC's listing: the player buys one unit, paying the NPC.
+        let i = world
+            .npcs
+            .iter()
+            .position(|n| n.action == Action::Idle && n.age >= 18)
+            .unwrap();
+        let seller = world.npcs[i].id;
+        world.npcs[i].carriage = market;
+        world.npcs[i].inventory.items.add(ItemKind::Verdura, 2);
+        let listing = world
+            .list_for_sale(Seller::Npc(seller), market, ItemKind::Verdura, 2, 3)
+            .unwrap();
+        let tokens = world.npc(seller).unwrap().inventory.tokens;
+        let msg = perform(&mut world, market, Trade::BuyListing(listing));
+        assert!(msg.starts_with("Comprato"), "{msg}");
+        assert_eq!(world.player.inventory.count(ItemKind::Verdura), 1);
+        assert_eq!(world.npc(seller).unwrap().inventory.tokens, tokens + 3);
+        assert_eq!(world.money_supply(), money);
     }
 }

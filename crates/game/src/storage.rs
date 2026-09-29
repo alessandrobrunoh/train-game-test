@@ -60,44 +60,73 @@ pub fn storage_range() -> (f32, f32) {
 
 /// Oggetti che una carrozza di tipo `kind` tiene, in ordine (anche le
 /// comodità in uso nei Dormitori).
-pub fn kept_items(params: &SimParams, kind: CarriageKind) -> Vec<ItemKind> {
-    ItemKind::ALL
-        .into_iter()
-        .filter(|&item| params.storage_cap(kind, item) > 0.0)
+pub fn kept_items(world: &World, kind: CarriageKind) -> Vec<ItemKind> {
+    world
+        .catalog()
+        .kinds()
+        .filter(|&item| world.storage_cap(kind, item) > 0.0)
         .collect()
 }
 
 /// Oggetti sullo scaffale di una carrozza di tipo `kind`, in ordine: quelli
 /// che tiene, tranne nei Dormitori (lì le comodità sono in uso, sui letti).
-pub fn storable_items(params: &SimParams, kind: CarriageKind) -> Vec<ItemKind> {
+pub fn storable_items(world: &World, kind: CarriageKind) -> Vec<ItemKind> {
     if kind == CarriageKind::Dormitorio {
         return Vec::new();
     }
-    kept_items(params, kind)
+    kept_items(world, kind)
 }
 
-/// Vero se la carrozza ha un magazzino (i Dormitori no).
+/// Vero se la carrozza ha un magazzino (i Dormitori no): dipende solo dal
+/// tipo, dagli oggetti di partenza.
 pub fn has_storage(params: &SimParams, kind: CarriageKind) -> bool {
-    !storable_items(params, kind).is_empty()
+    kind != CarriageKind::Dormitorio
+        && ItemKind::BUILTIN
+            .iter()
+            .any(|&item| sim::Catalog::builtin().storage_cap(params, kind, item) > 0.0)
 }
 
 /// Colore di un oggetto (casse, merce, interfaccia).
 pub fn item_color(item: ItemKind) -> Color {
-    match item {
-        ItemKind::Verdura => Color::srgb(0.40, 0.72, 0.26),
-        ItemKind::Razione => Color::srgb(0.90, 0.70, 0.38),
-        ItemKind::Rottame => Color::srgb(0.55, 0.40, 0.32),
-        ItemKind::Attrezzo => Color::srgb(0.62, 0.68, 0.78),
-        ItemKind::Vestito => Color::srgb(0.78, 0.32, 0.38),
-        ItemKind::Cotone => Color::srgb(0.93, 0.91, 0.85),
-        ItemKind::Erbe => Color::srgb(0.25, 0.55, 0.43),
-        ItemKind::Metallo => Color::srgb(0.47, 0.49, 0.55),
-        ItemKind::Tessuto => Color::srgb(0.38, 0.53, 0.77),
-        ItemKind::Te => Color::srgb(0.80, 0.37, 0.24),
-        ItemKind::Coperta => Color::srgb(0.59, 0.30, 0.52),
-        ItemKind::Lampada => Color::srgb(0.98, 0.84, 0.40),
-        ItemKind::Giocattolo => Color::srgb(0.93, 0.58, 0.68),
+    if !item.is_builtin() {
+        let [r, g, b] = item_rgb(item);
+        return Color::srgb_u8(r, g, b);
     }
+    match item.code() {
+        "Verdura" => Color::srgb(0.40, 0.72, 0.26),
+        "Razione" => Color::srgb(0.90, 0.70, 0.38),
+        "Rottame" => Color::srgb(0.55, 0.40, 0.32),
+        "Attrezzo" => Color::srgb(0.62, 0.68, 0.78),
+        "Vestito" => Color::srgb(0.78, 0.32, 0.38),
+        "Cotone" => Color::srgb(0.93, 0.91, 0.85),
+        "Erbe" => Color::srgb(0.25, 0.55, 0.43),
+        "Metallo" => Color::srgb(0.47, 0.49, 0.55),
+        "Tessuto" => Color::srgb(0.38, 0.53, 0.77),
+        "Te" => Color::srgb(0.80, 0.37, 0.24),
+        "Coperta" => Color::srgb(0.59, 0.30, 0.52),
+        "Lampada" => Color::srgb(0.98, 0.84, 0.40),
+        "Giocattolo" => Color::srgb(0.93, 0.58, 0.68),
+        _ => Color::srgb(0.6, 0.6, 0.6),
+    }
+}
+
+/// Colore di un oggetto aggiunto dal Custode, dalla sua chiave (i colori
+/// dell'icona sono nel catalogo, questi servono a casse ed etichette).
+pub fn item_rgb(item: ItemKind) -> [u8; 3] {
+    const PALETTE: [[u8; 3]; 8] = [
+        [196, 92, 72],
+        [214, 160, 64],
+        [120, 170, 84],
+        [72, 150, 170],
+        [96, 110, 196],
+        [160, 96, 170],
+        [190, 120, 140],
+        [150, 120, 90],
+    ];
+    let h = item.key().bytes().fold(2166136261u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16777619)
+    });
+    PALETTE[h as usize % PALETTE.len()]
 }
 
 /// "Razioni", "Attrezzi", ...
@@ -213,7 +242,7 @@ fn label_text(world: &World, carriage: CarriageId) -> String {
         return String::new();
     };
     let mut lines = Vec::new();
-    for item in storable_items(&world.params, c.kind) {
+    for item in storable_items(world, c.kind) {
         let count = c.stock.count(item);
         if count == 0 {
             continue;
@@ -282,7 +311,10 @@ impl Plugin for StoragePlugin {
                 rebuild_storage
                     .in_set(WorldRebuildSet)
                     .after(crate::stations::rebuild_stations)
-                    .run_if(on_message::<WorldReplaced>),
+                    .run_if(
+                        on_message::<WorldReplaced>
+                            .or_eager(on_message::<crate::state::CatalogChanged>),
+                    ),
             )
             .add_systems(Update, refresh_storage);
     }
@@ -304,7 +336,7 @@ fn rebuild_storage(
     for entity in &old {
         commands.entity(entity).despawn();
     }
-    let mut ctx = StorageArt::new(&mut art, images.as_deref_mut());
+    let mut ctx = StorageArt::new(&mut art, images.as_deref_mut(), &sim.world);
     spawn_storage_entities(&mut commands, &sim.world, &stations, &mut ctx);
 }
 
@@ -316,7 +348,7 @@ fn spawn_storage(
     mut art: ResMut<ArtCache>,
     mut images: Option<ResMut<Assets<Image>>>,
 ) {
-    let mut ctx = StorageArt::new(&mut art, images.as_deref_mut());
+    let mut ctx = StorageArt::new(&mut art, images.as_deref_mut(), &sim.world);
     spawn_storage_entities(&mut commands, &sim.world, &stations, &mut ctx);
 }
 
@@ -328,20 +360,22 @@ struct StorageArt {
 }
 
 impl StorageArt {
-    fn new(art: &mut ArtCache, mut images: Option<&mut Assets<Image>>) -> Self {
+    fn new(art: &mut ArtCache, mut images: Option<&mut Assets<Image>>, world: &World) -> Self {
         let shelf = art.get(images.as_deref_mut(), ArtKey::Shelf, || {
             prop_art::shelf(STORAGE_WIDTH as i32, STORAGE_HEIGHT as i32, ROWS as i32)
         });
-        let crates = ItemKind::ALL
-            .into_iter()
+        let crates = world
+            .catalog()
+            .kinds()
             .map(|item| {
                 art.get(images.as_deref_mut(), ArtKey::Crate(item), || {
                     prop_art::crate_art(item)
                 })
             })
             .collect();
-        let goods = ItemKind::ALL
-            .into_iter()
+        let goods = world
+            .catalog()
+            .kinds()
             .map(|item| {
                 art.get(images.as_deref_mut(), ArtKey::Good(item), || {
                     prop_art::good_art(item)
@@ -367,7 +401,7 @@ fn spawn_storage_entities(
 
     for c in &world.carriages {
         let index = c.id.index();
-        let items = storable_items(&world.params, c.kind);
+        let items = storable_items(world, c.kind);
         if items.is_empty() {
             continue;
         }
@@ -391,7 +425,7 @@ fn spawn_storage_entities(
                 for block in blocks_for(&items) {
                     let item = block.item;
                     let slots = block.slots();
-                    let cap = world.params.storage_cap(c.kind, item);
+                    let cap = world.storage_cap(c.kind, item);
                     let shown = crates_shown(c.stock.get(item), cap, slots);
                     for rank in 0..slots {
                         let (col, row) = block.cell(rank);
@@ -403,7 +437,10 @@ fn spawn_storage_entities(
                         let y = (prop_art::SHELF_PAD_Y + row as i32 * prop_art::CRATE_STEP_Y)
                             as f32
                             + crate_size.y / 2.0;
-                        let mut sprite = art_sprite(art.crates[item.index()].clone(), crate_size);
+                        let Some(image) = art.crates.get(item.index()) else {
+                            continue;
+                        };
+                        let mut sprite = art_sprite(image.clone(), crate_size);
                         sprite.color = Color::srgb(tint, tint, tint);
                         parent.spawn((
                             Crate {
@@ -510,7 +547,7 @@ fn refresh_storage(
         let Some(carriage) = world.carriages.get(c.carriage) else {
             continue;
         };
-        let cap = world.params.storage_cap(carriage.kind, c.item);
+        let cap = world.storage_cap(carriage.kind, c.item);
         let shown = crates_shown(carriage.stock.get(c.item), cap, c.slots);
         visibility.set_if_neq(if c.rank < shown {
             Visibility::Inherited
@@ -552,14 +589,13 @@ mod tests {
 
     #[test]
     fn columns_are_shared_among_items() {
-        use ItemKind::*;
         let total = |cols: &[(ItemKind, usize)]| cols.iter().map(|c| c.1).sum::<usize>();
-        let one = columns_for(&[Razione]);
-        assert_eq!(one, vec![(Razione, COLUMNS)]);
-        let two = columns_for(&[Attrezzo, Vestito]);
+        let one = columns_for(&[ItemKind::Razione]);
+        assert_eq!(one, vec![(ItemKind::Razione, COLUMNS)]);
+        let two = columns_for(&[ItemKind::Attrezzo, ItemKind::Vestito]);
         assert_eq!(total(&two), COLUMNS);
         assert_eq!(two[0].1, two[1].1);
-        let three = columns_for(&[Rottame, Attrezzo, Vestito]);
+        let three = columns_for(&[ItemKind::Rottame, ItemKind::Attrezzo, ItemKind::Vestito]);
         assert_eq!(total(&three), COLUMNS);
         assert!(three.iter().all(|c| c.1 >= 1));
         assert!(columns_for(&[]).is_empty());
@@ -599,14 +635,15 @@ mod tests {
             assert_eq!(has_storage(&params, kind), kind != CarriageKind::Dormitorio);
         }
         // The Dormitori still keep their comfort goods (not on a shelf).
-        assert!(kept_items(&params, CarriageKind::Dormitorio).contains(&ItemKind::Coperta));
+        let world = World::generate(1, 5, 10);
+        assert!(kept_items(&world, CarriageKind::Dormitorio).contains(&ItemKind::Coperta));
     }
 
     #[test]
     fn every_shelf_item_gets_its_own_cells() {
-        let params = SimParams::default();
+        let world = World::generate(1, 5, 10);
         for kind in CarriageKind::ALL {
-            let items = storable_items(&params, kind);
+            let items = storable_items(&world, kind);
             let blocks = blocks_for(&items);
             assert_eq!(blocks.len(), items.len().min(2 * COLUMNS), "{kind:?}");
             let mut cells = Vec::new();
@@ -624,7 +661,7 @@ mod tests {
             assert_eq!(cells.len(), n, "{kind:?}: overlapping crates");
         }
         // Eight items: every column split in two.
-        let eight = blocks_for(&ItemKind::ALL[..8]);
+        let eight = blocks_for(&ItemKind::BUILTIN[..8]);
         assert!(eight.iter().all(|b| b.cols == 1 && b.rows < ROWS));
     }
 }

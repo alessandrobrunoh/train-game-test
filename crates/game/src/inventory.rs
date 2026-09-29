@@ -9,8 +9,9 @@
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Align2, Color32, RichText};
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
-use sim::{ItemKind, SlotInventory};
+use sim::{ItemKind, SlotInventory, World};
 
+use crate::item_icons::ItemIcons;
 use crate::state::Sim;
 use crate::storage::{item_color, plural_title};
 use crate::ui::{MARGIN, PointerCheck, color32};
@@ -70,11 +71,13 @@ fn ink_on(bg: Color32) -> Color32 {
 }
 
 /// Griglia degli scomparti di `inventory`, [`SLOT_COLUMNS`] per riga: ogni
-/// pila col colore dell'oggetto, la sigla e il numero. Se `hint` c'è, gli
-/// scomparti pieni sono cliccabili (con quel suggerimento): restituisce
-/// quello cliccato.
+/// pila col colore dell'oggetto, la sigla e il numero (gli oggetti aggiunti
+/// dal Custode con la loro icona). Se `hint` c'è, gli scomparti pieni sono
+/// cliccabili (con quel suggerimento): restituisce quello cliccato.
 pub(crate) fn slot_grid(
     ui: &mut egui::Ui,
+    world: &World,
+    icons: &mut ItemIcons,
     inventory: &SlotInventory,
     id: &str,
     hint: Option<&str>,
@@ -106,16 +109,34 @@ pub(crate) fn slot_grid(
                     egui::StrokeKind::Inside,
                 );
                 if let Some(stack) = slot {
-                    let bg = color32(item_color(stack.item));
+                    let def = world.catalog().get_item(stack.item);
+                    let look = def.and_then(|d| d.appearance.as_ref());
                     let inner = rect.shrink(6.0);
-                    painter.rect_filled(inner, 2.0, bg);
-                    painter.text(
-                        inner.center() - egui::vec2(0.0, 4.0),
-                        egui::Align2::CENTER_CENTER,
-                        short_name(stack.item),
-                        egui::FontId::proportional(11.0),
-                        ink_on(bg),
-                    );
+                    if let Some(look) = look {
+                        // Icona procedurale 16×16, ingrandita due volte.
+                        let texture = icons.item(ui.ctx(), look);
+                        let icon = egui::Rect::from_center_size(
+                            inner.center() - egui::vec2(0.0, 2.0),
+                            egui::vec2(32.0, 32.0),
+                        );
+                        ui.painter().image(
+                            texture,
+                            icon,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    } else {
+                        let bg = color32(item_color(stack.item));
+                        painter.rect_filled(inner, 2.0, bg);
+                        painter.text(
+                            inner.center() - egui::vec2(0.0, 4.0),
+                            egui::Align2::CENTER_CENTER,
+                            short_name(stack.item),
+                            egui::FontId::proportional(11.0),
+                            ink_on(bg),
+                        );
+                    }
+                    let painter = ui.painter();
                     if stack.count > 1 || stack.item.stack_size() > 1 {
                         painter.text(
                             rect.right_bottom() - egui::vec2(4.0, 2.0),
@@ -130,8 +151,11 @@ pub(crate) fn slot_grid(
                         stack.count,
                         plural_title(stack.item),
                         stack.item.stack_size(),
-                        stack.item.description()
+                        def.map_or("", |d| &d.description)
                     );
+                    if def.is_some_and(|d| d.added.is_some()) {
+                        tip.push_str("\nInventato dal Narratore, approvato dal Custode.");
+                    }
                     if let Some(hint) = hint {
                         tip.push_str(&format!("\n{hint}"));
                     }
@@ -152,6 +176,7 @@ fn inventory_window(
     mut contexts: EguiContexts,
     sim: Res<Sim>,
     mut window: ResMut<InventoryWindow>,
+    mut icons: ResMut<ItemIcons>,
 ) {
     if !window.open {
         return;
@@ -179,7 +204,7 @@ fn inventory_window(
                 inv.len()
             ));
             ui.separator();
-            slot_grid(ui, inv, "inventory_slots", None);
+            slot_grid(ui, &sim.world, &mut icons, inv, "inventory_slots", None);
             ui.separator();
             ui.weak(
                 "E vicino alle scorte: prendi (Q: cambia)\nE al bancone del Mercato: compra (Q: cambia)\nM: mercato, per comprare e vendere\nC: crafting\nE vicino a un NPC: regala (se non accetta niente, parla)\nT vicino a un NPC: chat (saluta, chiedi, incarichi, scambia…)\nNella tua cabina: E sul letto (dormi), E sul baule",
@@ -198,7 +223,7 @@ mod tests {
     fn short_names_are_readable() {
         assert_eq!(short_name(ItemKind::Verdura), "Verd");
         assert_eq!(short_name(ItemKind::Te), "Tè");
-        for item in ItemKind::ALL {
+        for item in ItemKind::BUILTIN {
             let s = short_name(item);
             assert!((1..=4).contains(&s.chars().count()), "{item:?}: {s}");
         }
