@@ -53,6 +53,12 @@ mod tests {
             probabilities: vec![0.2, 0.5, 0.3],
         };
         assert_eq!(a.best(), Some((1, 0.5)));
-        assert_eq!(ChoiceAnswer { probabilities: vec![] }.best(), None);
+        assert_eq!(
+            ChoiceAnswer {
+                probabilities: vec![]
+            }
+            .best(),
+            None
+        );
     }
 }

@@ -8,6 +8,7 @@
 //!   in modo asincrono, con `UtilityBrain` come ripiego.
 
 pub mod brain;
+pub mod deliberation;
 pub mod eval;
 pub mod laya;
 pub mod loader;
@@ -17,6 +18,9 @@ pub mod model;
 pub use brain::{
     DecisionInfo, LayaBrain, LayaConfig, LayaStats, LogEntry, ModelStatus, ReplayBrain,
     ScoredBrain, Source,
+};
+pub use deliberation::{
+    DeliberationInfo, DeliberationLog, DeliberationLogEntry, DeliberationStats, DeliberationStatus,
 };
 #[cfg(feature = "laya")]
 pub use laya::{LayaModel, LayaOptions};

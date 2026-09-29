@@ -359,3 +359,92 @@ Il throughput su CPU resta circa 2 righe/s indipendentemente dalla dimensione de
   - `cargo run -p game` (Laya indisponibile);
   - `cargo run -p game --features laya` (CPU) oppure `--features laya-metal`;
   - `TRAINGAME_BRAIN=laya|mock` sceglie la modalità all'avvio.
+
+### Deliberazioni: Laya per le scelte rare (M8)
+
+Le deliberazioni del `sim` (proposta di coppia, avere un figlio, furto, protesta) sono rare (~5 al giorno di gioco con 400 NPC), descritte a parole, con 2–4 opzioni e una scadenza di 2–6 ore di gioco. Se nessuno risponde, alla scadenza decide la regola del `sim` (una scelta pesata e casuale, `World::deliberation_rule_weights`). Sono il caso adatto a un modello lento: poche domande, e c'è tempo.
+
+**`LayaBrain`** (`brain.rs`, pezzi puri in `deliberation.rs`):
+- `answers_deliberations()` è vero con Laya acceso (`enabled`), `LayaConfig::deliberations` (default vero) e un modello pronto o in caricamento (sempre in modalità sincrona). Altrimenti, come con `UtilityBrain`, le regole decidono subito, e la partita è identica a una senza Laya (c'è un test).
+- La domanda è `ChoiceQuery { context, instructions: question, options: descrizioni }`, senza lettere (`deliberation_query`).
+- Il worker ha **due code**. Le deliberazioni si servono per prime, e prima quelle delle carrozze a fuoco. I lotti di azioni si eseguono a pezzi di 8 righe: se nel frattempo arriva una deliberazione, il resto torna in coda. Con Laya vero una deliberazione aspetta quindi al più circa mezzo secondo di azioni. In modalità sincrona la risposta arriva nello stesso tick in cui la deliberazione si apre.
+- Miscela facoltativa con la regola: `p = (1 − w)·Laya + w·regola`, con `w = prior_weight` (default 0, solo Laya; nel gioco 0.5, vedi sotto). La regola usata è quella al momento dell'apertura.
+- Soglia a parte, `deliberation_min_confidence` (default 0.6). Sotto la soglia non si risponde e la regola decide alla scadenza. Una risposta arrivata dopo la scadenza (o per una deliberazione annullata) non raggiunge mai il mondo: `answers_ignored` resta 0, e le domande ancora in coda per deliberazioni chiuse si tolgono dal worker.
+- Le deliberazioni aperte che il cervello non ha mai visto (modello caricato dopo, `reset()`, partita caricata) si chiedono al primo tick utile.
+- `DeliberationStats` (in `LayaStats::deliberations`), per tipo, conta: domande, risposte, date, sotto soglia, in ritardo, chiuse. Ci sono anche gli errori, l'accordo con la scelta più probabile della regola, la latenza media e massima e l'istogramma della confidenza.
+- `deliberation_info(id)` restituisce stato, probabilità di Laya, miscela e regola; `pending_deliberations()` elenca le domande in volo.
+- Replay: con `record_log`, `take_deliberation_log()` restituisce un `DeliberationLog`, che contiene:
+  - i cambi di modalità: quando il cervello rispondeva e quando no, perché cambia il momento in cui decide la regola;
+  - le risposte date, con tick e "giro" di `run_deliberations`.
+  
+  `ReplayBrain::new(&log, think).with_deliberations(delib_log)` rigioca la partita identica (test `async_runs_with_deliberations_replay_exactly`).
+- `MockModel` ha un'euristica a parole chiave per le deliberazioni: carattere, affinità, differenza d'età, figli, razioni a persona, gettoni e prezzo, chi può aiutare. È deterministica, così test e gioco funzionano senza pesi.
+- Nel `sim` c'è un'unica aggiunta: `World::open_deliberation` è pubblica, per test, valutazione e scenari scritti a mano.
+
+**Valutazione** (`src/eval/deliberations.rs`, seconda parte di `laya_eval`):
+```
+cargo run -p sim-laya --example laya_eval -- --only-deliberations                                  # regole, caso, mock
+cargo run -p sim-laya --release --features metal,accelerate --example laya_eval -- --only-deliberations   # + Laya
+```
+Opzioni: `--delib-per-kind N` (6), `--delib-sampled N` (120), `--no-deliberations`.
+
+Gli insiemi di scenari:
+- **(a)** 52 casi "ovvi", 9 tipi, costruiti modificando un mondo generato e aprendo la deliberazione a mano. Esempi:
+  - affinità 0.97 tra coetanei single → accetta;
+  - affinità 0.1 e più di 25 anni di differenza → rifiuta;
+  - giovani senza figli e con cibo abbondante → prova;
+  - 4 figli, 0.3 razioni a testa e pochi gettoni → aspetta;
+  - onesto a cui manca 1 gettone → risparmia;
+  - 0 gettoni, audace e disonesto → ruba;
+  - partner che lo adora e ha 120 gettoni → chiede aiuto;
+  - audace in coppia senza figli, nascita negata → protesta;
+  - prudente con figli → sopporta o lavora di più.
+- **(b)** 120 deliberazioni vere di due partite di 400 NPC (deliberazioni ×3 e, nella seconda, dormitori "pieni" per avere proteste): 23 proposte, 30 figli, 37 furti, 30 proteste. Sono etichettate con la scelta più probabile della regola, quindi misurano l'accordo con la regola, non la correttezza.
+
+Ogni modello si chiama una volta sola; le righe con `prior_weight` 0.5 e le soglie si ricavano dalle stesse probabilità.
+
+Risultati del 2026-09-29, seme 1, Laya `laya-multilingual` zero-shot su Metal (M1), release `metal,accelerate`:
+
+| Cervello | Ovvi (a) | Accordo (b) | coppia | figlio | furto | protesta | conf. media | righe/s |
+|---|---|---|---|---|---|---|---|---|
+| Regola (argmax) | 100% | 100% | 100% | 100% | 100% | 100% | — | — |
+| Regola (estratta, come nel gioco) | 77% | 55% | 48% | 80% | 49% | 43% | — | — |
+| Caso | 44% | 30% | 30% | 37% | 19% | 37% | — | — |
+| MockModel | 100% | 85% | 70% | 97% | 76% | 97% | 0.76 | ~10⁵ |
+| MockModel + regola 0.5 | 100% | 92% | 83% | 100% | 86% | 97% | 0.69 | ~10⁵ |
+| **Laya** | **40%** | **22%** | 65% | 33% | 3% | 0% | 0.66 | **5.7** |
+| **Laya + regola 0.5** | **83%** | **51%** | 70% | 90% | 8% | 50% | 0.53 | 5.7 |
+
+Soglie, con celle "risposte sopra soglia / accuratezza (a) / accordo (b)":
+
+| | ≥ 0.5 | ≥ 0.6 | ≥ 0.7 | ≥ 0.8 |
+|---|---|---|---|---|
+| Laya | 92% / 41% / 22% | 62% / 42% / 19% | 39% / 38% / 16% | 16% / 40% / 8% |
+| Laya + regola 0.5 | 46% / 100% / 89% | 27% / 100% / 100% | 10% / 100% / 100% | 3% / 100% / — |
+
+Cosa si vede:
+- **Zero-shot Laya sceglie quasi a caso** anche sulle deliberazioni (40% sui casi ovvi, contro il 44% del caso). Ha preferenze fisse per tipo, che quasi non dipendono dal contesto: in un furto sceglie sempre "ruba" (100% su "disperato → ruba", 0% su "onesto → risparmia"), e non protesta mai. Tra i casi ovvi va bene solo "affini e coetanei → accetta" (100%).
+- La **confidenza non aiuta**: sopra 0.8 l'accuratezza resta al 40%.
+- Due varianti del prompt, provate e scartate:
+  - la situazione prima del contesto: (a) 38%, (b) 24%;
+  - solo carattere e situazione, senza lo stato dell'NPC: (a) 33%, (b) 38%, ma con il doppio delle righe al secondo (12/s).
+- **Con la regola a peso 0.5 e soglia 0.6** passa il 27% delle risposte, tutte giuste su (a) e d'accordo con la regola su (b). Laya decide così solo quando è d'accordo con la regola, e al posto dell'estrazione casuale della regola sceglie la sua opzione più probabile. Tutto il resto va alla regola alla scadenza. È la configurazione del gioco (`GAME_PRIOR_WEIGHT = 0.5`, soglia 0.6). La libreria resta a `prior_weight = 0`, "solo Laya", da usare con un modello messo a punto.
+- **Velocità:** le righe delle deliberazioni sono lunghe (contesto più situazione), quindi Laya fa ~6 righe al secondo su Metal, contro ~15 per le azioni. Una deliberazione sola impiega ~0.2 s: con ~5 deliberazioni al giorno di gioco il carico è trascurabile.
+- **Prossimo passo:** serve un fine-tuning su deliberazioni etichettate, per esempio con le estrazioni della regola o con scelte scritte a mano. Solo così Laya può fare meglio della regola invece di limitarsi a confermarla.
+
+**Nel gioco:**
+- **Tregua** (`sim_bridge::DeliberationGrace`, attiva di default). Mentre un NPC delle carrozze a fuoco aspetta Laya per una deliberazione, la velocità scende al più a 60 minuti di gioco al secondo. Vale per al massimo 3 s reali per ogni deliberazione. Il pannello del tempo mostra "Marta ci pensa… · rallentato: 1 decisione in corso (60 min/s)". Interruttore, tetto e durata sono nella finestra Cervello.
+- **Fumetti** (`bubbles.rs`), in pixel art generata con `Canvas` e testo nel font del gioco:
+  - "…" con un'icona (cuore, bebè, moneta, pugno) sopra chi ha una deliberazione aperta;
+  - per 3 s il fumetto con la risposta ("Sì!", "Non ancora...", "Ruba!", "Protesto!"), in blu se ha deciso Laya;
+  - un cartello sopra la protesta in corso ("Protesta: nascite! (N)").
+  
+  Con le sole regole le deliberazioni si chiudono nello stesso minuto: si vedono solo i fumetti con la risposta.
+- **Ispettore → "In mente"**: domanda, opzioni con le probabilità di Laya e della regola affiancate, chi deciderà, scadenza, ultime decisioni dell'NPC.
+- **Finestra Cervello → "Deliberazioni"**:
+  - statistiche per tipo e accordo con le regole;
+  - interruttore, soglia e peso della regola;
+  - la tregua;
+  - le ultime 20 decisioni: nome cliccabile, tipo, scelta, chi ha deciso e confidenza.
+- **Notifiche** per proposte accettate (una sola, non anche "si sono messi insieme"), ladri sorpresi, proteste convocate e concessioni dell'amministrazione. Seguono i filtri del registro.
+- **Storia**: nelle biografie le deliberazioni si leggono dal punto di vista della persona ("Proposta di coppia: accetta… (con Laya, 72%)", "Marta risponde alla sua proposta: …"). Le domande ("ci pensa") si nascondono con "solo i fatti della vita".

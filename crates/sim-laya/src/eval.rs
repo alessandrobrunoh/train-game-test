@@ -13,6 +13,8 @@
 //! utilità: se la risposta giusta non è tra queste non possono indovinarla
 //! (vedi [`Scenario::label_in_top`]).
 
+pub mod deliberations;
+
 use std::time::{Duration, Instant};
 
 use sim::{

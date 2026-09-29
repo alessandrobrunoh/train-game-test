@@ -24,33 +24,54 @@
 //!   aspetta ([`sim::THINK`], ozio breve) invece di agire sulla scelta del
 //!   ripiego, per al massimo `max_think_minutes` minuti di gioco.
 //!
+//! **Deliberazioni** (scelte di vita rare, vedi `sim::deliberation`): con
+//! il modello attivo (o in caricamento) e `LayaConfig::deliberations`,
+//! `LayaBrain` risponde alle deliberazioni. Ognuna diventa una domanda
+//! (contesto, domanda, descrizioni delle opzioni) in una coda a parte del
+//! worker, servita **prima** delle azioni; la risposta (facoltativamente
+//! miscelata con la regola del `sim`, `prior_weight`) si dà al mondo solo se
+//! la confidenza è almeno `deliberation_min_confidence` e la deliberazione è
+//! ancora aperta; altrimenti decide la regola alla scadenza.
+//!
 //! **Determinismo.** Le risposte asincrone dipendono dai tempi del modello:
 //! due partite con lo stesso seme divergono. Per riprodurle si registra il
-//! registro delle decisioni (`record_log`, [`LogEntry`]) e lo si rigioca con
-//! [`ReplayBrain`]; per test e valutazioni c'è la modalità sincrona
-//! ([`LayaBrain::attach_sync`]), in cui il modello si chiama nel `decide`.
+//! registro delle decisioni (`record_log`, [`LogEntry`] più il
+//! [`DeliberationLog`]) e lo si rigioca con [`ReplayBrain`]; per test e
+//! valutazioni c'è la modalità sincrona ([`LayaBrain::attach_sync`]), in cui il
+//! modello si chiama nel `decide` (e le deliberazioni hanno risposta nello
+//! stesso tick in cui si aprono).
 //!
 //! **Salvataggi.** Lo stato persistente è solo il ripiego ([`LayaBrain::fallback`],
 //! serializzabile) più la [`LayaConfig`]; cache, domande in volo e modello
 //! sono stato di esecuzione e ripartono da zero.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use sim::{
-    Action, ActionKind, ActionOption, Brain, CarriageId, DecisionRequest, GameTime, ItemKind, Npc,
-    NpcId, THINK, UtilityBrain, World,
+    Action, ActionKind, ActionOption, Brain, CarriageId, DecisionRequest, Deliberation,
+    DeliberationAnswer, DeliberationId, GameTime, ItemKind, Npc, NpcId, THINK, UtilityBrain, World,
 };
 
+use crate::deliberation::{
+    DeliberationInfo, DeliberationLog, DeliberationLogEntry, DeliberationStats, DeliberationStatus,
+    argmax, blend, deliberation_query,
+};
 use crate::model::{ChoiceAnswer, ChoiceModel, ChoiceQuery};
 
 /// Massimo numero di opzioni passate al modello (vedi `docs/laya-brain.md`, §5).
 pub const MAX_TOP_K: usize = 5;
+
+/// Soglia di default per le deliberazioni (vedi `docs/laya-brain.md`, §9).
+pub const DEFAULT_DELIBERATION_MIN_CONFIDENCE: f32 = 0.6;
+
+/// Informazioni sulle deliberazioni tenute per l'interfaccia (le più vecchie si scartano).
+const DELIBERATION_INFO_KEPT: usize = 256;
 
 /// Un cervello di ripiego che sa anche dare un punteggio (senza rumore) a
 /// ogni opzione: serve al pre-filtro top-k e al margine tra le prime due.
@@ -94,6 +115,13 @@ pub struct LayaConfig {
     pub batch_wait: Duration,
     /// Registra ogni decisione (per i replay, vedi [`ReplayBrain`]).
     pub record_log: bool,
+    /// Risponde alle deliberazioni (scelte di vita rare) quando c'è un modello.
+    pub deliberations: bool,
+    /// Sotto questa probabilità della scelta migliore la deliberazione resta
+    /// alla regola (che decide alla scadenza).
+    pub deliberation_min_confidence: f32,
+    /// Peso della regola del `sim` nella miscela con il modello (0 = solo il modello).
+    pub prior_weight: f32,
 }
 
 impl Default for LayaConfig {
@@ -112,6 +140,9 @@ impl Default for LayaConfig {
             batch_rows: 32,
             batch_wait: Duration::from_millis(15),
             record_log: false,
+            deliberations: true,
+            deliberation_min_confidence: DEFAULT_DELIBERATION_MIN_CONFIDENCE,
+            prior_weight: 0.0,
         }
     }
 }
@@ -199,6 +230,8 @@ pub struct LayaStats {
     /// Istogramma della probabilità della risposta migliore, 10 fasce da 0.1.
     pub confidence_hist: [u64; 10],
     pub last_error: Option<String>,
+    /// Le deliberazioni (contate a parte, non in `by_source` né nei `jobs_*`).
+    pub deliberations: DeliberationStats,
 }
 
 impl LayaStats {
@@ -371,6 +404,11 @@ pub fn build_query(world: &World, request: &DecisionRequest, options: &[usize]) 
 /// Carica il modello (sul thread del worker).
 pub type ModelLoader = Box<dyn FnOnce() -> Result<Box<dyn ChoiceModel>, String> + Send>;
 
+/// Righe massime di un lotto di azioni prima di guardare se sono arrivate
+/// deliberazioni (che passano avanti): con Laya vero (~15 righe/s su Metal)
+/// una deliberazione aspetta al più mezzo secondo.
+const PREEMPT_ROWS: usize = 8;
+
 /// Una domanda in viaggio verso il modello.
 struct Job {
     meta: JobMeta,
@@ -393,38 +431,175 @@ struct Reply {
     done: Instant,
 }
 
+/// Una deliberazione in viaggio verso il modello.
+struct DelibJob {
+    meta: DelibMeta,
+    /// NPC in una carrozza a fuoco: passa davanti alle altre deliberazioni.
+    focus: bool,
+    query: ChoiceQuery,
+}
+
+#[derive(Clone, Copy)]
+struct DelibMeta {
+    generation: u64,
+    id: DeliberationId,
+    sent: Instant,
+}
+
+struct DelibReply {
+    meta: DelibMeta,
+    options: usize,
+    result: Result<ChoiceAnswer, String>,
+    done: Instant,
+}
+
 enum WorkerMsg {
     Loaded(String),
     LoadFailed(String),
     Replies(Vec<Reply>),
+    Deliberations(Vec<DelibReply>),
 }
 
-/// Canali verso e dal thread del modello. Il `Mutex` rende il cervello `Sync`
-/// (serve per stare in una risorsa Bevy); si usa solo con `get_mut`, senza lock.
+/// Le due code del worker: le deliberazioni si servono per prime.
+#[derive(Default)]
+struct Queues {
+    deliberations: VecDeque<DelibJob>,
+    actions: VecDeque<Job>,
+    /// Il cervello ha lasciato il worker: finisce.
+    closed: bool,
+}
+
+#[derive(Default)]
+struct Shared {
+    queues: Mutex<Queues>,
+    wake: Condvar,
+}
+
+impl Shared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Queues> {
+        self.queues.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Code verso il thread del modello e canale delle risposte. Il `Mutex` sul
+/// ricevitore rende il cervello `Sync` (serve per stare in una risorsa Bevy);
+/// si usa solo con `get_mut`, senza lock.
 struct Worker {
-    jobs: Sender<Job>,
+    shared: Arc<Shared>,
     msgs: Mutex<Receiver<WorkerMsg>>,
 }
 
+impl Worker {
+    fn push_actions(&self, jobs: Vec<Job>) {
+        if jobs.is_empty() {
+            return;
+        }
+        self.shared.lock().actions.extend(jobs);
+        self.shared.wake.notify_all();
+    }
+
+    /// Accoda le deliberazioni: quelle a fuoco davanti a quelle fuori.
+    fn push_deliberations(&self, jobs: Vec<DelibJob>) {
+        if jobs.is_empty() {
+            return;
+        }
+        let mut q = self.shared.lock();
+        for job in jobs {
+            let at = if job.focus {
+                q.deliberations
+                    .iter()
+                    .position(|j| !j.focus)
+                    .unwrap_or(q.deliberations.len())
+            } else {
+                q.deliberations.len()
+            };
+            q.deliberations.insert(at, job);
+        }
+        drop(q);
+        self.shared.wake.notify_all();
+    }
+
+    /// Toglie dalla coda le deliberazioni non più aperte.
+    fn drop_deliberations(&self, keep: impl Fn(DeliberationId) -> bool) {
+        self.shared.lock().deliberations.retain(|j| keep(j.meta.id));
+    }
+
+    /// Domande in coda (non ancora nel modello): azioni, deliberazioni.
+    fn queued(&self) -> (usize, usize) {
+        let q = self.shared.lock();
+        (q.actions.len(), q.deliberations.len())
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.shared.lock().closed = true;
+        self.shared.wake.notify_all();
+    }
+}
+
 fn spawn_worker(loader: ModelLoader, rows: usize, wait: Duration) -> Worker {
-    let (job_tx, job_rx) = mpsc::channel::<Job>();
+    let shared = Arc::new(Shared::default());
     let (msg_tx, msg_rx) = mpsc::channel::<WorkerMsg>();
+    let worker_shared = shared.clone();
     let spawned = thread::Builder::new()
         .name("laya-worker".into())
-        .spawn(move || worker_loop(loader, job_rx, msg_tx, rows.max(1), wait));
+        .spawn(move || worker_loop(loader, &worker_shared, msg_tx, rows.max(1), wait));
     if let Err(e) = spawned {
         // Il canale dei messaggi è già chiuso: `poll` lo vedrà come un fallimento.
         eprintln!("laya: impossibile avviare il worker: {e}");
     }
     Worker {
-        jobs: job_tx,
+        shared,
         msgs: Mutex::new(msg_rx),
+    }
+}
+
+/// Il prossimo lavoro del worker.
+enum Batch {
+    Deliberations(Vec<DelibJob>),
+    Actions(Vec<Job>),
+}
+
+/// Aspetta il prossimo lotto: prima le deliberazioni (fino a `rows`), poi le
+/// azioni (fino a `rows`, aspettando al più `wait` per riempire il lotto, a
+/// meno che arrivi una deliberazione). `None`: il cervello non c'è più.
+fn next_batch(shared: &Shared, rows: usize, wait: Duration) -> Option<Batch> {
+    let mut q = shared.lock();
+    loop {
+        if q.closed {
+            return None;
+        }
+        if !q.deliberations.is_empty() {
+            let n = q.deliberations.len().min(rows);
+            return Some(Batch::Deliberations(q.deliberations.drain(..n).collect()));
+        }
+        if !q.actions.is_empty() {
+            let deadline = Instant::now() + wait;
+            while q.actions.len() < rows && q.deliberations.is_empty() && !q.closed {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                q = shared
+                    .wake
+                    .wait_timeout(q, left)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            if q.closed || !q.deliberations.is_empty() {
+                continue;
+            }
+            let n = q.actions.len().min(rows);
+            return Some(Batch::Actions(q.actions.drain(..n).collect()));
+        }
+        q = shared.wake.wait(q).unwrap_or_else(|e| e.into_inner());
     }
 }
 
 fn worker_loop(
     loader: ModelLoader,
-    jobs: Receiver<Job>,
+    shared: &Shared,
     out: Sender<WorkerMsg>,
     rows: usize,
     wait: Duration,
@@ -439,34 +614,48 @@ fn worker_loop(
             return;
         }
     };
-    // Finisce quando il cervello (il mittente) viene distrutto.
-    while let Ok(first) = jobs.recv() {
-        let mut batch = vec![first];
-        let deadline = Instant::now() + wait;
-        while batch.len() < rows {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match jobs.recv_timeout(left) {
-                Ok(job) => batch.push(job),
-                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+    while let Some(batch) = next_batch(shared, rows, wait) {
+        let sent = match batch {
+            Batch::Deliberations(jobs) => out.send(WorkerMsg::Deliberations(run_deliberations(
+                model.as_mut(),
+                jobs,
+            ))),
+            Batch::Actions(mut jobs) => {
+                // A pezzi: tra un pezzo e l'altro le deliberazioni passano avanti.
+                let mut result = Ok(());
+                while !jobs.is_empty() {
+                    let rest = jobs.split_off(jobs.len().min(PREEMPT_ROWS));
+                    result = out.send(WorkerMsg::Replies(run_batch(model.as_mut(), jobs)));
+                    jobs = rest;
+                    if result.is_err() {
+                        break;
+                    }
+                    let mut q = shared.lock();
+                    if !jobs.is_empty() && !q.deliberations.is_empty() {
+                        for job in jobs.drain(..).rev() {
+                            q.actions.push_front(job);
+                        }
+                    }
+                }
+                result
             }
-        }
-        let replies = run_batch(model.as_mut(), batch);
-        if out.send(WorkerMsg::Replies(replies)).is_err() {
+        };
+        if sent.is_err() {
             return;
         }
     }
 }
 
-/// Chiama il modello su un lotto e abbina le risposte alle domande.
-fn run_batch(model: &mut dyn ChoiceModel, batch: Vec<Job>) -> Vec<Reply> {
-    let (metas, queries): (Vec<JobMeta>, Vec<ChoiceQuery>) =
-        batch.into_iter().map(|j| (j.meta, j.query)).unzip();
-    let result = model.predict_batch(&queries);
-    let done = Instant::now();
-    let answers: Vec<Result<ChoiceAnswer, String>> = match result {
+/// Chiama il modello su un lotto: una risposta (o un errore) per domanda,
+/// controllando che abbia una probabilità per opzione.
+fn predict(
+    model: &mut dyn ChoiceModel,
+    queries: &[ChoiceQuery],
+) -> Vec<Result<ChoiceAnswer, String>> {
+    match model.predict_batch(queries) {
         Ok(answers) if answers.len() == queries.len() => answers
             .into_iter()
-            .zip(&queries)
+            .zip(queries)
             .map(|(a, q)| {
                 if a.probabilities.len() == q.options.len() {
                     Ok(a)
@@ -484,7 +673,15 @@ fn run_batch(model: &mut dyn ChoiceModel, batch: Vec<Job>) -> Vec<Reply> {
             vec![Err(e); queries.len()]
         }
         Err(e) => vec![Err(e); queries.len()],
-    };
+    }
+}
+
+/// Chiama il modello su un lotto di azioni e abbina le risposte alle domande.
+fn run_batch(model: &mut dyn ChoiceModel, batch: Vec<Job>) -> Vec<Reply> {
+    let (metas, queries): (Vec<JobMeta>, Vec<ChoiceQuery>) =
+        batch.into_iter().map(|j| (j.meta, j.query)).unzip();
+    let answers = predict(model, &queries);
+    let done = Instant::now();
     metas
         .into_iter()
         .zip(queries)
@@ -492,6 +689,23 @@ fn run_batch(model: &mut dyn ChoiceModel, batch: Vec<Job>) -> Vec<Reply> {
         .map(|((meta, query), result)| Reply {
             meta,
             options: query.options,
+            result,
+            done,
+        })
+        .collect()
+}
+
+/// Chiama il modello su un lotto di deliberazioni.
+fn run_deliberations(model: &mut dyn ChoiceModel, batch: Vec<DelibJob>) -> Vec<DelibReply> {
+    let queries: Vec<ChoiceQuery> = batch.iter().map(|j| j.query.clone()).collect();
+    let answers = predict(model, &queries);
+    let done = Instant::now();
+    batch
+        .into_iter()
+        .zip(answers)
+        .map(|(job, result)| DelibReply {
+            meta: job.meta,
+            options: job.query.options.len(),
             result,
             done,
         })
@@ -612,6 +826,15 @@ pub struct LayaBrain<F: ScoredBrain> {
     stats: LayaStats,
     /// Ora del mondo all'ultimo `decide` (per datare le risposte arrivate).
     clock: GameTime,
+    /// Deliberazioni mandate al modello e ancora senza risposta.
+    delib_pending: HashSet<DeliberationId>,
+    /// Risposte del modello arrivate, da valutare al prossimo `deliberations_resolved`.
+    delib_arrived: Vec<DelibReply>,
+    /// Stato delle deliberazioni viste mentre si rispondeva (per l'interfaccia).
+    delib_info: BTreeMap<DeliberationId, DeliberationInfo>,
+    delib_log: DeliberationLog,
+    /// Tick e giro dell'ultima chiamata a `deliberations_resolved`.
+    round: Option<(GameTime, u8)>,
 }
 
 impl<F: ScoredBrain> LayaBrain<F> {
@@ -631,6 +854,11 @@ impl<F: ScoredBrain> LayaBrain<F> {
             log: Vec::new(),
             stats: LayaStats::default(),
             clock: GameTime(0),
+            delib_pending: HashSet::new(),
+            delib_arrived: Vec::new(),
+            delib_info: BTreeMap::new(),
+            delib_log: DeliberationLog::default(),
+            round: None,
         }
     }
 
@@ -685,6 +913,10 @@ impl<F: ScoredBrain> LayaBrain<F> {
         self.cache.clear();
         self.decisions.clear();
         self.stats.queue = 0;
+        self.delib_pending.clear();
+        self.delib_arrived.clear();
+        self.delib_info.clear();
+        self.round = None;
     }
 
     pub fn fallback(&self) -> &F {
@@ -771,6 +1003,41 @@ impl<F: ScoredBrain> LayaBrain<F> {
         std::mem::take(&mut self.log)
     }
 
+    /// Il registro delle deliberazioni (con [`LayaConfig::record_log`]).
+    pub fn deliberation_log(&self) -> &DeliberationLog {
+        &self.delib_log
+    }
+
+    pub fn take_deliberation_log(&mut self) -> DeliberationLog {
+        std::mem::take(&mut self.delib_log)
+    }
+
+    /// Quello che il cervello sa della deliberazione `id` (se l'ha vista
+    /// mentre rispondeva alle deliberazioni; le più vecchie si dimenticano).
+    pub fn deliberation_info(&self, id: DeliberationId) -> Option<&DeliberationInfo> {
+        self.delib_info.get(&id)
+    }
+
+    /// Le deliberazioni ricordate, dalla più recente.
+    pub fn deliberation_infos(&self) -> impl Iterator<Item = &DeliberationInfo> {
+        self.delib_info.values().rev()
+    }
+
+    /// Le deliberazioni che aspettano la risposta del modello.
+    pub fn pending_deliberations(&self) -> impl Iterator<Item = &DeliberationInfo> {
+        self.delib_pending
+            .iter()
+            .filter_map(|id| self.delib_info.get(id))
+    }
+
+    /// Domande ancora in coda nel worker (non entrate nel modello): azioni, deliberazioni.
+    pub fn queued(&self) -> (usize, usize) {
+        match &self.backend {
+            Backend::Async(worker) => worker.queued(),
+            _ => (0, 0),
+        }
+    }
+
     /// Raccoglie i messaggi del worker (stato del caricamento e risposte).
     /// Lo fa già `decide`; il gioco lo chiama anche in pausa.
     pub fn poll(&mut self) {
@@ -800,6 +1067,7 @@ impl<F: ScoredBrain> LayaBrain<F> {
                         self.on_reply(reply, self.clock);
                     }
                 }
+                WorkerMsg::Deliberations(replies) => self.delib_arrived.extend(replies),
             }
         }
         if disconnected && !matches!(self.status, ModelStatus::Failed(_)) {
@@ -938,7 +1206,262 @@ impl<F: ScoredBrain> LayaBrain<F> {
     }
 }
 
+// --- Deliberazioni -------------------------------------------------------------
+
+impl<F: ScoredBrain> LayaBrain<F> {
+    /// Manda al modello le deliberazioni non ancora viste: in modalità
+    /// sincrona le risposte sono pronte subito, altrimenti vanno nella coda
+    /// prioritaria del worker.
+    fn ask_deliberations<'a>(
+        &mut self,
+        world: &World,
+        deliberations: impl IntoIterator<Item = &'a Deliberation>,
+    ) {
+        let sent = Instant::now();
+        let mut jobs = Vec::new();
+        for d in deliberations {
+            if self.delib_info.contains_key(&d.id) {
+                continue;
+            }
+            let n = d.options.len().max(1);
+            let rule = world
+                .deliberation_rule_weights(d.id)
+                .unwrap_or_else(|| vec![1.0 / n as f32; n]);
+            let focus = world.npc(d.npc).is_some_and(|n| self.is_focus(n.carriage));
+            self.stats.deliberations.asked[d.kind.index()] += 1;
+            self.delib_pending.insert(d.id);
+            self.delib_info.insert(
+                d.id,
+                DeliberationInfo {
+                    id: d.id,
+                    npc: d.npc,
+                    kind: d.kind,
+                    status: DeliberationStatus::Pending,
+                    asked: d.asked,
+                    deadline: d.deadline,
+                    rule,
+                    model: None,
+                    blended: None,
+                    confidence: None,
+                    sent,
+                    latency: None,
+                },
+            );
+            jobs.push(DelibJob {
+                meta: DelibMeta {
+                    generation: self.generation,
+                    id: d.id,
+                    sent,
+                },
+                focus,
+                query: deliberation_query(d),
+            });
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        match &mut self.backend {
+            Backend::Sync(model) => {
+                let model = model.get_mut().unwrap_or_else(|e| e.into_inner());
+                let replies = run_deliberations(model.as_mut(), jobs);
+                self.delib_arrived.extend(replies);
+            }
+            Backend::Async(worker) => worker.push_deliberations(jobs),
+            Backend::None => {}
+        }
+        self.prune_deliberation_info();
+    }
+
+    /// Valuta le risposte arrivate: quelle abbastanza sicure, per
+    /// deliberazioni ancora aperte, vanno al mondo. Chiude le domande di
+    /// deliberazioni che il mondo ha già chiuso (in ritardo o annullate).
+    fn settle_deliberations(
+        &mut self,
+        world: &World,
+        round: u8,
+        answering: bool,
+    ) -> Vec<DeliberationAnswer> {
+        let now = world.clock;
+        let mut out = Vec::new();
+        for reply in std::mem::take(&mut self.delib_arrived) {
+            let id = reply.meta.id;
+            if reply.meta.generation != self.generation || !self.delib_pending.remove(&id) {
+                continue;
+            }
+            let Some(info) = self.delib_info.get_mut(&id) else {
+                continue;
+            };
+            let k = info.kind.index();
+            let st = &mut self.stats.deliberations;
+            let latency = reply.done.saturating_duration_since(reply.meta.sent);
+            st.latency_total += latency;
+            st.latency_max = st.latency_max.max(latency);
+            info.latency = Some(latency);
+            let answer = match reply.result {
+                Ok(a) if a.probabilities.len() == reply.options => a,
+                Ok(a) => {
+                    st.failed += 1;
+                    self.stats.last_error = Some(format!(
+                        "{} probabilità per {} opzioni",
+                        a.probabilities.len(),
+                        reply.options
+                    ));
+                    info.status = DeliberationStatus::Failed;
+                    continue;
+                }
+                Err(e) => {
+                    st.failed += 1;
+                    self.stats.last_error = Some(e);
+                    info.status = DeliberationStatus::Failed;
+                    continue;
+                }
+            };
+            let blended = blend(&answer.probabilities, &info.rule, self.config.prior_weight);
+            let Some((best, p)) = argmax(&blended) else {
+                st.failed += 1;
+                info.status = DeliberationStatus::Failed;
+                continue;
+            };
+            st.answered[k] += 1;
+            st.confidence_hist[((p * 10.0) as usize).min(9)] += 1;
+            if argmax(&info.rule).map(|(i, _)| i) == Some(best) {
+                st.agreed[k] += 1;
+            }
+            info.model = Some(answer.probabilities);
+            info.blended = Some(blended);
+            info.confidence = Some(p);
+            if !answering || world.deliberation(id).is_none() {
+                if now >= info.deadline {
+                    st.late[k] += 1;
+                    info.status = DeliberationStatus::Late;
+                } else {
+                    st.closed[k] += 1;
+                    info.status = DeliberationStatus::Closed;
+                }
+                continue;
+            }
+            if p < self.config.deliberation_min_confidence {
+                st.low_confidence[k] += 1;
+                info.status = DeliberationStatus::LowConfidence;
+                continue;
+            }
+            st.applied[k] += 1;
+            info.status = DeliberationStatus::Applied;
+            out.push(DeliberationAnswer {
+                id,
+                choice: best,
+                confidence: p,
+            });
+            if self.config.record_log {
+                self.delib_log.answers.push(DeliberationLogEntry {
+                    time: now,
+                    round,
+                    id,
+                    choice: best,
+                    confidence: p,
+                });
+            }
+        }
+        // Domande per deliberazioni già chiuse (o per cui non si risponde più).
+        let closed: Vec<DeliberationId> = self
+            .delib_pending
+            .iter()
+            .copied()
+            .filter(|&id| !answering || world.deliberation(id).is_none())
+            .collect();
+        for id in &closed {
+            self.delib_pending.remove(id);
+            let Some(info) = self.delib_info.get_mut(id) else {
+                continue;
+            };
+            let k = info.kind.index();
+            if now >= info.deadline {
+                self.stats.deliberations.late[k] += 1;
+                info.status = DeliberationStatus::Late;
+            } else {
+                self.stats.deliberations.closed[k] += 1;
+                info.status = DeliberationStatus::Closed;
+            }
+        }
+        if !closed.is_empty()
+            && let Backend::Async(worker) = &self.backend
+        {
+            let pending = &self.delib_pending;
+            worker.drop_deliberations(|id| pending.contains(&id));
+        }
+        out
+    }
+
+    /// Dimentica le informazioni più vecchie (mai quelle in attesa).
+    fn prune_deliberation_info(&mut self) {
+        while self.delib_info.len() > DELIBERATION_INFO_KEPT {
+            let Some(&oldest) = self
+                .delib_info
+                .keys()
+                .find(|id| !self.delib_pending.contains(id))
+            else {
+                break;
+            };
+            self.delib_info.remove(&oldest);
+        }
+    }
+}
+
 impl<F: ScoredBrain> Brain for LayaBrain<F> {
+    /// Con un modello pronto o in caricamento, acceso, e
+    /// [`LayaConfig::deliberations`]: le deliberazioni aspettano la risposta
+    /// fino alla scadenza.
+    fn answers_deliberations(&self) -> bool {
+        self.config.enabled
+            && self.config.deliberations
+            && match self.backend {
+                Backend::None => false,
+                Backend::Sync(_) => true,
+                Backend::Async(_) => {
+                    matches!(self.status, ModelStatus::Ready(_) | ModelStatus::Loading)
+                }
+            }
+    }
+
+    fn deliberations_opened(&mut self, world: &World, new: &[Deliberation]) {
+        if self.answers_deliberations() {
+            self.ask_deliberations(world, new);
+        }
+    }
+
+    fn deliberations_resolved(&mut self, world: &World) -> Vec<DeliberationAnswer> {
+        let now = world.clock;
+        let round = match self.round {
+            Some((t, r)) if t == now => r.saturating_add(1),
+            _ => 0,
+        };
+        self.round = Some((now, round));
+        // Vale per tutto il tick: il mondo l'ha letto prima di questa chiamata.
+        let answering = self.answers_deliberations();
+        if self.config.record_log
+            && round == 0
+            && self.delib_log.modes.last().map(|m| m.1) != Some(answering)
+        {
+            self.delib_log.modes.push((now, answering));
+        }
+        if self.delib_pending.is_empty() && !answering && self.delib_arrived.is_empty() {
+            return Vec::new();
+        }
+        self.poll();
+        if answering && self.answers_deliberations() {
+            // Aperte prima che si rispondesse (modello appena caricato, partita caricata).
+            let unseen: Vec<&Deliberation> = world
+                .open_deliberations()
+                .iter()
+                .filter(|d| !self.delib_info.contains_key(&d.id))
+                .collect();
+            if !unseen.is_empty() {
+                self.ask_deliberations(world, unseen);
+            }
+        }
+        self.settle_deliberations(world, round, answering)
+    }
+
     /// Le descrizioni servono solo per le poche domande al modello: le
     /// formatta `LayaBrain` stesso, non il `sim` per tutte le opzioni.
     fn wants_descriptions(&self) -> bool {
@@ -1056,19 +1579,10 @@ impl<F: ScoredBrain> Brain for LayaBrain<F> {
                     }
                 }
                 Backend::Async(worker) => {
-                    let mut failed = false;
-                    for job in jobs {
-                        let npc = job.meta.npc;
-                        if worker.jobs.send(job).is_err() {
-                            failed = true;
-                            break;
-                        }
-                        self.in_flight.insert(npc, now);
+                    for job in &jobs {
+                        self.in_flight.insert(job.meta.npc, now);
                     }
-                    if failed {
-                        self.status =
-                            ModelStatus::Failed("il worker del modello si è fermato".into());
-                    }
+                    worker.push_actions(jobs);
                     for c in &candidates {
                         if self.in_flight.contains_key(&requests[c.i].npc)
                             && self.should_think(c.focus, now, now)
@@ -1102,14 +1616,20 @@ impl<F: ScoredBrain> Brain for LayaBrain<F> {
 
 // --- Replay -----------------------------------------------------------------------
 
-/// Rigioca un registro di decisioni ([`LayaBrain::take_log`]): con lo stesso
-/// mondo di partenza riproduce la partita anche se le risposte di Laya erano
-/// arrivate in tempi non deterministici.
+/// Rigioca un registro di decisioni ([`LayaBrain::take_log`], più
+/// [`LayaBrain::take_deliberation_log`] con [`ReplayBrain::with_deliberations`]):
+/// con lo stesso mondo di partenza riproduce la partita anche se le risposte
+/// di Laya erano arrivate in tempi non deterministici.
 pub struct ReplayBrain {
     choices: HashMap<(GameTime, NpcId), usize>,
     think_minutes: u64,
     /// Decisioni chieste ma assenti dal registro (l'NPC ozia).
     pub missing: u64,
+    modes: Vec<(GameTime, bool)>,
+    answers: HashMap<(GameTime, u8), Vec<DeliberationAnswer>>,
+    /// Il tick in corso (o il prossimo), per [`Brain::answers_deliberations`].
+    clock: GameTime,
+    round: Option<(GameTime, u8)>,
 }
 
 impl ReplayBrain {
@@ -1119,7 +1639,31 @@ impl ReplayBrain {
             choices: log.iter().map(|e| ((e.time, e.npc), e.choice)).collect(),
             think_minutes,
             missing: 0,
+            modes: Vec::new(),
+            answers: HashMap::new(),
+            clock: GameTime(0),
+            round: None,
         }
+    }
+
+    /// Rigioca anche le deliberazioni: quando il cervello rispondeva e le
+    /// risposte date, nello stesso tick e giro.
+    pub fn with_deliberations(mut self, log: DeliberationLog) -> Self {
+        for e in &log.answers {
+            self.answers
+                .entry((e.time, e.round))
+                .or_default()
+                .push(DeliberationAnswer {
+                    id: e.id,
+                    choice: e.choice,
+                    confidence: e.confidence,
+                });
+        }
+        self.modes = log.modes;
+        if let Some(&(first, _)) = self.modes.first() {
+            self.clock = first;
+        }
+        self
     }
 }
 
@@ -1133,6 +1677,7 @@ impl Brain for ReplayBrain {
     }
 
     fn decide(&mut self, world: &World, requests: &[DecisionRequest]) -> Vec<usize> {
+        self.clock = world.clock;
         requests
             .iter()
             .map(|r| match self.choices.get(&(world.clock, r.npc)) {
@@ -1143,5 +1688,21 @@ impl Brain for ReplayBrain {
                 }
             })
             .collect()
+    }
+
+    fn answers_deliberations(&self) -> bool {
+        let at = self.modes.partition_point(|&(t, _)| t <= self.clock);
+        at > 0 && self.modes[at - 1].1
+    }
+
+    fn deliberations_resolved(&mut self, world: &World) -> Vec<DeliberationAnswer> {
+        let now = world.clock;
+        let round = match self.round {
+            Some((t, r)) if t == now => r.saturating_add(1),
+            _ => 0,
+        };
+        self.round = Some((now, round));
+        self.clock = now + 1;
+        self.answers.remove(&(now, round)).unwrap_or_default()
     }
 }

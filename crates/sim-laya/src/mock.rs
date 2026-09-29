@@ -7,6 +7,11 @@
 //! "lavora", "chiacchiera", "compra", "va in"...) e restituisce il softmax dei
 //! punteggi. Serve a provare `LayaBrain` (anche con una latenza simulata) e
 //! come termine di paragone nella valutazione.
+//!
+//! Le deliberazioni (domande che non sono "Quale azione sceglie…") hanno una
+//! loro euristica, sempre a parole chiave: carattere ("audace", "poco
+//! scrupoloso"...), affinità, differenza d'età, figli, razioni a persona,
+//! gettoni e prezzo, chi potrebbe aiutare (vedi [`Situation`]).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -69,8 +74,13 @@ impl MockModel {
 
     /// Probabilità per le opzioni di una domanda.
     pub fn answer(&self, query: &ChoiceQuery) -> ChoiceAnswer {
-        let ctx = Context::parse(&query.context);
-        let scores: Vec<f32> = query.options.iter().map(|o| ctx.score(o)).collect();
+        let scores: Vec<f32> = if is_deliberation(query) {
+            let s = Situation::parse(&query.context);
+            query.options.iter().map(|o| s.score(o)).collect()
+        } else {
+            let ctx = Context::parse(&query.context);
+            query.options.iter().map(|o| ctx.score(o)).collect()
+        };
         ChoiceAnswer {
             probabilities: softmax(&scores, self.temperature),
         }
@@ -206,6 +216,162 @@ impl Context {
     }
 }
 
+// --- Deliberazioni -------------------------------------------------------------
+
+/// Le domande delle azioni di tutti i giorni cominciano così (vedi
+/// `brain::build_query`); le altre sono deliberazioni.
+fn is_deliberation(query: &ChoiceQuery) -> bool {
+    !query.instructions.starts_with("Quale azione")
+}
+
+/// Il primo numero (anche con la virgola decimale col punto) dopo `label`.
+fn number_after(text: &str, label: &str) -> Option<f32> {
+    let rest = &text[text.find(label)? + label.len()..];
+    let start = rest.find(|c: char| c.is_ascii_digit())?;
+    let tail = &rest[start..];
+    let end = tail
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(tail.len());
+    tail[..end].trim_end_matches('.').parse().ok()
+}
+
+/// Il numero subito prima di `label`, es. "0.8 razioni a persona" → 0.8.
+fn number_before(text: &str, label: &str) -> Option<f32> {
+    let head = &text[..text.find(label)?];
+    let head = head.trim_end();
+    let start = head
+        .rfind(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .map_or(0, |i| i + 1);
+    head[start..].parse().ok()
+}
+
+/// "Ha 2 figli" o "Ha già 3 figli" → il numero.
+fn count_of_children(text: &str) -> Option<f32> {
+    ["Ha già ", "Ha "].iter().find_map(|prefix| {
+        text.match_indices(prefix).find_map(|(at, _)| {
+            let rest = &text[at + prefix.len()..];
+            let digits = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            (digits > 0 && rest[digits..].starts_with(" figli"))
+                .then(|| rest[..digits].parse().ok())
+                .flatten()
+        })
+    })
+}
+
+/// Quello che il mock capisce del contesto di una deliberazione.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Situation {
+    honesty: f32,
+    boldness: f32,
+    affinity: f32,
+    age_gap: f32,
+    kids: f32,
+    /// Razioni a persona nelle Mense.
+    food: Option<f32>,
+    tokens: Option<f32>,
+    price: Option<f32>,
+    helper_tokens: Option<f32>,
+    hunger: f32,
+}
+
+impl Situation {
+    fn parse(text: &str) -> Situation {
+        let honesty = if text.contains("poco scrupolos") {
+            0.2
+        } else if text.contains("molto onest") {
+            0.85
+        } else {
+            0.5
+        };
+        let boldness = if text.contains("audace") {
+            0.85
+        } else if text.contains("prudente") {
+            0.2
+        } else {
+            0.5
+        };
+        let age_gap = if text.contains("stessa età") {
+            0.0
+        } else if text.contains("differenza d'età è di un anno") {
+            1.0
+        } else {
+            number_after(text, "differenza d'età è di").unwrap_or(0.0)
+        };
+        let kids = if text.contains("Non ha ancora figli") {
+            0.0
+        } else if text.contains("Ha già un figlio") || text.contains("Ha un figlio") {
+            1.0
+        } else {
+            count_of_children(text).unwrap_or(0.0)
+        };
+        Situation {
+            honesty,
+            boldness,
+            affinity: number_after(text, "(affinità").unwrap_or(0.5),
+            age_gap,
+            kids,
+            food: number_before(text, "razioni a persona"),
+            tokens: number_after(text, "ne ha solo"),
+            price: number_before(text, "gettoni, ma"),
+            helper_tokens: text
+                .find("Potrebbe chiedere aiuto a")
+                .and_then(|at| number_after(&text[at..], "che ha")),
+            hunger: number_after(text, "(sazietà")
+                .or_else(|| need_after(text, "Sazietà"))
+                .unwrap_or(1.0),
+        }
+    }
+
+    /// Punteggio di un'opzione di deliberazione (descrizione in italiano).
+    fn score(&self, option: &str) -> f32 {
+        let o = option.to_lowercase();
+        let has = |k: &str| o.contains(k);
+        let bold = self.boldness - 0.5;
+        if has("accetta e diventa") {
+            let gap = (self.age_gap - 5.0).max(0.0);
+            1.6 * (self.affinity - 0.55) - 0.1 * gap + 0.3 * bold - 0.15 * self.kids
+        } else if has("rifiuta la proposta") {
+            0.8 * (0.6 - self.affinity) + 0.08 * (self.age_gap - 5.0).max(0.0)
+        } else if has("tempo per pensarci") {
+            0.05 - 0.4 * (self.affinity - 0.65).abs()
+        } else if has("prova ad avere un figlio") {
+            let food = self.food.map_or(0.0, |f| (f - 1.0).clamp(-1.0, 1.0));
+            0.45 - 0.2 * self.kids + 0.4 * food + 0.4 * (self.affinity - 0.6)
+        } else if has("aspetta ancora") {
+            0.1
+        } else if o.starts_with("ruba") {
+            let short = match (self.tokens, self.price) {
+                (Some(t), Some(p)) if p > 0.0 => (1.0 - t / p).clamp(0.0, 1.0),
+                _ => 0.5,
+            };
+            1.4 * short * (1.0 - self.honesty) * (0.5 + self.boldness) - 0.35
+        } else if has("rinuncia per ora") {
+            let short = match (self.tokens, self.price) {
+                (Some(t), Some(p)) if p > 0.0 => (1.0 - t / p).clamp(0.0, 1.0),
+                _ => 0.5,
+            };
+            0.5 * self.honesty + 0.3 * (1.0 - short) - 0.1
+        } else if has("chiede qualche gettone") {
+            let family = ["madre", "padre", "figli", "sorella", "fratello", "compagn"]
+                .iter()
+                .any(|w| o.contains(w));
+            let rich = self.helper_tokens.map_or(0.0, |t| (t / 50.0).min(1.0));
+            0.15 + if family { 0.25 } else { 0.0 } + 0.2 * rich - 0.15 * bold
+        } else if has("si unisce alla protesta") {
+            let childless = if self.kids == 0.0 { 0.15 } else { 0.0 };
+            0.9 * bold + childless + 0.5 * (0.5 - self.hunger).max(0.0)
+        } else if has("accetta la decisione") || has("sopporta") {
+            -0.6 * bold
+        } else if has("si rassegna") {
+            -0.6 * bold - 0.1
+        } else {
+            0.0
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +414,78 @@ mod tests {
         // Temperatura alta: quasi uniforme, poco sicuro.
         let flat = MockModel::new().with_temperature(100.0).answer(&q);
         assert!(flat.best().unwrap().1 < 0.4);
+    }
+
+    fn deliberation(context: &str, question: &str, options: &[&str]) -> ChoiceQuery {
+        ChoiceQuery {
+            context: context.to_string(),
+            instructions: question.to_string(),
+            options: options.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn parses_the_situation_of_a_deliberation() {
+        let s = Situation::parse(
+            "Giorno 3 10:00 (giorno). Anna ... Ha 2 figli. Possiede 3 gettoni. Sazietà media (0.60). Di carattere è poco scrupolosa e audace.\nAl Mercato (carrozza 7) c'è un vestito a 12 gettoni, ma Anna ne ha solo 3. Potrebbe chiedere aiuto a Luca Neri (padre), che ha 40 gettoni.",
+        );
+        assert_eq!((s.honesty, s.boldness, s.kids), (0.2, 0.85, 2.0));
+        assert_eq!(
+            (s.tokens, s.price, s.helper_tokens),
+            (Some(3.0), Some(12.0), Some(40.0))
+        );
+        let s = Situation::parse(
+            "L'amministrazione oggi permetterebbe una nascita: ci sono cuccette libere e nelle Mense ci sono 0.4 razioni a persona. Ha già 3 figli: A (4 anni), B (2 anni), C (1 anni). Il legame con Luca è forte (affinità 0.71).",
+        );
+        assert_eq!((s.food, s.kids, s.affinity), (Some(0.4), 3.0, 0.71));
+        let s = Situation::parse(
+            "Il loro legame è fortissimo (affinità 0.95); la differenza d'età è di 22 anni.",
+        );
+        assert_eq!((s.affinity, s.age_gap), (0.95, 22.0));
+    }
+
+    #[test]
+    fn obvious_deliberations_have_obvious_answers() {
+        let m = MockModel::new();
+        let couple = |ctx: &str| {
+            m.answer(&deliberation(
+                ctx,
+                "Marta accetta la proposta di Luca di diventare una coppia?",
+                &[
+                    "accetta e diventa la compagna di Luca",
+                    "rifiuta la proposta di Luca",
+                    "chiede a Luca un po' di tempo per pensarci",
+                ],
+            ))
+            .best()
+            .unwrap()
+            .0
+        };
+        assert_eq!(
+            couple("Di carattere è onesta e audace. (affinità 0.97); hanno la stessa età."),
+            0
+        );
+        assert_eq!(
+            couple(
+                "Di carattere è onesta e prudente. (affinità 0.30); la differenza d'età è di 25 anni."
+            ),
+            1
+        );
+        let theft = m.answer(&deliberation(
+            "Di carattere è poco scrupoloso e audace. c'è un attrezzo a 20 gettoni, ma Leo ne ha solo 0.",
+            "Leo non può permettersi un attrezzo: che cosa fa?",
+            &["ruba un attrezzo al Mercato", "rinuncia per ora e mette da parte i gettoni"],
+        ));
+        assert_eq!(theft.best().unwrap().0, 0);
+        let protest = m.answer(&deliberation(
+            "Di carattere è onesto e audace. È in coppia con Eva.",
+            "Leo protesta contro l'amministrazione, che gli ha negato un figlio?",
+            &[
+                "si unisce alla protesta in Mensa",
+                "accetta la decisione dell'amministrazione",
+            ],
+        ));
+        assert_eq!(protest.best().unwrap().0, 0);
     }
 
     #[test]

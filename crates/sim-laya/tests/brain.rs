@@ -322,7 +322,8 @@ fn async_brain_runs_for_days_and_replays_exactly() {
 
     // Replaying the log reproduces the run exactly.
     let log = brain.take_log();
-    let mut replay = ReplayBrain::new(&log, brain.config().think_minutes);
+    let mut replay = ReplayBrain::new(&log, brain.config().think_minutes)
+        .with_deliberations(brain.take_deliberation_log());
     let mut again = start;
     again.run(&mut replay, 3 * 24 * 60);
     assert_eq!(replay.missing, 0);
