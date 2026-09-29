@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use sim::{GameTime, Stock, UtilityBrain, World};
 
 /// Versione del formato dei salvataggi.
-pub const SAVE_VERSION: u32 = 1;
+pub const SAVE_VERSION: u32 = 2;
 const MAGIC: [u8; 8] = *b"TRAINSAV";
 /// Byte fissi prima dell'intestazione: magic, versione, lunghezza.
 const PREFIX_LEN: usize = MAGIC.len() + 4 + 4;

@@ -32,12 +32,18 @@ impl Plugin for StatePlugin {
 /// ([`LayaBrain::fallback`]); il resto è stato di esecuzione.
 pub type GameBrain = LayaBrain<UtilityBrain>;
 
+/// Peso della regola del `sim` nelle deliberazioni, nel gioco: Laya zero-shot
+/// da solo sceglie quasi a caso (vedi `docs/laya-brain.md`, §9), miscelato a
+/// metà con la regola decide soprattutto quando è d'accordo con lei.
+pub const GAME_PRIOR_WEIGHT: f32 = 0.5;
+
 /// Cervello del gioco sopra `utility`, con Laya spento finché non lo si sceglie.
 pub fn new_brain(utility: UtilityBrain) -> GameBrain {
     LayaBrain::new(
         utility,
         LayaConfig {
             enabled: false,
+            prior_weight: GAME_PRIOR_WEIGHT,
             ..LayaConfig::default()
         },
     )

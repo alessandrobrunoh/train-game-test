@@ -6,15 +6,17 @@
 //!   muore svanisce in un secondo invece di sparire di colpo.
 //! - Sullo schermo (in basso a destra): una pila di notifiche con gli eventi
 //!   di vita più recenti (nascite, morti, coppie, maggiore età, pensione,
-//!   vedovanza), che scadono dopo qualche secondo. Un click seleziona l'NPC,
-//!   se è ancora vivo. Seguono i filtri del registro eventi.
+//!   vedovanza) e gli esiti notevoli delle deliberazioni (proposte accettate,
+//!   ladri sorpresi, proteste convocate, concessioni dell'amministrazione),
+//!   che scadono dopo qualche secondo. Un click seleziona l'NPC, se è ancora
+//!   vivo. Seguono i filtri del registro eventi.
 
 use std::collections::{HashMap, VecDeque};
 
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Align2, RichText};
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
-use sim::{Action, Event, EventKind, NpcId};
+use sim::{Action, Choice, DeliberationKind, Event, EventKind, NpcId};
 
 use crate::inventory::InventoryWindow;
 use crate::npc_render::{NpcSpriteIndex, NpcVisual};
@@ -97,6 +99,31 @@ fn toast_npc(kind: &EventKind) -> Option<Option<NpcId>> {
         | EventKind::Retired { npc, .. }
         | EventKind::Widowed { npc, .. } => Some(Some(*npc)),
         EventKind::NpcDied { .. } => Some(None),
+        // Esiti notevoli delle deliberazioni.
+        EventKind::DeliberationResolved {
+            npc,
+            kind: DeliberationKind::CoupleProposal { .. },
+            choice: Choice::Accept,
+            ..
+        }
+        | EventKind::Theft {
+            npc, caught: true, ..
+        } => Some(Some(*npc)),
+        EventKind::ProtestCalled { .. } | EventKind::AdminConceded { .. } => Some(None),
+        _ => None,
+    }
+}
+
+/// I due della coppia di una proposta accettata (per non notificare due
+/// volte la stessa coppia: la proposta accettata e poi `Coupled`).
+fn accepted_pair(kind: &EventKind) -> Option<(NpcId, NpcId)> {
+    match kind {
+        EventKind::DeliberationResolved {
+            npc,
+            kind: DeliberationKind::CoupleProposal { from },
+            choice: Choice::Accept,
+            ..
+        } => Some((*npc, *from)),
         _ => None,
     }
 }
@@ -266,9 +293,18 @@ fn read_life_events(
     }
     let cursor = cursor.get_or_insert(total);
     let now = time.elapsed_secs_f64();
+    let mut accepted: Vec<(NpcId, NpcId)> = Vec::new();
     for event in new_events(&world.events, total, cursor) {
+        if let Some(pair) = accepted_pair(&event.kind)
+            && filter.allows(&event.kind)
+        {
+            accepted.push(pair);
+        }
+        let already = matches!(&event.kind, EventKind::Coupled { npc, partner, .. }
+            if accepted.iter().any(|&(a, b)| (a, b) == (*npc, *partner) || (b, a) == (*npc, *partner)));
         if let Some(npc) = toast_npc(&event.kind)
             && filter.allows(&event.kind)
+            && !already
         {
             toasts.push(Toast {
                 event: event.clone(),
@@ -574,6 +610,43 @@ mod tests {
         // I morti non si possono selezionare.
         assert_eq!(toast_npc(&died), Some(None));
         assert_eq!(toast_npc(&shortage(0).kind), None);
+    }
+
+    #[test]
+    fn notable_deliberation_outcomes_become_toasts() {
+        let (npc, from) = (NpcId(3), NpcId(4));
+        let resolved = |choice| EventKind::DeliberationResolved {
+            id: sim::DeliberationId(1),
+            npc,
+            name: "Ada Neri".into(),
+            kind: DeliberationKind::CoupleProposal { from },
+            choice,
+            description: String::new(),
+            by: sim::Resolver::Brain,
+            confidence: Some(0.8),
+        };
+        assert_eq!(toast_npc(&resolved(Choice::Accept)), Some(Some(npc)));
+        assert_eq!(accepted_pair(&resolved(Choice::Accept)), Some((npc, from)));
+        assert_eq!(toast_npc(&resolved(Choice::Refuse)), None);
+        assert_eq!(accepted_pair(&resolved(Choice::Refuse)), None);
+        let theft = |caught| EventKind::Theft {
+            npc,
+            name: "Ada Neri".into(),
+            sex: sim::Sex::Female,
+            item: sim::ItemKind::Vestito,
+            carriage: sim::CarriageId(2),
+            caught,
+            fine: 3,
+        };
+        assert_eq!(toast_npc(&theft(true)), Some(Some(npc)));
+        assert_eq!(toast_npc(&theft(false)), None);
+        let called = EventKind::ProtestCalled {
+            grievance: sim::Grievance::BirthDenied,
+            place: sim::CarriageId(1),
+            start: sim::GameTime(0),
+            end: sim::GameTime(60),
+        };
+        assert_eq!(toast_npc(&called), Some(None));
     }
 
     #[test]

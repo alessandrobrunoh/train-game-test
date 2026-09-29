@@ -4,6 +4,7 @@
 mod art;
 mod background;
 mod brain_ui;
+mod bubbles;
 mod camera;
 mod characters;
 mod env_art;
@@ -72,7 +73,8 @@ fn main() {
             history_ui::HistoryUiPlugin,
             brain_ui::BrainUiPlugin,
         ))
-        // Il mondo fuori dal treno (cielo, paesaggio, neve, giorno/notte).
-        .add_plugins(background::BackgroundPlugin)
+        // Il mondo fuori dal treno (cielo, paesaggio, neve, giorno/notte) e
+        // i fumetti delle deliberazioni.
+        .add_plugins((background::BackgroundPlugin, bubbles::BubblesPlugin))
         .run();
 }

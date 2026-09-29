@@ -6,6 +6,13 @@
 //! frame (`TICK_BUDGET`): l'arretrato oltre il budget si scarta, così anche le
 //! velocità più alte non bloccano il gioco. `SimPerf` riporta la velocità
 //! effettiva, mostrata nel pannello del tempo quando la sim non tiene il passo.
+//!
+//! **Tregua per le deliberazioni** ([`DeliberationGrace`]): ad alta velocità
+//! la scadenza di una deliberazione (2–6 ore di gioco) passa prima che Laya
+//! risponda. Finché un NPC in vista aspetta la risposta del modello, la
+//! velocità scende al più a `max_speed` minuti di gioco al secondo, per al
+//! massimo `timeout` di tempo reale ("Marta ci pensa…"). Chi aspetta lo
+//! aggiorna `brain_ui.rs`.
 
 use std::time::{Duration, Instant};
 
@@ -42,6 +49,50 @@ const SPEED_KEYS: [KeyCode; 5] = [
     KeyCode::Digit5,
 ];
 
+/// Tetto di default della velocità durante la tregua (minuti di gioco al secondo).
+pub const GRACE_MAX_SPEED: f32 = 60.0;
+/// Attesa reale massima per ogni deliberazione durante la tregua.
+pub const GRACE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Rallenta il tempo mentre NPC in vista aspettano Laya per una deliberazione.
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub struct DeliberationGrace {
+    pub enabled: bool,
+    /// Velocità massima (minuti di gioco al secondo) durante l'attesa.
+    pub max_speed: f32,
+    /// Oltre questo tempo reale una deliberazione non rallenta più.
+    pub timeout: Duration,
+    /// Chi aspetta adesso (NPC in vista con una deliberazione dal modello): nomi.
+    pub waiting: Vec<String>,
+}
+
+impl Default for DeliberationGrace {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_speed: GRACE_MAX_SPEED,
+            timeout: GRACE_TIMEOUT,
+            waiting: Vec::new(),
+        }
+    }
+}
+
+impl DeliberationGrace {
+    /// Vero se in questo momento la velocità `speed` viene ridotta.
+    pub fn slows(&self, speed: f32) -> bool {
+        self.enabled && !self.waiting.is_empty() && speed > self.max_speed
+    }
+
+    /// La velocità effettiva al posto di `speed`.
+    pub fn cap(&self, speed: f32) -> f32 {
+        if self.slows(speed) {
+            self.max_speed
+        } else {
+            speed
+        }
+    }
+}
+
 /// Crea la simulazione con i parametri della partita.
 pub fn new_sim() -> Sim {
     Sim {
@@ -59,10 +110,12 @@ pub struct SimBridgePlugin;
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
         // Inserito subito (non in Startup): `TrainPlugin` ne legge le carrozze.
-        app.insert_resource(new_sim()).add_systems(
-            Update,
-            (time_shortcuts, advance_sim).chain().in_set(SimTickSet),
-        );
+        app.insert_resource(new_sim())
+            .init_resource::<DeliberationGrace>()
+            .add_systems(
+                Update,
+                (time_shortcuts, advance_sim).chain().in_set(SimTickSet),
+            );
     }
 }
 
@@ -83,6 +136,7 @@ fn advance_sim(
     mut clock: ResMut<SimClock>,
     mut sim: ResMut<Sim>,
     mut perf: ResMut<SimPerf>,
+    grace: Option<Res<DeliberationGrace>>,
     mut dropped: Local<f32>,
 ) {
     let dt = time.delta_secs();
@@ -92,7 +146,10 @@ fn advance_sim(
         }
         return;
     }
-    let wanted = accumulate(&mut clock, dt);
+    let speed = grace.as_deref().map_or(clock.minutes_per_second, |g| {
+        g.cap(clock.minutes_per_second)
+    });
+    let wanted = accumulate(&mut clock, dt, speed);
     let done = if wanted == 0 {
         0
     } else {
@@ -124,10 +181,11 @@ fn advance_sim(
     }
 }
 
-/// Aggiunge il tempo del frame all'accumulatore e restituisce i tick interi da
-/// eseguire; nell'accumulatore resta solo la frazione di tick.
-fn accumulate(clock: &mut SimClock, dt: f32) -> u32 {
-    clock.accumulator += dt * clock.minutes_per_second.max(0.0);
+/// Aggiunge il tempo del frame (a `speed` minuti di gioco al secondo)
+/// all'accumulatore e restituisce i tick interi da eseguire; nell'accumulatore
+/// resta solo la frazione di tick.
+fn accumulate(clock: &mut SimClock, dt: f32, speed: f32) -> u32 {
+    clock.accumulator += dt * speed.max(0.0);
     let whole = clock.accumulator.floor();
     clock.accumulator -= whole;
     whole.min(u32::MAX as f32) as u32
@@ -168,9 +226,9 @@ mod tests {
             minutes_per_second: 1.0,
             ..default()
         };
-        assert_eq!(accumulate(&mut clock, 0.4), 0);
-        assert_eq!(accumulate(&mut clock, 0.4), 0);
-        assert_eq!(accumulate(&mut clock, 0.4), 1);
+        assert_eq!(accumulate(&mut clock, 0.4, 1.0), 0);
+        assert_eq!(accumulate(&mut clock, 0.4, 1.0), 0);
+        assert_eq!(accumulate(&mut clock, 0.4, 1.0), 1);
         assert!((clock.accumulator - 0.2).abs() < 1e-5);
     }
 
@@ -180,8 +238,24 @@ mod tests {
             minutes_per_second: 3000.0,
             ..default()
         };
-        assert_eq!(accumulate(&mut clock, 5.0), 15_000);
+        assert_eq!(accumulate(&mut clock, 5.0, 3000.0), 15_000);
         assert!(clock.accumulator < 1.0);
+    }
+
+    #[test]
+    fn grace_caps_the_speed_only_while_someone_waits() {
+        let mut grace = DeliberationGrace::default();
+        assert_eq!(grace.cap(3000.0), 3000.0);
+        grace.waiting.push("Marta".into());
+        assert!(grace.slows(3000.0));
+        assert_eq!(grace.cap(3000.0), GRACE_MAX_SPEED);
+        // Già più lento del tetto: niente da fare.
+        assert!(!grace.slows(10.0));
+        assert_eq!(grace.cap(10.0), 10.0);
+        grace.enabled = false;
+        assert_eq!(grace.cap(3000.0), 3000.0);
+        let mut clock = SimClock::default();
+        assert_eq!(accumulate(&mut clock, 1.0, grace.cap(600.0)), 600);
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::brain_ui::BrainWindow;
 use crate::history_ui::HistoryWindow;
 use crate::population::PopulationWindow;
 use crate::saves::SavesWindow;
-use crate::sim_bridge::{SPEEDS, seconds_per_year};
+use crate::sim_bridge::{DeliberationGrace, SPEEDS, seconds_per_year};
 use crate::state::{FollowNpc, PointerOverUi, SelectedNpc, Sim, SimClock, SimPerf};
 use crate::storage::{item_color, plural_title, storable_items};
 /// Quanti eventi mostrare nel registro (i più recenti).
@@ -124,6 +124,7 @@ fn time_panel(
     mut history: ResMut<HistoryWindow>,
     mut brain: ResMut<BrainWindow>,
     cache: Res<UiCache>,
+    grace: Res<DeliberationGrace>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -173,6 +174,13 @@ fn time_panel(
                     saves.refresh();
                 }
             });
+            if grace.slows(clock.minutes_per_second) && !clock.paused {
+                ui.colored_label(WAIT, grace_text(&grace))
+                    .on_hover_text(
+                        "Tregua: qualcuno in vista aspetta Laya per una scelta importante. \
+                         Si disattiva nella finestra Cervello (B)",
+                    );
+            }
             if perf.behind && !clock.paused {
                 let days_per_year = sim.as_ref().map_or(12, |s| s.world.params.days_per_year);
                 ui.colored_label(
@@ -188,6 +196,23 @@ fn time_panel(
                 ui.horizontal(|ui| stats_row(ui, stats));
             }
         });
+}
+
+/// "Marta ci pensa… · rallentato: 2 decisioni in corso (60 min/s)".
+fn grace_text(grace: &DeliberationGrace) -> String {
+    let who = match grace.waiting.as_slice() {
+        [one] => format!("{one} ci pensa…"),
+        [a, b] => format!("{a} e {b} ci pensano…"),
+        [a, ..] => format!("{a} e altri ci pensano…"),
+        [] => String::new(),
+    };
+    let n = grace.waiting.len();
+    let what = if n == 1 {
+        "1 decisione in corso".to_string()
+    } else {
+        format!("{n} decisioni in corso")
+    };
+    format!("{who} · rallentato: {what} ({:.0} min/s)", grace.max_speed)
 }
 
 /// Riga di statistiche globali sotto l'orologio.
@@ -255,8 +280,7 @@ fn inspector(
                     egui::ScrollArea::vertical()
                         .max_height(max_height)
                         .show(ui, |ui| {
-                            clicked =
-                                npc_details(ui, &sim.world, npc, &mut following, &mut show_history);
+                            clicked = npc_details(ui, sim, npc, &mut following, &mut show_history);
                             crate::brain_ui::decision_section(ui, &sim.brain, npc);
                         });
                 }
@@ -279,11 +303,12 @@ fn inspector(
 /// Dettagli dell'NPC; restituisce il parente o amico cliccato, se c'è.
 fn npc_details(
     ui: &mut egui::Ui,
-    world: &World,
+    sim: &Sim,
     npc: &Npc,
     following: &mut bool,
     show_history: &mut bool,
 ) -> Option<NpcId> {
+    let world = &sim.world;
     let now = world.clock;
     let mut clicked = None;
     ui.heading(&npc.name);
@@ -338,6 +363,8 @@ fn npc_details(
             format_minutes(until.since(now))
         )),
     );
+    // Le scelte importanti in corso, subito sotto l'azione.
+    crate::brain_ui::mind_section(ui, world, &sim.brain, npc);
 
     ui.separator();
     if let Some(id) = relations(ui, world, npc) {
@@ -594,6 +621,17 @@ impl EventCategory {
             EventKind::PlayerTook { .. }
             | EventKind::PlayerBought { .. }
             | EventKind::PlayerGave { .. } => EventCategory::Giocatore,
+            EventKind::DeliberationAsked { kind, .. }
+            | EventKind::DeliberationResolved { kind, .. } => match kind {
+                sim::DeliberationKind::CoupleProposal { .. } => EventCategory::Coppie,
+                sim::DeliberationKind::HaveChild { .. } => EventCategory::Nascite,
+                sim::DeliberationKind::Theft { .. } => EventCategory::Acquisti,
+                sim::DeliberationKind::Protest { .. } => EventCategory::Scarsita,
+            },
+            EventKind::Theft { .. } | EventKind::HelpAsked { .. } => EventCategory::Acquisti,
+            EventKind::ProtestCalled { .. } | EventKind::AdminConceded { .. } => {
+                EventCategory::Scarsita
+            }
         }
     }
 
@@ -721,6 +759,11 @@ pub(crate) fn event_color(kind: &EventKind) -> Color32 {
         EventKind::PlayerTook { .. }
         | EventKind::PlayerBought { .. }
         | EventKind::PlayerGave { .. } => PLAYER,
+        EventKind::DeliberationAsked { .. } | EventKind::DeliberationResolved { .. } => {
+            Color32::GRAY
+        }
+        EventKind::Theft { .. } | EventKind::ProtestCalled { .. } => WARNING,
+        EventKind::HelpAsked { .. } | EventKind::AdminConceded { .. } => GOOD,
     }
 }
 
@@ -848,6 +891,8 @@ fn update_pointer_over_ui(mut contexts: EguiContexts, mut over_ui: ResMut<Pointe
 
 const DANGER: Color32 = Color32::from_rgb(230, 80, 80);
 const WARNING: Color32 = Color32::from_rgb(240, 160, 60);
+/// Tempo rallentato per la tregua delle deliberazioni.
+const WAIT: Color32 = Color32::from_rgb(230, 200, 90);
 const GOOD: Color32 = Color32::from_rgb(110, 190, 110);
 /// Eventi causati dal giocatore.
 const PLAYER: Color32 = Color32::from_rgb(120, 200, 240);
@@ -903,7 +948,7 @@ fn format_seconds(seconds: f32) -> String {
 }
 
 /// Minuti di gioco in forma leggibile, es. "2h 05m" o "45m".
-fn format_minutes(minutes: u64) -> String {
+pub(crate) fn format_minutes(minutes: u64) -> String {
     let (hours, minutes) = (minutes / 60, minutes % 60);
     if hours > 0 {
         format!("{hours}h {minutes:02}m")

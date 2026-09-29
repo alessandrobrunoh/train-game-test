@@ -28,7 +28,9 @@ use egui_plot::{Bar, BarChart, Corner, Legend, Plot};
 use history::{
     EventRow, FamilyNode, FamilyTree, History, HistoryCounts, PersonRow, PlayerTotal, YearCounts,
 };
-use sim::{DeathCause, GameTime, ItemKind, NpcId, Sex, World};
+use sim::{
+    DeathCause, DeliberationKind, EventKind, GameTime, ItemKind, NpcId, Resolver, Sex, World,
+};
 
 use crate::history_sync::HistoryDb;
 use crate::state::{SelectedNpc, Sim};
@@ -44,7 +46,13 @@ const RECORDS_LIMIT: usize = 5;
 const TREE_UP: u32 = 2;
 const TREE_DOWN: u32 = 3;
 /// Eventi "minori" nascosti dalla biografia se si vogliono solo i fatti della vita.
-const MINOR_KINDS: [&str; 3] = ["ItemBought", "ItemBroke", "NpcStarving"];
+const MINOR_KINDS: [&str; 4] = [
+    "ItemBought",
+    "ItemBroke",
+    "NpcStarving",
+    // La domanda: la decisione segue sempre (o è annullata).
+    "DeliberationAsked",
+];
 
 const DEAD_COLOR: Color32 = Color32::from_rgb(170, 170, 170);
 const BIRTHS_COLOR: Color32 = Color32::from_rgb(110, 190, 110);
@@ -336,10 +344,12 @@ fn fetch(h: &History, key: &ViewKey, days_per_year: u32, view: &mut View) -> his
             view.bio = h
                 .biography(id)?
                 .into_iter()
-                .map(|e| {
-                    let color = e
-                        .event_kind()
-                        .map_or(Color32::GRAY, |kind| event_color(&kind));
+                .map(|mut e| {
+                    let kind = e.event_kind();
+                    if let Some(text) = kind.as_ref().and_then(|k| bio_text(k, id)) {
+                        e.text = text;
+                    }
+                    let color = kind.map_or(Color32::GRAY, |kind| event_color(&kind));
                     (e, color)
                 })
                 .collect();
@@ -371,6 +381,58 @@ fn fetch(h: &History, key: &ViewKey, days_per_year: u32, view: &mut View) -> his
         }
     }
     Ok(())
+}
+
+/// Testo di un evento nella biografia di `focus`, se va detto meglio che nel
+/// registro (le deliberazioni: dal punto di vista di chi decide o di chi le
+/// ha provocate). `None`: il testo del registro va bene.
+fn bio_text(kind: &EventKind, focus: NpcId) -> Option<String> {
+    match kind {
+        EventKind::DeliberationAsked {
+            npc,
+            name,
+            question,
+            ..
+        } => Some(if *npc == focus {
+            format!("Ci pensa: {question}")
+        } else {
+            format!("{name} ci pensa: {question}")
+        }),
+        EventKind::DeliberationResolved {
+            npc,
+            name,
+            kind,
+            description,
+            by,
+            confidence,
+            ..
+        } => {
+            let by = match (by, confidence) {
+                (Resolver::Brain, Some(c)) => format!(" (con Laya, {:.0}%)", c * 100.0),
+                (Resolver::Brain, None) => " (con Laya)".to_string(),
+                (Resolver::Rules, _) => String::new(),
+            };
+            let topic = kind.topic();
+            Some(if *npc == focus {
+                let mut topic = topic.to_string();
+                if let Some(first) = topic.get_mut(..1) {
+                    first.make_ascii_uppercase();
+                }
+                format!("{topic}: {description}{by}")
+            } else {
+                match kind {
+                    DeliberationKind::CoupleProposal { .. } => {
+                        format!("{name} risponde alla sua proposta: {description}{by}")
+                    }
+                    DeliberationKind::HaveChild { .. } => {
+                        format!("{name} decide sul figlio: {description}{by}")
+                    }
+                    _ => format!("{name} decide ({topic}): {description}{by}"),
+                }
+            })
+        }
+        _ => None,
+    }
 }
 
 // --- Schede -------------------------------------------------------------------------
@@ -861,12 +923,39 @@ mod tests {
     }
 
     #[test]
+    fn deliberations_read_well_in_biographies() {
+        let (npc, from) = (NpcId(1), NpcId(2));
+        let resolved = EventKind::DeliberationResolved {
+            id: sim::DeliberationId(7),
+            npc,
+            name: "Marta Rossi".into(),
+            kind: DeliberationKind::CoupleProposal { from },
+            choice: sim::Choice::Accept,
+            description: "accetta e diventa la compagna di Luca Bianchi".into(),
+            by: Resolver::Brain,
+            confidence: Some(0.72),
+        };
+        assert_eq!(
+            bio_text(&resolved, npc).unwrap(),
+            "Proposta di coppia: accetta e diventa la compagna di Luca Bianchi (con Laya, 72%)"
+        );
+        assert_eq!(
+            bio_text(&resolved, from).unwrap(),
+            "Marta Rossi risponde alla sua proposta: accetta e diventa la compagna di Luca Bianchi (con Laya, 72%)"
+        );
+        let born = EventKind::Shortage {
+            item: ItemKind::Razione,
+        };
+        assert_eq!(bio_text(&born, npc), None);
+    }
+
+    #[test]
     fn egui_default_fonts_have_the_symbols_used_here() {
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
         output.textures_delta.clear();
         let font = egui::FontId::proportional(14.0);
-        for s in ["†", "♀", "♂", "♡", "•", "·", "«»", "µ"] {
+        for s in ["†", "♀", "♂", "♡", "•", "·", "«»", "µ", "…"] {
             assert!(ctx.fonts_mut(|f| f.has_glyphs(&font, s)), "manca {s:?}");
         }
     }

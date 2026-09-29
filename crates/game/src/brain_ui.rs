@@ -13,6 +13,13 @@
 //! come per gli sprite): i loro NPC hanno la precedenza e, se l'opzione è
 //! attiva, "stanno pensando" (ozio breve) mentre aspettano la risposta.
 //! `TRAINGAME_BRAIN=laya|mock|utility` sceglie la modalità all'avvio.
+//!
+//! **Deliberazioni** (scelte di vita rare): con Laya (o il mock) attivo il
+//! cervello risponde anche a quelle; la finestra ha una sezione
+//! "Deliberazioni" (statistiche per tipo, accordo con le regole, soglia,
+//! peso della regola, tregua) con le ultime decisioni cliccabili, e
+//! l'ispettore una sezione "In mente". Qui si aggiorna anche chi, in vista,
+//! aspetta la risposta di Laya ([`DeliberationGrace`], che rallenta il tempo).
 //! I salvataggi contengono solo `UtilityBrain`: caricando una partita la
 //! modalità scelta resta quella in corso.
 
@@ -21,14 +28,14 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, RichText};
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
-use sim::{CarriageId, Npc, THINK};
+use sim::{Brain, CarriageId, DeliberationKind, Npc, NpcId, Resolver, THINK, World};
 use sim_laya::loader::{real_model_loader, unavailable_reason};
-use sim_laya::{MockModel, ModelStatus, Source};
+use sim_laya::{DeliberationStatus, MockModel, ModelStatus, Source};
 
 use crate::npc_render::visible_window;
-use crate::sim_bridge::SimTickSet;
-use crate::state::{GameBrain, Sim};
-use crate::ui::PointerCheck;
+use crate::sim_bridge::{DeliberationGrace, SimTickSet};
+use crate::state::{GameBrain, SelectedNpc, Sim};
+use crate::ui::{PointerCheck, format_minutes};
 
 /// Latenza simulata del modello di prova.
 const MOCK_LATENCY: Duration = Duration::from_millis(30);
@@ -45,7 +52,9 @@ impl Plugin for BrainUiPlugin {
             .add_systems(Startup, mode_from_env)
             .add_systems(
                 Update,
-                (toggle_window, update_focus_and_poll).before(SimTickSet),
+                (toggle_window, update_focus_and_poll, update_grace)
+                    .chain()
+                    .before(SimTickSet),
             )
             .add_systems(EguiPrimaryContextPass, brain_window.before(PointerCheck));
     }
@@ -186,6 +195,33 @@ fn update_focus_and_poll(
     }
 }
 
+/// Chi, nelle carrozze a fuoco, aspetta Laya per una deliberazione (da non più
+/// di `timeout` reali): finché c'è qualcuno, `advance_sim` rallenta il tempo.
+fn update_grace(sim: Option<Res<Sim>>, mut grace: ResMut<DeliberationGrace>) {
+    let waiting: Vec<String> = match &sim {
+        Some(sim) if grace.enabled => waiting_for_laya(&sim.world, &sim.brain, grace.timeout),
+        _ => Vec::new(),
+    };
+    if grace.waiting != waiting {
+        grace.waiting = waiting;
+    }
+}
+
+/// Nomi (di battesimo) degli NPC a fuoco con una deliberazione chiesta al
+/// modello da meno di `timeout`.
+fn waiting_for_laya(world: &World, brain: &GameBrain, timeout: Duration) -> Vec<String> {
+    let mut names: Vec<(NpcId, String)> = brain
+        .pending_deliberations()
+        .filter(|info| info.sent.elapsed() < timeout)
+        .filter_map(|info| world.npc(info.npc))
+        .filter(|npc| brain.is_focus(npc.carriage))
+        .map(|npc| (npc.id, npc.first_name().to_string()))
+        .collect();
+    names.sort();
+    names.dedup();
+    names.into_iter().map(|(_, name)| name).collect()
+}
+
 fn status_text(brain: &GameBrain, choice: &BrainChoice) -> (String, Color32) {
     if choice.mode == BrainMode::Laya
         && let Some(reason) = unavailable_reason()
@@ -206,6 +242,8 @@ fn brain_window(
     sim: Option<ResMut<Sim>>,
     mut window: ResMut<BrainWindow>,
     mut choice: ResMut<BrainChoice>,
+    mut grace: ResMut<DeliberationGrace>,
+    mut selected: ResMut<SelectedNpc>,
 ) {
     if !window.open {
         return;
@@ -217,50 +255,382 @@ fn brain_window(
         return;
     };
     let mut open = true;
+    let mut clicked = None;
     // Il cervello cambia solo se si tocca qualcosa: niente `Sim` modificato a ogni frame.
-    let brain = &mut sim.bypass_change_detection().brain;
+    let Sim { world, brain } = sim.bypass_change_detection();
+    let max_height = (ctx.content_rect().height() - 160.0).max(200.0);
     egui::Window::new("Cervello")
         .open(&mut open)
         .default_pos([crate::ui::MARGIN, 120.0])
-        .default_width(320.0)
+        .default_width(340.0)
         .resizable(false)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Modalità:");
-                for mode in [BrainMode::Utility, BrainMode::Laya, BrainMode::Mock] {
-                    let unavailable = (mode == BrainMode::Laya).then(unavailable_reason).flatten();
-                    let response = ui.add_enabled(
-                        unavailable.is_none(),
-                        egui::RadioButton::new(choice.mode == mode, mode.label()),
-                    );
-                    let response = match unavailable {
-                        Some(reason) => response.on_disabled_hover_text(reason),
-                        None => response,
-                    };
-                    if response.clicked() && choice.mode != mode {
-                        choice.select(brain, mode);
+            egui::ScrollArea::vertical()
+                .max_height(max_height)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Modalità:");
+                        for mode in [BrainMode::Utility, BrainMode::Laya, BrainMode::Mock] {
+                            let unavailable =
+                                (mode == BrainMode::Laya).then(unavailable_reason).flatten();
+                            let response = ui.add_enabled(
+                                unavailable.is_none(),
+                                egui::RadioButton::new(choice.mode == mode, mode.label()),
+                            );
+                            let response = match unavailable {
+                                Some(reason) => response.on_disabled_hover_text(reason),
+                                None => response,
+                            };
+                            if response.clicked() && choice.mode != mode {
+                                choice.select(brain, mode);
+                            }
+                        }
+                    });
+                    let (text, color) = status_text(brain, &choice);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.weak("Stato:");
+                        ui.colored_label(color, text);
+                    });
+                    if matches!(brain.status(), ModelStatus::Failed(_))
+                        && choice.mode != BrainMode::Utility
+                        && ui.button("Riprova").clicked()
+                    {
+                        choice.retry(brain);
                     }
-                }
-            });
-            let (text, color) = status_text(brain, &choice);
-            ui.horizontal_wrapped(|ui| {
-                ui.weak("Stato:");
-                ui.colored_label(color, text);
-            });
-            if matches!(brain.status(), ModelStatus::Failed(_))
-                && choice.mode != BrainMode::Utility
-                && ui.button("Riprova").clicked()
-            {
-                choice.retry(brain);
-            }
-            ui.separator();
-            stats_section(ui, brain);
-            ui.separator();
-            settings_section(ui, brain);
+                    ui.separator();
+                    egui::CollapsingHeader::new("Azioni di tutti i giorni")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            stats_section(ui, brain);
+                            ui.separator();
+                            settings_section(ui, brain);
+                        });
+                    egui::CollapsingHeader::new("Deliberazioni")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            clicked = deliberations_section(ui, world, brain, &mut grace);
+                        });
+                });
         });
     if !open {
         window.open = false;
     }
+    if let Some(id) = clicked {
+        selected.0 = Some(id);
+    }
+}
+
+/// Nomi brevi dei tipi di deliberazione, per le tabelle.
+const KIND_SHORT: [&str; DeliberationKind::COUNT] = ["coppia", "figlio", "furto", "protesta"];
+
+/// Scelta in parole brevi: "accetta", "chiede tempo".
+fn choice_word(choice: sim::Choice) -> String {
+    choice.key().replace('_', " ")
+}
+
+/// Sezione "Deliberazioni" della finestra: statistiche, impostazioni e ultime
+/// decisioni; restituisce l'NPC cliccato.
+fn deliberations_section(
+    ui: &mut egui::Ui,
+    world: &World,
+    brain: &mut GameBrain,
+    grace: &mut DeliberationGrace,
+) -> Option<NpcId> {
+    let mut clicked = None;
+    let answering = brain.answers_deliberations();
+    ui.horizontal_wrapped(|ui| {
+        ui.weak("Chi decide:");
+        if answering {
+            ui.colored_label(
+                OK_COLOR,
+                "Laya, se è abbastanza sicuro; se no le regole alla scadenza",
+            );
+        } else {
+            ui.label("le regole del sim, subito");
+        }
+    });
+    let s = brain.stats().deliberations.clone();
+    let counters = &world.deliberation_counters;
+    egui::Grid::new("delib_stats")
+        .num_columns(7)
+        .striped(true)
+        .show(ui, |ui| {
+            for head in ["", "chieste", "risposte", "date", "incerte", "tardi", "accordo"] {
+                ui.label(RichText::new(head).small().weak());
+            }
+            ui.end_row();
+            for (k, name) in KIND_SHORT.iter().enumerate() {
+                ui.label(RichText::new(*name).small());
+                for n in [s.asked[k], s.answered[k], s.applied[k], s.low_confidence[k], s.late[k]] {
+                    ui.label(RichText::new(n.to_string()).small());
+                }
+                ui.label(RichText::new(pct(s.agreement(Some(k)))).small());
+                ui.end_row();
+            }
+        })
+        .response
+        .on_hover_text(
+            "chieste a Laya · risposte arrivate · date al mondo · sotto soglia (decidono le regole) · \
+             arrivate dopo la scadenza · stessa scelta più probabile della regola",
+        );
+    let latency = s.avg_latency().map_or("—".to_string(), |l| {
+        format!(
+            "{:.0} ms (max {:.0})",
+            l.as_secs_f64() * 1000.0,
+            s.latency_max.as_secs_f64() * 1000.0
+        )
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.weak("Accordo con le regole:");
+        ui.label(pct(s.agreement(None)));
+        ui.weak("· latenza:");
+        ui.label(latency);
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.weak("Nel mondo:");
+        ui.label(format!(
+            "{} aperte · {} decise da Laya · {} dalle regole · {} annullate",
+            world.open_deliberations().len(),
+            counters.by_brain.iter().sum::<u64>(),
+            counters.by_rules.iter().sum::<u64>(),
+            counters.cancelled
+        ));
+    });
+
+    let mut config = brain.config().clone();
+    ui.checkbox(
+        &mut config.deliberations,
+        "Laya risponde alle deliberazioni",
+    );
+    ui.add_enabled(
+        config.deliberations,
+        egui::Slider::new(&mut config.deliberation_min_confidence, 0.0..=1.0)
+            .text("soglia deliberazioni"),
+    )
+    .on_hover_text("Sotto questa probabilità decidono le regole alla scadenza");
+    ui.add_enabled(
+        config.deliberations,
+        egui::Slider::new(&mut config.prior_weight, 0.0..=1.0).text("peso delle regole"),
+    )
+    .on_hover_text(
+        "Miscela le probabilità di Laya con quelle delle regole (0 = solo Laya). \
+         Con 0.5 Laya decide soprattutto quando è d'accordo con le regole",
+    );
+    if &config != brain.config() {
+        *brain.config_mut() = config;
+    }
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut grace.enabled, "Tregua").on_hover_text(
+            "Mentre qualcuno in vista aspetta Laya per una deliberazione, il tempo rallenta \
+                 (al più per qualche secondo reale)",
+        );
+        ui.add_enabled(
+            grace.enabled,
+            egui::DragValue::new(&mut grace.max_speed)
+                .range(1.0..=600.0)
+                .suffix(" min/s"),
+        );
+        let mut secs = grace.timeout.as_secs_f32();
+        if ui
+            .add_enabled(
+                grace.enabled,
+                egui::DragValue::new(&mut secs)
+                    .range(0.5..=10.0)
+                    .speed(0.1)
+                    .suffix(" s"),
+            )
+            .changed()
+        {
+            grace.timeout = Duration::from_secs_f32(secs);
+        }
+    });
+
+    ui.separator();
+    ui.strong("Ultime decisioni");
+    let recent: Vec<_> = world.recent_deliberations().iter().rev().take(20).collect();
+    if recent.is_empty() {
+        ui.weak("ancora nessuna");
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("delib_recent")
+        .max_height(200.0)
+        .show(ui, |ui| {
+            for r in recent {
+                let d = &r.deliberation;
+                let name = world
+                    .npc(d.npc)
+                    .map_or_else(|| d.npc.to_string(), |n| n.name.clone());
+                let chosen = r
+                    .chosen()
+                    .map_or_else(String::new, |o| choice_word(o.choice));
+                let by = match (r.by, r.confidence) {
+                    (Resolver::Brain, Some(c)) => format!("Laya {:.0}%", c * 100.0),
+                    (Resolver::Brain, None) => "Laya".to_string(),
+                    (Resolver::Rules, _) => match brain
+                        .deliberation_info(d.id)
+                        .and_then(|i| i.confidence.map(|c| (i.status, c)))
+                    {
+                        Some((DeliberationStatus::LowConfidence, c)) => {
+                            format!("regole (Laya {:.0}%)", c * 100.0)
+                        }
+                        Some((DeliberationStatus::Late, _)) => "regole (Laya in ritardo)".into(),
+                        _ => "regole".to_string(),
+                    },
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{:02}:{:02}",
+                            r.resolved.hour(),
+                            r.resolved.minute()
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                    let alive = world.npc(d.npc).is_some();
+                    let link = ui.add_enabled(alive, egui::Link::new(RichText::new(name).small()));
+                    if link.on_hover_text(&d.question).clicked() {
+                        clicked = Some(d.npc);
+                    }
+                    ui.label(
+                        RichText::new(format!("{}: {chosen}", KIND_SHORT[d.kind.index()])).small(),
+                    );
+                    let color = if r.by == Resolver::Brain {
+                        OK_COLOR
+                    } else {
+                        Color32::GRAY
+                    };
+                    ui.label(RichText::new(by).small().color(color));
+                });
+            }
+        });
+    clicked
+}
+
+fn pct(v: Option<f32>) -> String {
+    v.map_or("—".to_string(), |v| format!("{:.0}%", v * 100.0))
+}
+
+/// Sezione dell'ispettore "In mente": la deliberazione aperta dell'NPC (con
+/// le probabilità di Laya e delle regole, chi deciderà, quando) e le ultime chiuse.
+pub(crate) fn mind_section(ui: &mut egui::Ui, world: &World, brain: &GameBrain, npc: &Npc) {
+    let open = world.deliberation_of(npc.id);
+    let recent: Vec<_> = world
+        .recent_deliberations()
+        .iter()
+        .rev()
+        .filter(|r| r.deliberation.npc == npc.id)
+        .take(4)
+        .collect();
+    if open.is_none() && recent.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.strong("In mente");
+    if let Some(d) = open {
+        ui.label(RichText::new(&d.question).italics());
+        let rule = world.deliberation_rule_weights(d.id).unwrap_or_default();
+        let info = brain.deliberation_info(d.id);
+        let laya = info.and_then(|i| i.model.clone());
+        egui::Grid::new("mind_options")
+            .num_columns(3)
+            .spacing([6.0, 2.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("Laya").small().weak());
+                ui.label(RichText::new("regole").small().weak());
+                ui.label(RichText::new("opzione").small().weak());
+                ui.end_row();
+                for (k, o) in d.options.iter().enumerate() {
+                    match laya.as_ref().and_then(|p| p.get(k)) {
+                        Some(&p) => bar(ui, p, OK_COLOR),
+                        None => {
+                            ui.label(RichText::new("—").small().weak());
+                        }
+                    }
+                    match rule.get(k) {
+                        Some(&p) => bar(ui, p, Color32::from_gray(140)),
+                        None => {
+                            ui.label("");
+                        }
+                    }
+                    ui.label(RichText::new(&o.description).small());
+                    ui.end_row();
+                }
+            });
+        let who = if !brain.answers_deliberations() {
+            ("decidono le regole".to_string(), Color32::GRAY)
+        } else {
+            match info.map(|i| (i.status, i.confidence)) {
+                None | Some((DeliberationStatus::Pending, _)) => {
+                    ("Laya ci pensa… (se no le regole)".to_string(), WAIT_COLOR)
+                }
+                Some((DeliberationStatus::LowConfidence, c)) => {
+                    let mixed = if brain.config().prior_weight > 0.0 {
+                        " con le regole"
+                    } else {
+                        ""
+                    };
+                    (
+                        format!(
+                            "Laya è incerto ({:.0}%{mixed}): decideranno le regole",
+                            c.unwrap_or(0.0) * 100.0
+                        ),
+                        Color32::GRAY,
+                    )
+                }
+                Some((DeliberationStatus::Failed, _)) => (
+                    "errore di Laya: decideranno le regole".to_string(),
+                    ERROR_COLOR,
+                ),
+                Some((status, _)) => (status.name().to_string(), Color32::GRAY),
+            }
+        };
+        ui.colored_label(who.1, who.0);
+        let left = d.deadline.since(world.clock);
+        ui.weak(format!(
+            "Scadenza tra {} (alle {:02}:{:02})",
+            format_minutes(left),
+            d.deadline.hour(),
+            d.deadline.minute()
+        ));
+    }
+    if !recent.is_empty() {
+        ui.label(RichText::new("Decisioni recenti").small().weak());
+        for r in recent {
+            let d = &r.deliberation;
+            let chosen = r.chosen().map_or("", |o| o.description.as_str());
+            let by = match (r.by, r.confidence) {
+                (Resolver::Brain, Some(c)) => format!(" · Laya {:.0}%", c * 100.0),
+                (Resolver::Brain, None) => " · Laya".to_string(),
+                (Resolver::Rules, _) => " · regole".to_string(),
+            };
+            ui.label(
+                RichText::new(format!(
+                    "g{} {:02}:{:02} · {}: {chosen}{by}",
+                    r.resolved.day(),
+                    r.resolved.hour(),
+                    r.resolved.minute(),
+                    d.kind.topic()
+                ))
+                .small(),
+            )
+            .on_hover_text(&d.question);
+        }
+    }
+}
+
+/// Barretta di probabilità con la percentuale accanto.
+fn bar(ui: &mut egui::Ui, p: f32, color: Color32) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.add(
+            egui::ProgressBar::new(p)
+                .desired_width(22.0)
+                .desired_height(6.0)
+                .fill(color),
+        );
+        ui.label(RichText::new(format!("{:.0}%", p * 100.0)).small());
+    });
 }
 
 fn stats_section(ui: &mut egui::Ui, brain: &mut GameBrain) {
