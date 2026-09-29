@@ -21,6 +21,7 @@ mod population;
 mod prop_art;
 mod save_file;
 mod saves;
+mod shot;
 mod sim_bridge;
 mod speech;
 mod state;
@@ -81,5 +82,7 @@ fn main() {
             bubbles::BubblesPlugin,
             speech::SpeechPlugin,
         ))
+        // Screenshot automatici (solo con `TRAINGAME_SHOTS`).
+        .add_plugins(shot::ShotPlugin)
         .run();
 }
