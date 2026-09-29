@@ -338,9 +338,7 @@ pub fn obvious_deliberations(seed: u64, per_kind: usize) -> Vec<DelibScenario> {
         // Furti: un attrezzo al primo Mercato, ben fornito.
         let theft = |w: &mut World, id: NpcId, tokens_short: Option<u32>| -> Option<CarriageId> {
             let market = market?;
-            let cap = w
-                .params
-                .storage_cap(CarriageKind::Mercato, ItemKind::Attrezzo);
+            let cap = w.storage_cap(CarriageKind::Mercato, ItemKind::Attrezzo);
             w.carriages[market.index()]
                 .stock
                 .set(ItemKind::Attrezzo, cap);

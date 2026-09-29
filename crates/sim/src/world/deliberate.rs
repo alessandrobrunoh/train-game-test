@@ -379,7 +379,7 @@ impl World {
             npc.inventory.tokens
         );
         s.push_str(match item {
-            ItemKind::Attrezzo => "Senza attrezzo lavora molto più lentamente. ",
+            item if item == ItemKind::Attrezzo => "Senza attrezzo lavora molto più lentamente. ",
             _ => "Senza un vestito caldo si stanca più in fretta. ",
         });
         match self.merchant_on_duty(market) {
@@ -652,7 +652,9 @@ impl World {
             {
                 continue;
             }
-            let wanted = ItemKind::SOLD
+            let wanted = self
+                .catalog
+                .sold_items()
                 .into_iter()
                 .filter(|&item| npc.wants(item))
                 .find_map(|item| {
@@ -664,6 +666,7 @@ impl World {
                             c.stock.count(item) >= 1
                                 && price_at(
                                     &self.params,
+                                    &self.catalog,
                                     self.economy.pay_level,
                                     &self.market,
                                     c,
@@ -870,10 +873,13 @@ impl World {
                 market,
                 helper,
             } => {
-                let price = self.price(market, item).unwrap_or(item.base_value()).max(1) as f32;
+                let price = self
+                    .price(market, item)
+                    .unwrap_or(self.catalog.base_value(item))
+                    .max(1) as f32;
                 let short = (1.0 - npc.inventory.tokens as f32 / price).clamp(0.0, 1.0);
                 let need = match item {
-                    ItemKind::Attrezzo => 1.0,
+                    item if item == ItemKind::Attrezzo => 1.0,
                     _ if npc.needs.energy < 0.4 => 1.0,
                     _ => 0.7,
                 };
@@ -1043,8 +1049,8 @@ impl World {
             return;
         }
         let level = self.economy.pay_level;
-        let price =
-            price_at(&self.params, level, &self.market, c, item).unwrap_or(item.base_value());
+        let price = price_at(&self.params, &self.catalog, level, &self.market, c, item)
+            .unwrap_or(self.catalog.base_value(item));
         let thief = self.npcs[i].id;
         let guard = self.merchant_on_duty(market).is_some();
         let witnesses = self
@@ -1102,7 +1108,9 @@ impl World {
             return;
         };
         let asker = self.npcs[i].id;
-        let price = self.price(market, item).unwrap_or(item.base_value());
+        let price = self
+            .price(market, item)
+            .unwrap_or(self.catalog.base_value(item));
         let shortfall = price.saturating_sub(self.npcs[i].inventory.tokens).max(1);
         let (affinity, family) = self.npcs[h]
             .relation(asker)

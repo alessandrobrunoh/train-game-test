@@ -6,7 +6,7 @@
 //! scorte, produttore più vicino, distanza, tendenza), lo storico degli
 //! ultimi giorni e quanto spesso gli scaffali sono rimasti vuoti.
 
-use sim::{CarriageKind, ItemKind, MINUTES_PER_DAY, Trend, UtilityBrain, World};
+use sim::{CarriageKind, MINUTES_PER_DAY, Trend, UtilityBrain, World};
 
 fn main() {
     let args: Vec<u64> = std::env::args()
@@ -36,7 +36,7 @@ fn main() {
         world.tick(&mut brain);
         if world.clock.minute() == 0 {
             for &m in &markets {
-                for item in ItemKind::SOLD {
+                for item in world.catalog().sold_items() {
                     samples += 1;
                     empty += u64::from(world.carriages[m.index()].stock.count(item) == 0);
                 }
@@ -56,7 +56,7 @@ fn main() {
         .map(|&m| format!("{:<34}", world.carriage_label(m)))
         .collect();
     println!("  {:<10} {}", "", header.join(" "));
-    for item in ItemKind::ALL {
+    for item in world.catalog().kinds() {
         let cells: Vec<String> = markets
             .iter()
             .map(
@@ -85,7 +85,7 @@ fn main() {
 
     println!("\nStorico (ultimi 10 giorni, prezzo per Mercato):");
     let history = world.price_history();
-    for item in ItemKind::SOLD {
+    for item in world.catalog().sold_items() {
         for (rank, &m) in markets.iter().enumerate() {
             let prices: Vec<String> = history
                 .iter()

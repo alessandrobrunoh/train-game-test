@@ -79,8 +79,8 @@ pub struct EconomyCounters {
     pub vestiti_crafted: Tally,
     /// Minutes of work per job ([`Job::index`]), and the part of them that
     /// produced nothing (full storage, missing inputs).
-    pub work_minutes: [u64; Job::COUNT],
-    pub wasted_work_minutes: [Tally; Job::COUNT],
+    pub work_minutes: PerKind<u64, { Job::BUILTIN_COUNT }>,
+    pub wasted_work_minutes: PerKind<Tally, { Job::BUILTIN_COUNT }>,
     /// Tokens paid from the treasury as wages and stipends...
     pub pay: u64,
     /// ...and due but not paid (austerity).
@@ -100,45 +100,74 @@ pub struct EconomyCounters {
     /// Midnights with austerity.
     pub austerity_days: u64,
     /// Units made by the NPC workers, per item ([`ItemKind::index`]).
-    pub made: [Tally; ItemKind::COUNT],
+    pub made: PerKind<Tally, { ItemKind::BUILTIN_COUNT }>,
+}
+
+/// Counters per item or per job, by index: they grow with the catalog (a
+/// kind past the end counts 0). Serialized as a plain list, `N` long in a
+/// new world.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PerKind<T, const N: usize>(Vec<T>);
+
+impl<T: Default + Clone, const N: usize> Default for PerKind<T, N> {
+    fn default() -> Self {
+        PerKind(vec![T::default(); N])
+    }
+}
+
+impl<T: Default + Clone + Copy, const N: usize> PerKind<T, N> {
+    /// The counter at `index` (default past the end).
+    pub fn get(&self, index: usize) -> T {
+        self.0.get(index).copied().unwrap_or_default()
+    }
+
+    /// The counter at `index`, growing the list if needed.
+    pub fn slot(&mut self, index: usize) -> &mut T {
+        if index >= self.0.len() {
+            self.0.resize(index + 1, T::default());
+        }
+        &mut self.0[index]
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl EconomyCounters {
     /// Books `made` units of `item` out of a `potential` output.
     pub(crate) fn book_made(&mut self, item: ItemKind, made: f32, potential: f32) {
-        self.made[item.index()].add(made);
-        match item {
-            ItemKind::Verdura => {
-                self.verdura_grown.add(made);
-                self.verdura_capped.add(potential - made);
-            }
-            ItemKind::Razione => self.razioni_cooked.add(made),
-            ItemKind::Attrezzo => self.attrezzi_crafted.add(made),
-            ItemKind::Vestito => self.vestiti_crafted.add(made),
-            ItemKind::Rottame
-            | ItemKind::Cotone
-            | ItemKind::Erbe
-            | ItemKind::Metallo
-            | ItemKind::Tessuto
-            | ItemKind::Te
-            | ItemKind::Coperta
-            | ItemKind::Lampada
-            | ItemKind::Giocattolo => {}
+        self.made.slot(item.index()).add(made);
+        // The named counters of the builtin goods.
+        if item == ItemKind::Verdura {
+            self.verdura_grown.add(made);
+            self.verdura_capped.add(potential - made);
+        } else if item == ItemKind::Razione {
+            self.razioni_cooked.add(made);
+        } else if item == ItemKind::Attrezzo {
+            self.attrezzi_crafted.add(made);
+        } else if item == ItemKind::Vestito {
+            self.vestiti_crafted.add(made);
         }
     }
 
     /// Units of `item` made by the NPC workers so far.
     pub fn made(&self, item: ItemKind) -> f64 {
-        self.made[item.index()].get()
+        self.made.get(item.index()).get()
     }
 
     /// Share of `job`'s work that produced nothing, in `0..=1`.
     pub fn wasted_share(&self, job: Job) -> f64 {
-        let total = self.work_minutes[job.index()];
+        let total = self.work_minutes.get(job.index());
         if total == 0 {
             0.0
         } else {
-            self.wasted_work_minutes[job.index()].get() / total as f64
+            self.wasted_work_minutes.get(job.index()).get() / total as f64
         }
     }
 }
@@ -249,8 +278,10 @@ impl World {
     /// produced nothing.
     pub(super) fn book_work(&mut self, job: Job, minutes: f32, wasted: f32) {
         let c = &mut self.economy.counters;
-        c.work_minutes[job.index()] += minutes.max(0.0) as u64;
-        c.wasted_work_minutes[job.index()].add(minutes * wasted.clamp(0.0, 1.0));
+        *c.work_minutes.slot(job.index()) += minutes.max(0.0) as u64;
+        c.wasted_work_minutes
+            .slot(job.index())
+            .add(minutes * wasted.clamp(0.0, 1.0));
     }
 
     /// NPC `i` worked `minutes`: the wage is credited, paid at midnight.
@@ -418,7 +449,7 @@ impl World {
             .filter(|c| c.kind == CarriageKind::Serra)
         {
             stock += c.stock.get(ItemKind::Verdura);
-            cap += p.storage_cap(c.kind, ItemKind::Verdura);
+            cap += self.catalog.storage_cap(p, c.kind, ItemKind::Verdura);
         }
         let correction = if cap > 0.0 {
             (1.0 + p.farm_staffing_gain * (p.verdura_target_fill - stock / cap)).clamp(0.6, 1.5)

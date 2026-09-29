@@ -212,7 +212,7 @@ pub fn obvious_scenarios(seed: u64, per_kind: usize, k: usize) -> Vec<Scenario> 
             let (h, m) = meal_times[v % meal_times.len()];
             w.clock = GameTime::from_dhm(day, h, m);
             calm(&mut w, id);
-            let cap = w.params.storage_cap(CarriageKind::Mensa, ItemKind::Razione);
+            let cap = w.storage_cap(CarriageKind::Mensa, ItemKind::Razione);
             w.carriages[mensa.index()].stock.set(ItemKind::Razione, cap);
             free_stations(&mut w, mensa, StationKind::Table);
             let npc = npc_mut(&mut w, id);
@@ -300,9 +300,7 @@ pub fn obvious_scenarios(seed: u64, per_kind: usize, k: usize) -> Vec<Scenario> 
             let mut w = base.clone();
             w.clock = GameTime::from_dhm(day, 18, 10 + (v as u64 * 5) % 40);
             calm(&mut w, id);
-            let cap = w
-                .params
-                .storage_cap(CarriageKind::Mercato, ItemKind::Attrezzo);
+            let cap = w.storage_cap(CarriageKind::Mercato, ItemKind::Attrezzo);
             w.carriages[mercato.index()]
                 .stock
                 .set(ItemKind::Attrezzo, cap);

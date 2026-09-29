@@ -352,9 +352,7 @@ fn starvation_kills_and_is_logged() {
     let kinds: Vec<_> = w.events.iter().map(|e| &e.kind).collect();
     assert!(kinds.iter().any(|k| matches!(
         k,
-        EventKind::Shortage {
-            item: ItemKind::Razione
-        }
+        EventKind::Shortage { item } if *item == ItemKind::Razione
     )));
     assert!(
         kinds
@@ -390,7 +388,7 @@ fn default_layout_has_markets_and_merchants() {
     for kind in CarriageKind::ALL {
         assert!(count(kind) >= 2, "{kind}: {}", count(kind));
     }
-    for job in Job::ALL {
+    for job in Job::BUILTIN {
         let staff = w.npcs.iter().filter(|n| n.job == Some(job)).count();
         assert!(staff >= 2, "{job}: {staff}");
     }
@@ -445,21 +443,17 @@ fn tools_wear_out_and_are_bought_again() {
     let mut rebought = 0;
     for e in &w.events {
         match e.kind {
-            EventKind::ItemBroke {
-                npc,
-                item: ItemKind::Attrezzo,
-                ..
-            } => {
+            EventKind::ItemBroke { npc, item, .. } if item == ItemKind::Attrezzo => {
                 broke.insert(npc, e.time);
             }
             EventKind::ItemBought {
                 npc,
-                item: ItemKind::Attrezzo,
+                item,
                 price,
                 carriage,
                 ..
-            } => {
-                assert!(price >= ItemKind::Attrezzo.base_value());
+            } if item == ItemKind::Attrezzo => {
+                assert!(price >= w.catalog().base_value(ItemKind::Attrezzo));
                 assert_eq!(w.carriages[carriage.index()].kind, CarriageKind::Mercato);
                 if broke.contains_key(&npc) {
                     rebought += 1;
@@ -575,7 +569,7 @@ fn storage_stays_bounded_for_30_days() {
         w.run(&mut brain, 60);
         for c in &w.carriages {
             for (item, amount) in c.stock.iter() {
-                let cap = w.params.storage_cap(c.kind, item);
+                let cap = w.storage_cap(c.kind, item);
                 assert!(
                     (0.0..=cap + 1e-3).contains(&amount),
                     "{} holds {amount} {} (cap {cap}) at {}",
@@ -695,10 +689,10 @@ fn player_takes_whole_units_from_storage() {
         .iter()
         .filter_map(|e| match e.kind {
             EventKind::PlayerTook {
-                item: ItemKind::Razione,
+                item,
                 amount,
                 carriage,
-            } if carriage == mensa => Some(amount),
+            } if carriage == mensa && item == ItemKind::Razione => Some(amount),
             _ => None,
         })
         .collect();
@@ -762,7 +756,7 @@ fn player_buys_only_from_a_staffed_market() {
     assert!((before - after - 1.0).abs() < 1e-5);
     assert!(matches!(
         w.events.last().unwrap().kind,
-        EventKind::PlayerBought { item: ItemKind::Vestito, price: p, carriage } if p == price && carriage == market
+        EventKind::PlayerBought { item: i, price: p, carriage } if i == ItemKind::Vestito && p == price && carriage == market
     ));
 
     w.carriages[market.index()].stock.set(item, 0.5);
@@ -791,7 +785,7 @@ fn player_gives_food_and_goods() {
     assert_eq!(npc.starving_minutes, 0);
     assert!(matches!(
         &w.events.last().unwrap().kind,
-        EventKind::PlayerGave { npc, item: ItemKind::Razione, .. } if *npc == id
+        EventKind::PlayerGave { npc, item, .. } if *npc == id && *item == ItemKind::Razione
     ));
 
     // Full: refuses food.

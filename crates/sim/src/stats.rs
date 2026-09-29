@@ -23,7 +23,7 @@ pub struct Stats {
     pub on_sale: Stock,
     /// Owned units in personal inventories, indexed by [`ItemKind::index`]
     /// (only Attrezzo and Vestito can be owned).
-    pub owned: [u32; ItemKind::COUNT],
+    pub owned: Vec<u32>,
     /// Tokens held by all NPCs.
     pub tokens: u64,
     /// All tokens in the sim: the treasury plus the NPCs' ([`World::money_supply`]).
@@ -78,10 +78,11 @@ impl Stats {
             social: 0.0,
         };
         let mut actions = [0; ActionKind::ALL.len()];
-        let mut owned = [0; ItemKind::COUNT];
+        let mut owned = vec![0; world.catalog().item_count()];
         // Only a few kinds can be owned: look those up once.
-        let ownable: Vec<ItemKind> = ItemKind::ALL
-            .into_iter()
+        let ownable: Vec<ItemKind> = world
+            .catalog()
+            .kinds()
             .filter(|i| i.has_durability())
             .collect();
         let mut tokens = 0;
@@ -165,7 +166,7 @@ impl Stats {
 
     /// Owned units of `item` in personal inventories.
     pub fn owned(&self, item: ItemKind) -> u32 {
-        self.owned[item.index()]
+        self.owned.get(item.index()).copied().unwrap_or(0)
     }
 }
 

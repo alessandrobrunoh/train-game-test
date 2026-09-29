@@ -80,6 +80,7 @@ use super::market::{Market, mercato_price};
 use super::{World, price_at};
 use crate::action::Action;
 use crate::carriage::{Carriage, CarriageKind};
+use crate::catalog::Catalog;
 use crate::defs::ItemUse;
 use crate::event::EventKind;
 use crate::ids::{CarriageId, NpcId};
@@ -444,12 +445,13 @@ fn stall_units(market: &Market, at: CarriageId, item: ItemKind) -> u32 {
 /// stalls (a full stack counts as well stocked). None if not a Mercato.
 pub(super) fn quote_at(
     p: &SimParams,
+    cat: &Catalog,
     level: f32,
     market: &Market,
     c: &Carriage,
     item: ItemKind,
 ) -> Option<u32> {
-    if let Some(price) = price_at(p, level, market, c, item) {
+    if let Some(price) = price_at(p, cat, level, market, c, item) {
         return Some(price);
     }
     if c.kind != CarriageKind::Mercato {
@@ -457,13 +459,26 @@ pub(super) fn quote_at(
     }
     let fill = stall_units(market, c.id, item) as f32 / item.stack_size().max(1) as f32;
     let distance = market.distance(c.id, item);
-    Some(mercato_price(p, level, item.base_value(), distance, fill))
+    Some(mercato_price(
+        p,
+        level,
+        cat.base_value(item),
+        distance,
+        fill,
+    ))
 }
 
 /// Price of one unit of listing `l` now (the Mercato's at the quote).
-fn listing_price(p: &SimParams, level: f32, market: &Market, c: &Carriage, l: &Listing) -> u32 {
+fn listing_price(
+    p: &SimParams,
+    cat: &Catalog,
+    level: f32,
+    market: &Market,
+    c: &Carriage,
+    l: &Listing,
+) -> u32 {
     match l.seller {
-        Seller::Mercato => quote_at(p, level, market, c, l.item).unwrap_or(l.price_each),
+        Seller::Mercato => quote_at(p, cat, level, market, c, l.item).unwrap_or(l.price_each),
         _ => l.price_each,
     }
 }
@@ -479,6 +494,7 @@ pub(super) enum Source {
 /// listings): `(price, source)`. The shelf wins ties, then older listings.
 pub(super) fn best_offer(
     p: &SimParams,
+    cat: &Catalog,
     level: f32,
     market: &Market,
     c: &Carriage,
@@ -489,7 +505,7 @@ pub(super) fn best_offer(
         return None;
     }
     let shelf = (c.stock.count(item) >= 1)
-        .then(|| price_at(p, level, market, c, item))
+        .then(|| price_at(p, cat, level, market, c, item))
         .flatten()
         .map(|price| (price, Source::Shelf));
     let stall = market
@@ -499,7 +515,12 @@ pub(super) fn best_offer(
         .filter(|(_, l)| {
             l.market == c.id && l.item == item && l.qty > 0 && l.seller != Seller::Npc(buyer)
         })
-        .map(|(k, l)| (listing_price(p, level, market, c, l), Source::Listing(k)))
+        .map(|(k, l)| {
+            (
+                listing_price(p, cat, level, market, c, l),
+                Source::Listing(k),
+            )
+        })
         .min_by_key(|&(price, source)| match source {
             Source::Listing(k) => (price, k),
             Source::Shelf => (price, 0),
@@ -516,13 +537,14 @@ pub(super) fn best_offer(
 /// its own; a comfort good its Dormitorio lacks, for a well-off adult.
 pub(super) fn wants_item(
     p: &SimParams,
+    cat: &Catalog,
     level: f32,
     market: &Market,
     npc: &Npc,
     item: ItemKind,
 ) -> bool {
     let items = &npc.inventory.items;
-    match item.def().usage {
+    match item.usage() {
         // As [`Npc::wants`], with one catalog lookup.
         ItemUse::Tool => npc.job.is_some_and(Job::uses_tool) && npc.inventory.tool.is_none(),
         ItemUse::Clothes => npc.inventory.clothes.is_none(),
@@ -532,16 +554,22 @@ pub(super) fn wants_item(
                     .slots()
                     .iter()
                     .flatten()
-                    .any(|s| s.item.def().usage == ItemUse::Food)
+                    .any(|s| s.item.usage() == ItemUse::Food)
                 && items.room_for(item) > 0
         }
         ItemUse::Material => {
             let rich = (p.comfort_buy_min_tokens as f32 * level).round() as u32;
-            npc.age >= LifeStage::ADULTO_FROM
+            let can = npc.age >= LifeStage::ADULTO_FROM
                 && npc.inventory.tokens >= rich
                 && items.count(item) == 0
-                && items.room_for(item) > 0
-                && market.short_goods.contains(&(npc.home, item))
+                && items.room_for(item) > 0;
+            // A new durable item is wanted by who can pay it twice over.
+            let desired = || {
+                cat.get_item(item).is_some_and(|d| {
+                    d.desired && npc.inventory.tokens as f32 >= 2.0 * d.base_value as f32 * level
+                })
+            };
+            can && (market.short_goods.contains(&(npc.home, item)) || desired())
         }
     }
 }
@@ -552,11 +580,11 @@ pub(super) fn wants_item(
 pub(super) fn sellable(market: &Market, npc: &Npc) -> Vec<(ItemKind, u32)> {
     let mut out = npc.inventory.items.items();
     for (item, n) in &mut out {
-        let def = item.def();
-        if def.usage == ItemUse::Food && npc.needs.hunger < KEEP_LAST_FOOD_HUNGER {
+        let usage = item.usage();
+        if usage == ItemUse::Food && npc.needs.hunger < KEEP_LAST_FOOD_HUNGER {
             *n = n.saturating_sub(1);
         }
-        let uses = def.usage != ItemUse::Tool || npc.job.is_some_and(Job::uses_tool);
+        let uses = usage != ItemUse::Tool || npc.job.is_some_and(Job::uses_tool);
         let worn = npc
             .inventory
             .durability(*item)
@@ -612,7 +640,7 @@ impl World {
         self.market.listings.iter().find(|l| l.id == id)
     }
 
-    /// The stalls of the Mercato `market`, by item ([`ItemKind::ALL`]
+    /// The stalls of the Mercato `market`, by item (catalog
     /// order), then cheapest first.
     pub fn listings_at(&self, market: CarriageId) -> Vec<&Listing> {
         let mut out: Vec<&Listing> = self
@@ -658,10 +686,17 @@ impl World {
     /// what its shelf deals in.
     pub fn quote(&self, market: CarriageId, item: ItemKind) -> Option<u32> {
         let c = self.carriage(market)?;
-        quote_at(&self.params, self.economy.pay_level, &self.market, c, item)
+        quote_at(
+            &self.params,
+            &self.catalog,
+            self.economy.pay_level,
+            &self.market,
+            c,
+            item,
+        )
     }
 
-    /// Every item at the Mercato `market` ([`ItemKind::ALL`] order) with its
+    /// Every item at the Mercato `market` (catalog order) with its
     /// quote and the offers for the player: the shelf at
     /// [`World::player_price`] (if it has a whole unit) and each stall.
     /// Empty if it is not a Mercato.
@@ -673,8 +708,8 @@ impl World {
             return Vec::new();
         }
         let (p, level) = (&self.params, self.economy.pay_level);
-        ItemKind::ALL
-            .into_iter()
+        self.catalog
+            .kinds()
             .filter_map(|item| {
                 let quote = self.quote(market, item)?;
                 let mut offers = Vec::new();
@@ -694,7 +729,7 @@ impl World {
                         offers.push(Offer {
                             source: OfferSource::Listing(l.id),
                             seller: l.seller,
-                            price: listing_price(p, level, &self.market, c, l),
+                            price: listing_price(p, &self.catalog, level, &self.market, c, l),
                             qty: l.qty,
                         });
                     }
@@ -720,6 +755,7 @@ impl World {
     pub fn npc_wants(&self, npc: &Npc, item: ItemKind) -> bool {
         wants_item(
             &self.params,
+            &self.catalog,
             self.economy.pay_level,
             &self.market,
             npc,
@@ -759,7 +795,9 @@ impl World {
         let value: u32 = goods
             .iter()
             .map(|&(item, n)| {
-                let quote = self.quote(at, item).unwrap_or(item.base_value());
+                let quote = self
+                    .quote(at, item)
+                    .unwrap_or(self.catalog.base_value(item));
                 quote.saturating_mul(n)
             })
             .sum();
@@ -908,7 +946,8 @@ impl World {
         };
         self.check_at_market(as_seller, l.market)?;
         let c = &self.carriages[l.market.index()];
-        let price = listing_price(&self.params, self.economy.pay_level, &self.market, c, &l);
+        let level = self.economy.pay_level;
+        let price = listing_price(&self.params, &self.catalog, level, &self.market, c, &l);
         let (room, tokens) = match buyer {
             Buyer::Npc(b) => {
                 let n = self.npc(b).ok_or(StallError::NoSuchNpc)?;
@@ -1014,7 +1053,8 @@ impl World {
 
     /// Keeps [`Market::stall_count`] in step with the listings.
     fn listings_changed(&mut self) {
-        self.market.recount_stalls(self.carriages.len());
+        self.market
+            .recount_stalls(self.carriages.len(), self.catalog.item_count());
     }
 
     fn listing_index(&self, id: ListingId) -> Result<usize, StallError> {
@@ -1183,7 +1223,9 @@ impl World {
             return;
         }
         self.market.trade.to_mercato_units += u64::from(units);
-        let cap = self.params.storage_cap(CarriageKind::Mercato, item);
+        let cap = self
+            .catalog
+            .storage_cap(&self.params, CarriageKind::Mercato, item);
         let c = &mut self.carriages[market.index()];
         let shelf = if cap > 0.0 {
             let room = (cap - c.stock.get(item)).max(0.0).floor() as u32;
@@ -1207,7 +1249,9 @@ impl World {
             l.qty += rest;
             self.listings_changed();
         } else {
-            let quote = self.quote(market, item).unwrap_or(item.base_value());
+            let quote = self
+                .quote(market, item)
+                .unwrap_or(self.catalog.base_value(item));
             self.open_listing(Seller::Mercato, market, item, rest, quote);
         }
     }
@@ -1220,7 +1264,7 @@ impl World {
         let mut order: Vec<(bool, u32, usize)> = self
             .carriages
             .iter()
-            .filter(|c| self.params.storage_cap(c.kind, item) > 0.0)
+            .filter(|c| self.catalog.storage_cap(&self.params, c.kind, item) > 0.0)
             .map(|c| (c.kind != outlet, c.id.distance(from), c.id.index()))
             .collect();
         order.sort_unstable();
@@ -1230,7 +1274,7 @@ impl World {
                 break;
             }
             let c = &mut self.carriages[k];
-            let cap = self.params.storage_cap(c.kind, item);
+            let cap = self.catalog.storage_cap(&self.params, c.kind, item);
             let room = (cap - c.stock.get(item)).max(0.0).floor() as u32;
             let n = left.min(room);
             c.stock.add(item, n as f32, cap);
@@ -1286,7 +1330,7 @@ impl World {
             .items()
             .into_iter()
             .map(|(item, _)| item)
-            .find(|item| item.def().usage == ItemUse::Food);
+            .find(|item| item.usage() == ItemUse::Food);
         let Some(item) = food else {
             return false;
         };
@@ -1310,7 +1354,7 @@ impl World {
             if !self.market.short_goods.contains(&(home, item)) {
                 continue;
             }
-            let cap = self.params.storage_cap(kind, item);
+            let cap = self.catalog.storage_cap(&self.params, kind, item);
             let c = &mut self.carriages[home.index()];
             let room = (cap - c.stock.get(item)).max(0.0).floor() as u32;
             let put = n.min(room);
@@ -1376,6 +1420,7 @@ impl World {
         let id = self.npcs[i].id;
         let offer = best_offer(
             &self.params,
+            &self.catalog,
             self.economy.pay_level,
             &self.market,
             c,
@@ -1386,7 +1431,7 @@ impl World {
             Some((_, Source::Listing(k))) => {
                 let listing = self.market.listings[k].id;
                 if self.buy_listing(Buyer::Npc(id), listing, 1).is_ok()
-                    && item.def().usage == ItemUse::Food
+                    && item.usage() == ItemUse::Food
                 {
                     self.eat_own_food(i);
                 }
@@ -1439,8 +1484,8 @@ impl World {
     /// Whether NPC `i` keeps `item`, a non-food gift it does not use.
     pub(super) fn keeps_gift(&self, i: usize, item: ItemKind) -> bool {
         let n = &self.npcs[i];
-        item.def().usage == ItemUse::Material
-            && item.base_value() >= self.params.gift_keep_min_value
+        item.usage() == ItemUse::Material
+            && self.catalog.base_value(item) >= self.params.gift_keep_min_value
             && n.inventory.items.room_for(item) > 0
     }
 
@@ -1480,7 +1525,7 @@ impl World {
                 n -= self.npcs[h].inventory.items.add(item, n);
                 self.equip_spares(h);
             }
-            let cap = self.params.storage_cap(kind, item);
+            let cap = self.catalog.storage_cap(&self.params, kind, item);
             let c = &mut self.carriages[home.index()];
             let room = (cap - c.stock.get(item)).max(0.0).floor() as u32;
             let stored = n.min(room);
@@ -1523,7 +1568,10 @@ impl World {
             .filter(|(_, l)| l.seller == Seller::Mercato)
             .map(|(k, l)| {
                 let c = &self.carriages[l.market.index()];
-                (k, listing_price(p, level, &self.market, c, l))
+                (
+                    k,
+                    listing_price(p, &self.catalog, level, &self.market, c, l),
+                )
             })
             .collect();
         for (k, price) in quotes {
@@ -1594,9 +1642,10 @@ impl World {
             .map(|c| c.id)
             .collect();
         let (residents, children) = self.households();
-        for item in ItemKind::ALL {
-            if item
-                .amenity()
+        for def in self.catalog.items() {
+            let item = def.kind;
+            if def
+                .amenity
                 .is_none_or(|a| a.place() != CarriageKind::Dormitorio)
             {
                 continue;

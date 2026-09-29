@@ -6,9 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::carriage::CarriageKind;
-use crate::item::ItemKind;
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SimParams {
@@ -640,24 +637,5 @@ impl SimParams {
     /// `[start, end)` minutes of the day.
     pub fn lunch_break(&self, shift: u8) -> (u32, u32) {
         self.meal_window(1, shift)
-    }
-
-    /// How much of `item` a carriage of `kind` can store (0 = not stored
-    /// there): from the carriage table or, for the newer items, the item's
-    /// own [`crate::defs::Store`] rows.
-    pub fn storage_cap(&self, kind: CarriageKind, item: ItemKind) -> f32 {
-        if let Some(s) = kind.def().storage.iter().find(|s| s.item == item) {
-            return (s.cap)(self);
-        }
-        item.def()
-            .stores
-            .iter()
-            .find(|s| s.carriage == kind)
-            .map_or(0.0, |s| (s.cap)(self))
-    }
-
-    /// Fraction of `item` stock that spoils every midnight.
-    pub fn spoilage_per_day(&self, item: ItemKind) -> f32 {
-        item.def().spoilage.map_or(0.0, |spoilage| spoilage(self))
     }
 }

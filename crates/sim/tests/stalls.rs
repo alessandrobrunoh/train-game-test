@@ -200,7 +200,7 @@ fn any_item_can_be_listed() {
 
     // Every item has a quote there, with its offers cheapest first.
     let offers = w.market_offers(market);
-    assert_eq!(offers.len(), ItemKind::COUNT);
+    assert_eq!(offers.len(), ItemKind::BUILTIN_COUNT);
     for o in &offers {
         assert!(o.quote >= 1, "{o:?}");
         assert!(o.offers.windows(2).all(|p| p[0].price <= p[1].price));
@@ -209,7 +209,7 @@ fn any_item_can_be_listed() {
     assert_eq!(tessuto.best().unwrap().source, OfferSource::Listing(id));
     assert_eq!(w.market_offers(CarriageId(0)), Vec::new());
     // Quotes of what the shelf deals in are its prices.
-    for item in ItemKind::ALL.into_iter().filter(|i| i.is_sold()) {
+    for item in w.catalog().sold_items() {
         assert_eq!(w.quote(market, item), w.price(market, item));
     }
 }

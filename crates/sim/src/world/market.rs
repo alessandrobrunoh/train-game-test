@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use super::stalls::{Listing, StallRecord, TradeCounters};
 use super::{World, price_at};
 use crate::carriage::{Carriage, CarriageKind};
+use crate::catalog::Catalog;
 use crate::event::EventKind;
 use crate::ids::CarriageId;
 use crate::item::ItemKind;
@@ -64,9 +65,11 @@ pub struct Market {
     /// makes nothing. A world without them (all empty) produces as before
     /// and counts every carriage of a producing kind as a producer.
     specialties: Vec<Vec<ItemKind>>,
-    /// Per carriage and item (`carriage * ItemKind::COUNT + item`): the
-    /// nearest producer of the item, or [`NO_PRODUCER`]. Empty in a world
-    /// without them: no transport in the prices.
+    /// Per carriage and item (`carriage * items + item`, where `items` is
+    /// the size of the catalog when they were located, see
+    /// [`Market::stride`]): the nearest producer of the item, or
+    /// [`NO_PRODUCER`]. Empty in a world without them: no transport in the
+    /// prices.
     producers: Vec<u16>,
     /// Daily price samples, oldest first.
     history: VecDeque<PriceSample>,
@@ -83,32 +86,52 @@ pub struct Market {
     /// (Dormitorio, comfort good) pairs short of the target, refreshed hourly.
     pub(super) short_goods: Vec<(CarriageId, ItemKind)>,
     /// Units on the stalls per carriage and item (`carriage *
-    /// ItemKind::COUNT + item`), rebuilt whenever a listing changes (see
+    /// stall_stride + item`), rebuilt whenever a listing changes (see
     /// `Market::recount_stalls`); empty after loading until then, when the
     /// listings are scanned instead.
     #[serde(skip)]
     pub(super) stall_count: Vec<u32>,
+    /// Items per carriage in `stall_count`.
+    #[serde(skip)]
+    pub(super) stall_stride: usize,
 }
 
 impl Market {
     /// Market of `carriages` with the given `specialties` (one list per carriage).
-    pub(super) fn new(carriages: &[Carriage], specialties: Vec<Vec<ItemKind>>) -> Market {
+    pub(super) fn new(
+        carriages: &[Carriage],
+        specialties: Vec<Vec<ItemKind>>,
+        cat: &Catalog,
+    ) -> Market {
         let mut market = Market {
             specialties,
             ..Market::default()
         };
-        market.locate_producers(carriages);
+        market.locate_producers(carriages, cat);
         market
     }
 
-    /// Rebuilds [`Market::stall_count`] for a train of `carriages`.
-    pub(super) fn recount_stalls(&mut self, carriages: usize) {
+    /// Items per carriage in [`Market::producers`].
+    fn stride(&self) -> usize {
+        match self.specialties.len() {
+            0 => 0,
+            n => self.producers.len() / n,
+        }
+    }
+
+    /// Rebuilds [`Market::stall_count`] for a train of `carriages` and a
+    /// catalog of `items`.
+    pub(super) fn recount_stalls(&mut self, carriages: usize, items: usize) {
         self.stall_count.clear();
-        self.stall_count.resize(carriages * ItemKind::COUNT, 0);
+        self.stall_count.resize(carriages * items, 0);
+        self.stall_stride = items;
         for l in &self.listings {
+            if l.item.index() >= items {
+                continue;
+            }
             if let Some(n) = self
                 .stall_count
-                .get_mut(l.market.index() * ItemKind::COUNT + l.item.index())
+                .get_mut(l.market.index() * items + l.item.index())
             {
                 *n += l.qty;
             }
@@ -117,10 +140,13 @@ impl Market {
 
     /// Units of `item` on the stalls of the Mercato `at`.
     pub(super) fn stall_units(&self, at: CarriageId, item: ItemKind) -> u32 {
-        match self
-            .stall_count
-            .get(at.index() * ItemKind::COUNT + item.index())
-        {
+        let counted = (item.index() < self.stall_stride)
+            .then(|| {
+                self.stall_count
+                    .get(at.index() * self.stall_stride + item.index())
+            })
+            .flatten();
+        match counted {
             Some(&n) => n,
             None => self
                 .listings
@@ -139,26 +165,32 @@ impl Market {
 
     /// Whether `c` produces `item`: one of its specialties or, in a world
     /// without specialties, a recipe of its kind.
-    fn produces(&self, c: &Carriage, item: ItemKind) -> bool {
+    /// Items the Custode added are nobody's specialty: every carriage whose
+    /// kind makes them produces them.
+    fn produces(&self, c: &Carriage, item: ItemKind, cat: &Catalog) -> bool {
         match self.specialties_of(c.id) {
-            [] if self.specialties.iter().all(Vec::is_empty) => c.kind.makes(item),
-            specialties => specialties.contains(&item),
+            [] if self.specialties.iter().all(Vec::is_empty) => cat.makes(c.kind, item),
+            specialties => {
+                specialties.contains(&item) || (!item.is_builtin() && cat.makes(c.kind, item))
+            }
         }
     }
 
-    /// Fills [`Market::producers`] (nearest first, towards the head on a tie).
-    fn locate_producers(&mut self, carriages: &[Carriage]) {
+    /// Fills [`Market::producers`] (nearest first, towards the head on a
+    /// tie) for every item of `cat`.
+    pub(super) fn locate_producers(&mut self, carriages: &[Carriage], cat: &Catalog) {
         let n = carriages.len();
-        self.producers = vec![NO_PRODUCER; n * ItemKind::COUNT];
-        for item in ItemKind::ALL {
+        let items = cat.item_count();
+        self.producers = vec![NO_PRODUCER; n * items];
+        for item in cat.kinds() {
             let makers: Vec<usize> = carriages
                 .iter()
-                .filter(|c| self.produces(c, item))
+                .filter(|c| self.produces(c, item, cat))
                 .map(|c| c.id.index())
                 .collect();
             for c in 0..n {
                 if let Some(&m) = makers.iter().min_by_key(|&&m| (m.abs_diff(c), m)) {
-                    self.producers[c * ItemKind::COUNT + item.index()] = m as u16;
+                    self.producers[c * items + item.index()] = m as u16;
                 }
             }
         }
@@ -166,7 +198,11 @@ impl Market {
 
     /// Nearest producer of `item` to `carriage`.
     pub fn producer(&self, carriage: CarriageId, item: ItemKind) -> Option<CarriageId> {
-        let k = carriage.index() * ItemKind::COUNT + item.index();
+        let stride = self.stride();
+        if item.index() >= stride {
+            return None;
+        }
+        let k = carriage.index() * stride + item.index();
         match self.producers.get(k) {
             Some(&m) if m != NO_PRODUCER => Some(CarriageId(m)),
             _ => None,
@@ -184,6 +220,7 @@ impl Market {
 /// Specialties of each of `carriages` for a world generated with `seed`.
 pub(super) fn assign_specialties(
     seed: u64,
+    cat: &Catalog,
     carriages: &[Carriage],
     p: &SimParams,
 ) -> Vec<Vec<ItemKind>> {
@@ -192,7 +229,11 @@ pub(super) fn assign_specialties(
     let mut out: Vec<Vec<ItemKind>> = carriages
         .iter()
         .map(|c| {
-            let mut items: Vec<ItemKind> = c.kind.recipes().iter().map(|r| r.output).collect();
+            let mut items: Vec<ItemKind> = cat
+                .recipes_of_kind(c.kind)
+                .iter()
+                .map(|&r| cat.recipe(r).output)
+                .collect();
             if items.len() > 1 {
                 let n = if rng.random_bool(second) { 2 } else { 1 };
                 items.shuffle(&mut rng);
@@ -205,8 +246,8 @@ pub(super) fn assign_specialties(
     // Every recipe of a kind on the train is someone's specialty: a missing
     // one goes to a carriage of that kind with the fewest specialties.
     for kind in CarriageKind::ALL {
-        for recipe in kind.recipes() {
-            let item = recipe.output;
+        for recipe in cat.recipes_of_kind(kind) {
+            let item = cat.recipe(recipe).output;
             let of_kind: Vec<usize> = carriages
                 .iter()
                 .filter(|c| c.kind == kind)
@@ -246,16 +287,27 @@ pub fn mercato_price(p: &SimParams, level: f32, base: u32, distance: u32, fill: 
 pub struct PriceSample {
     /// Game day (sampled at its midnight, or at generation).
     pub day: u64,
-    /// [`ItemKind::COUNT`] prices per Mercato, head to tail (see
+    /// [`PriceSample::items`] prices per Mercato, head to tail (see
     /// [`World::markets`]); 0 where the item is not sold.
     prices: Vec<u32>,
+    /// Items in the catalog that day (13 before the Custode added any).
+    #[serde(default = "builtin_items")]
+    items: u16,
+}
+
+fn builtin_items() -> u16 {
+    ItemKind::BUILTIN_COUNT as u16
 }
 
 impl PriceSample {
     /// Price of `item` at the `rank`-th Mercato (head to tail), if sold there.
     pub fn price(&self, rank: usize, item: ItemKind) -> Option<u32> {
+        let items = usize::from(self.items);
+        if item.index() >= items {
+            return None;
+        }
         self.prices
-            .get(rank * ItemKind::COUNT + item.index())
+            .get(rank * items + item.index())
             .copied()
             .filter(|&p| p > 0)
     }
@@ -352,7 +404,7 @@ impl World {
         let mut items: Vec<ItemKind> = items
             .iter()
             .copied()
-            .filter(|&item| c.kind.makes(item))
+            .filter(|&item| self.catalog.makes(c.kind, item))
             .collect();
         items.sort();
         items.dedup();
@@ -361,7 +413,7 @@ impl World {
             market.specialties.resize(self.carriages.len(), Vec::new());
         }
         market.specialties[carriage.index()] = items;
-        market.locate_producers(&self.carriages);
+        market.locate_producers(&self.carriages, &self.catalog);
     }
 
     /// Nearest carriage that produces `item` (see [`World::specialties`]) and
@@ -429,8 +481,8 @@ impl World {
             return Vec::new();
         };
         let rank = self.markets().iter().position(|&m| m == carriage);
-        ItemKind::ALL
-            .into_iter()
+        self.catalog
+            .kinds()
             .filter_map(|item| {
                 let price = self.price(carriage, item)?;
                 let producer = self.market.producer(carriage, item);
@@ -441,7 +493,11 @@ impl World {
                     buyback: self.player_sell_price(carriage, item).unwrap_or(0),
                     player_price: self.player_price(carriage, item).unwrap_or(price),
                     stock: c.stock.count(item),
-                    cap: self.params.storage_cap(c.kind, item).max(0.0).floor() as u32,
+                    cap: self
+                        .catalog
+                        .storage_cap(&self.params, c.kind, item)
+                        .max(0.0)
+                        .floor() as u32,
                     producer,
                     distance: producer.map_or(0, |m| m.distance(carriage)),
                     reference,
@@ -492,7 +548,9 @@ impl World {
         if !self.player.inventory.has(item, 1) {
             return Err(SellError::NotOwned);
         }
-        let cap = self.params.storage_cap(CarriageKind::Mercato, item);
+        let cap = self
+            .catalog
+            .storage_cap(&self.params, CarriageKind::Mercato, item);
         let c = &mut self.carriages[carriage.index()];
         if c.stock.get(item) + 1.0 > cap {
             return Err(SellError::NoRoom);
@@ -516,11 +574,13 @@ impl World {
     /// Samples today's prices (at generation and every midnight).
     pub(super) fn record_prices(&mut self) {
         let markets = self.markets();
-        let mut prices = Vec::with_capacity(markets.len() * ItemKind::COUNT);
+        let items = self.catalog.item_count();
+        let mut prices = Vec::with_capacity(markets.len() * items);
         for &m in &markets {
             let c = &self.carriages[m.index()];
-            for item in ItemKind::ALL {
-                let price = price_at(&self.params, self.economy.pay_level, &self.market, c, item);
+            for item in self.catalog.kinds() {
+                let level = self.economy.pay_level;
+                let price = price_at(&self.params, &self.catalog, level, &self.market, c, item);
                 prices.push(price.unwrap_or(0));
             }
         }
@@ -530,7 +590,11 @@ impl World {
         if history.back().is_some_and(|s| s.day == day) {
             history.pop_back();
         }
-        history.push_back(PriceSample { day, prices });
+        history.push_back(PriceSample {
+            day,
+            prices,
+            items: items as u16,
+        });
         while history.len() > keep {
             history.pop_front();
         }

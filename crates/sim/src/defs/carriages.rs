@@ -1,10 +1,10 @@
 //! Tipi di carrozza e di postazione.
 
+use super::Num;
 use crate::carriage::{CarriageKind, StationKind};
 use crate::item::ItemKind;
 use crate::names;
 use crate::npc::Job;
-use crate::params::SimParams;
 
 #[derive(Debug)]
 pub struct CarriageDef {
@@ -29,7 +29,7 @@ pub struct CarriageDef {
 #[derive(Debug)]
 pub struct Storage {
     pub item: ItemKind,
-    pub cap: fn(&SimParams) -> f32,
+    pub cap: Num,
 }
 
 /// A group of identical stations added to each carriage of a kind.
@@ -98,7 +98,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
         ],
         storage: &[Storage {
             item: ItemKind::Razione,
-            cap: |p| p.razioni_storage_cap,
+            cap: Num::Param(|p| p.razioni_storage_cap),
         }],
         start_stock: &[(ItemKind::Razione, 100.0)],
     },
@@ -118,7 +118,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
         }],
         storage: &[Storage {
             item: ItemKind::Verdura,
-            cap: |p| p.verdura_storage_cap,
+            cap: Num::Param(|p| p.verdura_storage_cap),
         }],
         start_stock: &[(ItemKind::Verdura, 100.0)],
     },
@@ -139,15 +139,15 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
         storage: &[
             Storage {
                 item: ItemKind::Rottame,
-                cap: |p| p.rottame_storage_cap,
+                cap: Num::Param(|p| p.rottame_storage_cap),
             },
             Storage {
                 item: ItemKind::Attrezzo,
-                cap: |p| p.workshop_goods_cap,
+                cap: Num::Param(|p| p.workshop_goods_cap),
             },
             Storage {
                 item: ItemKind::Vestito,
-                cap: |p| p.workshop_goods_cap,
+                cap: Num::Param(|p| p.workshop_goods_cap),
             },
         ],
         start_stock: &[
@@ -173,11 +173,11 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
         storage: &[
             Storage {
                 item: ItemKind::Attrezzo,
-                cap: |p| p.market_goods_cap,
+                cap: Num::Param(|p| p.market_goods_cap),
             },
             Storage {
                 item: ItemKind::Vestito,
-                cap: |p| p.market_goods_cap,
+                cap: Num::Param(|p| p.market_goods_cap),
             },
         ],
         start_stock: &[(ItemKind::Attrezzo, 10.0), (ItemKind::Vestito, 10.0)],

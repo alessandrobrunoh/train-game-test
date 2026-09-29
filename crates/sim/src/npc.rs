@@ -1,12 +1,9 @@
 //! NPC: bisogni, lavoro, inventario, età e relazioni.
 
-use std::fmt;
-
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::action::Action;
-use crate::carriage::{CarriageKind, StationKind};
 use crate::defs::ItemUse;
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
@@ -40,100 +37,7 @@ impl Default for Needs {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Job {
-    /// Works the grow beds of a Serra: grows Verdura.
-    Contadino,
-    /// Works the kitchen of a Mensa: cooks Verdura from the Serre into Razioni.
-    Cuoco,
-    /// Works a bench in an Officina: turns Rottame into Attrezzi and Vestiti.
-    Operaio,
-    /// Works the counter of a Mercato: brings Attrezzi and Vestiti from the
-    /// Officine to the Mercato.
-    Mercante,
-}
-
-impl Job {
-    /// Position in [`Job::ALL`] (and in per-job arrays).
-    pub fn index(self) -> usize {
-        self as usize
-    }
-
-    pub const COUNT: usize = 4;
-    pub const ALL: [Job; Self::COUNT] = [Job::Contadino, Job::Cuoco, Job::Operaio, Job::Mercante];
-
-    pub fn name(self) -> &'static str {
-        self.def().name
-    }
-
-    pub fn workplace_kind(self) -> CarriageKind {
-        self.def().workplace
-    }
-
-    pub fn station_kind(self) -> StationKind {
-        self.def().station
-    }
-
-    /// Whether an Attrezzo boosts (and wears with) this job's work.
-    pub fn uses_tool(self) -> bool {
-        self.def().uses_tool
-    }
-
-    /// Work shift as `[start, end)` hours, interrupted by [`Job::LUNCH_BREAK`].
-    pub fn shift(self) -> (u32, u32) {
-        self.def().shift
-    }
-
-    /// Default lunch break `[start, end)` hours: no work, everyone gets a
-    /// chance to eat. Each worker actually breaks at its meal shift's lunch
-    /// ([`crate::SimParams::lunch_break`], see [`Job::works_at`]).
-    pub const LUNCH_BREAK: (u32, u32) = (12, 13);
-
-    /// Whether `time` falls in working hours (shift minus the default lunch break).
-    pub fn in_shift(self, time: GameTime) -> bool {
-        self.works_at(time, Self::default_lunch())
-    }
-
-    /// Minutes until the current stretch of work ends (default lunch break or
-    /// end of shift); 0 outside working hours.
-    pub fn shift_minutes_left(self, time: GameTime) -> u64 {
-        self.minutes_left_at(time, Self::default_lunch())
-    }
-
-    fn default_lunch() -> (u32, u32) {
-        (Self::LUNCH_BREAK.0 * 60, Self::LUNCH_BREAK.1 * 60)
-    }
-
-    /// Whether `time` falls in working hours with a lunch break of
-    /// `[start, end)` minutes of the day.
-    pub fn works_at(self, time: GameTime, lunch: (u32, u32)) -> bool {
-        let (start, end) = self.shift();
-        let now = time.minute_of_day();
-        (start * 60..end * 60).contains(&now) && !(lunch.0..lunch.1).contains(&now)
-    }
-
-    /// Minutes until the current stretch of work ends (the lunch break
-    /// `[start, end)` in minutes of the day, or the end of the shift); 0
-    /// outside working hours.
-    pub fn minutes_left_at(self, time: GameTime, lunch: (u32, u32)) -> u64 {
-        if !self.works_at(time, lunch) {
-            return 0;
-        }
-        let now = time.minute_of_day();
-        let end = if now < lunch.0 {
-            lunch.0.min(self.shift().1 * 60)
-        } else {
-            self.shift().1 * 60
-        };
-        u64::from(end - now)
-    }
-}
-
-impl fmt::Display for Job {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
+pub use crate::job::Job;
 
 /// What an NPC owns: tokens, the Attrezzo and Vestito it uses (each with a
 /// durability in `(0, 1]`, removed when it reaches 0) and a few slots of
@@ -187,7 +91,7 @@ impl Inventory {
 
     /// Durability of the owned unit of `item` (only Attrezzo and Vestito can be owned).
     pub fn durability(&self, item: ItemKind) -> Option<f32> {
-        match item.def().usage {
+        match item.usage() {
             ItemUse::Tool => self.tool,
             ItemUse::Clothes => self.clothes,
             ItemUse::Food | ItemUse::Material => None,
@@ -199,7 +103,7 @@ impl Inventory {
     }
 
     pub(crate) fn slot_mut(&mut self, item: ItemKind) -> Option<&mut Option<f32>> {
-        match item.def().usage {
+        match item.usage() {
             ItemUse::Tool => Some(&mut self.tool),
             ItemUse::Clothes => Some(&mut self.clothes),
             ItemUse::Food | ItemUse::Material => None,
@@ -423,7 +327,7 @@ impl Npc {
     /// Whether the NPC would buy `item` at a Mercato (tokens aside): a worker
     /// whose job uses tools without an Attrezzo, anyone without a Vestito.
     pub fn wants(&self, item: ItemKind) -> bool {
-        match item.def().usage {
+        match item.usage() {
             ItemUse::Tool => self.job.is_some_and(Job::uses_tool) && self.inventory.tool.is_none(),
             ItemUse::Clothes => self.inventory.clothes.is_none(),
             ItemUse::Food | ItemUse::Material => false,
@@ -433,7 +337,7 @@ impl Npc {
     /// Whether the NPC accepts `item` from the player ([`crate::World::player_give`]):
     /// food unless nearly full, an Attrezzo or Vestito only if it [`Npc::wants`] it.
     pub fn accepts_gift(&self, item: ItemKind) -> bool {
-        match item.def().usage {
+        match item.usage() {
             ItemUse::Food => self.needs.hunger < GIFT_FULL_HUNGER,
             ItemUse::Material => false,
             ItemUse::Tool | ItemUse::Clothes => self.wants(item),

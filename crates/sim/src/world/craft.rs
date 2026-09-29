@@ -1,6 +1,7 @@
 //! Ricette: la produzione degli NPC e il crafting del giocatore.
 //!
-//! NPC workers and the player use the same rows of [`RECIPES`]:
+//! NPC workers and the player use the same recipes of the world's
+//! catalog ([`crate::Catalog::recipes`]):
 //! - `World::produce`: `minutes` of work make `rate × minutes × tool bonus`
 //!   of the output of one of the job's recipes (see [`Work`] for which one),
 //!   bounded by the storage of the workplace and by the inputs, taken from
@@ -8,14 +9,14 @@
 //! - [`World::player_craft`]: one whole batch from the player's inventory,
 //!   in a carriage that has the recipe's station. It is instant in the sim:
 //!   the game makes the player wait the recipe's minutes first.
-//!
-//! [`RECIPES`]: crate::defs::RECIPES
 
 use std::fmt;
 
 use super::World;
 use crate::carriage::{CarriageKind, StationKind};
-use crate::defs::{RECIPES, RecipeDef, Source, Work};
+use crate::catalog::Catalog;
+use crate::custode::Need;
+use crate::defs::{RecipeDef, RecipeId, Source, Work};
 use crate::ids::CarriageId;
 use crate::item::ItemKind;
 use crate::npc::Job;
@@ -83,9 +84,11 @@ impl World {
     /// is up to the game. No randomness: the world stays deterministic.
     pub fn player_craft(
         &mut self,
-        recipe: &RecipeDef,
+        recipe: RecipeId,
         carriage: CarriageId,
     ) -> Result<u32, CraftError> {
+        let cat = self.catalog.clone();
+        let recipe = cat.get_recipe(recipe).ok_or(CraftError::Unknown)?;
         if !self.player.knows(recipe) {
             return Err(CraftError::Unknown);
         }
@@ -114,14 +117,14 @@ impl World {
     }
 
     /// Recipes that can be made in `carriage` (it has their station), in
-    /// [`RECIPES`] order.
-    pub fn recipes_at(&self, carriage: CarriageId) -> Vec<&'static RecipeDef> {
+    /// catalog order.
+    pub fn recipes_at(&self, carriage: CarriageId) -> Vec<RecipeId> {
         let Some(c) = self.carriage(carriage) else {
             return Vec::new();
         };
-        RECIPES
-            .iter()
-            .filter(|r| c.stations.iter().any(|s| s.kind == r.station))
+        let cat = &self.catalog;
+        cat.recipe_ids()
+            .filter(|&r| c.stations.iter().any(|s| s.kind == cat.recipe(r).station))
             .collect()
     }
 
@@ -137,7 +140,7 @@ impl World {
         for c in &self.carriages {
             if c.kind == item.outlet() || c.kind == workplace {
                 stock += c.stock.get(item);
-                cap += self.params.storage_cap(c.kind, item);
+                cap += self.catalog.storage_cap(&self.params, c.kind, item);
             }
         }
         if cap > 0.0 { stock / cap } else { 1.0 }
@@ -146,7 +149,8 @@ impl World {
     /// Effect of `minutes` of work by a `job` in carriage `here`; `bonus`
     /// multiplies the output (tool). Booked in [`super::EconomyCounters`],
     /// with the share of the work that produced nothing. Returns what was
-    /// made and how much, if anything (moving goods makes nothing).
+    /// made and how much, if anything (moving goods and services make
+    /// nothing).
     pub(super) fn produce(
         &mut self,
         job: Job,
@@ -155,20 +159,26 @@ impl World {
         bonus: f32,
     ) -> Option<(ItemKind, f32)> {
         let mut output = None;
-        let wasted = match &job.def().work {
+        let cat = self.catalog.clone();
+        let wasted = match &cat.job(job).work {
             Work::Trade { from, rate } => {
-                let potential = minutes * rate(&self.params);
+                let potential = minutes * rate.get(&self.params);
                 let moved = self.trade(*from, potential, here);
                 1.0 - share(moved, potential)
             }
+            Work::Service { need, per_minute } => {
+                let served = self.serve(here, *need, per_minute * minutes * bonus);
+                if served { 0.0 } else { 1.0 }
+            }
             work => {
-                let order = self.recipe_order(work, job, here);
+                let order = self.recipe_order(&cat, work, job, here);
                 // Specialties (see `market.rs`) only shape the "make the
                 // scarcest" work; staples (food) are never slowed down.
                 let specialized = matches!(work, Work::MakeScarcest(_));
                 let work = minutes * bonus;
                 let mut booked = None;
-                for recipe in &order {
+                for &id in &order {
+                    let recipe = cat.recipe(id);
                     let factor = if specialized {
                         self.specialty_factor(here, recipe.output)
                     } else {
@@ -182,7 +192,7 @@ impl World {
                 }
                 // Nothing made: the work is booked on the first choice.
                 let booked = booked.or_else(|| {
-                    let first = order.first()?;
+                    let first = cat.recipe(*order.first()?);
                     Some((first.output, 0.0, work * first.rate(&self.params)))
                 });
                 match booked {
@@ -201,45 +211,77 @@ impl World {
         output
     }
 
+    /// A service ([`Work::Service`]): `amount` of `need` for everyone in
+    /// carriage `here` who is not walking through it. Returns whether
+    /// anyone was there.
+    fn serve(&mut self, here: CarriageId, need: Need, amount: f32) -> bool {
+        let amount = amount.max(0.0);
+        let mut served = false;
+        for npc in self.npcs.iter_mut().filter(|n| n.carriage == here) {
+            if matches!(npc.action, crate::Action::Travel { .. }) {
+                continue;
+            }
+            let value = match need {
+                Need::Satiety => &mut npc.needs.hunger,
+                Need::Energy => &mut npc.needs.energy,
+                Need::Social => &mut npc.needs.social,
+            };
+            *value = (*value + amount).min(1.0);
+            served = true;
+        }
+        served
+    }
+
     /// The recipes of `work` in the order a worker in `here` tries them.
-    fn recipe_order(&self, work: &Work, job: Job, here: CarriageId) -> Vec<&'static RecipeDef> {
+    fn recipe_order(
+        &self,
+        cat: &Catalog,
+        work: &Work,
+        job: Job,
+        here: CarriageId,
+    ) -> Vec<RecipeId> {
         match work {
             Work::Make(recipe) => vec![*recipe],
             Work::MakeScarcest(recipes) => {
                 // The carriage's specialties first, each group scarcest first.
-                let mut order = self.by_scarcity(recipes, job);
+                let mut order = self.by_scarcity(cat, recipes, job);
                 let specialties = self.market.specialties_of(here);
                 if !specialties.is_empty() {
-                    order.sort_by_key(|r| !specialties.contains(&r.output));
+                    order.sort_by_key(|&r| !specialties.contains(&cat.recipe(r).output));
                 }
                 order
             }
             Work::MakeStaple { recipes, keep } => {
-                let Some(staple) = recipes.first() else {
+                let Some(&staple) = recipes.first() else {
                     return Vec::new();
                 };
+                let staple = cat.recipe(staple);
                 let c = &self.carriages[here.index()];
-                let cap = self.params.storage_cap(c.kind, staple.output);
+                let cap = cat.storage_cap(&self.params, c.kind, staple.output);
                 let fill = if cap > 0.0 {
                     c.stock.get(staple.output) / cap
                 } else {
                     1.0
                 };
-                if fill < keep(&self.params) {
+                if fill < keep.get(&self.params) {
                     // The staple first; the rest only if it can't be made.
-                    recipes.iter().collect()
+                    recipes.to_vec()
                 } else {
-                    self.by_scarcity(recipes, job)
+                    self.by_scarcity(cat, recipes, job)
                 }
             }
-            Work::Trade { .. } => Vec::new(),
+            Work::Trade { .. } | Work::Service { .. } => Vec::new(),
         }
     }
 
     /// Output multiplier of `item` made in carriage `here`: a bonus for its
-    /// specialties, a penalty for the rest (1 if it has none).
+    /// specialties, a penalty for the rest (1 if it has none). Items the
+    /// Custode added are nobody's specialty: always 1.
     fn specialty_factor(&self, here: CarriageId, item: ItemKind) -> f32 {
         let p = &self.params;
+        if !item.is_builtin() {
+            return 1.0;
+        }
         match self.market.specialties_of(here) {
             [] => 1.0,
             s if s.contains(&item) => p.specialty_output_bonus.max(0.0),
@@ -248,11 +290,11 @@ impl World {
     }
 
     /// `recipes` with the scarcest output on the train first (stable on ties).
-    fn by_scarcity(&self, recipes: &'static [RecipeDef], job: Job) -> Vec<&'static RecipeDef> {
-        let workplace = job.def().workplace;
-        let mut order: Vec<(f32, &'static RecipeDef)> = recipes
+    fn by_scarcity(&self, cat: &Catalog, recipes: &[RecipeId], job: Job) -> Vec<RecipeId> {
+        let workplace = job.workplace_kind();
+        let mut order: Vec<(f32, RecipeId)> = recipes
             .iter()
-            .map(|r| (self.fill_on_train(r.output, workplace), r))
+            .map(|&r| (self.fill_on_train(cat.recipe(r).output, workplace), r))
             .collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
         order.into_iter().map(|(_, r)| r).collect()
@@ -267,10 +309,11 @@ impl World {
         let item = recipe.output;
         let potential = work * recipe.rate(p);
         let stock = &self.carriages[h].stock;
-        let space = (p.storage_cap(self.carriages[h].kind, item) - stock.get(item)).max(0.0);
+        let cap = self.catalog.storage_cap(p, self.carriages[h].kind, item);
+        let space = (cap - stock.get(item)).max(0.0);
         let mut made = potential.min(space);
         let mut needs: Vec<(ItemKind, f32, Vec<usize>)> = Vec::with_capacity(recipe.inputs.len());
-        for input in recipe.inputs {
+        for input in recipe.inputs.iter() {
             if made <= 0.0 {
                 break;
             }
@@ -315,14 +358,14 @@ impl World {
     fn trade(&mut self, from: CarriageKind, budget: f32, here: CarriageId) -> f32 {
         let kind = self.carriages[here.index()].kind;
         let mut left = budget;
-        let mut items = ItemKind::SOLD;
+        let mut items = self.catalog.sold_items();
         items.sort_by(|a, b| {
             let stock = &self.carriages[here.index()].stock;
             stock.get(*a).total_cmp(&stock.get(*b))
         });
         let sources = self.nearest_of_kind(from, here);
         for item in items {
-            let cap = self.params.storage_cap(kind, item);
+            let cap = self.catalog.storage_cap(&self.params, kind, item);
             for &o in &sources {
                 let space = cap - self.carriages[here.index()].stock.get(item);
                 let wanted = left.min(space);

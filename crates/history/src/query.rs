@@ -211,10 +211,9 @@ fn parse_cause(name: &str) -> Option<DeathCause> {
         .find(|&c| crate::sync::cause_name(c) == name)
 }
 
+/// A builtin item by its stored name (items the Custode added read as None).
 pub(crate) fn parse_item(name: &str) -> Option<ItemKind> {
-    ItemKind::ALL
-        .into_iter()
-        .find(|&i| crate::sync::item_name(i) == name)
+    ItemKind::from_code(name)
 }
 
 impl History {

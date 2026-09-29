@@ -1,121 +1,169 @@
-//! Lavori.
+//! Lavori: le righe dei 4 lavori di partenza.
 
-use super::recipes::{self, RecipeDef};
+use std::borrow::Cow;
+
+use serde::{Deserialize, Serialize};
+
+use super::Num;
+use super::recipes::RecipeId;
 use crate::carriage::{CarriageKind, StationKind};
+use crate::custode::Need;
+use crate::job::JobInfo;
 use crate::npc::Job;
-use crate::params::SimParams;
+use crate::time::GameTime;
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JobDef {
+    /// Id, names, workplace, station, shift, tool (see [`JobInfo`]).
     pub job: Job,
-    /// Lowercase: "contadino".
-    pub name: &'static str,
-    /// Kind of carriage where the job is done.
-    pub workplace: CarriageKind,
-    /// Station the worker occupies there.
-    pub station: StationKind,
-    /// Work shift as `[start, end)` hours, interrupted by the lunch break.
-    pub shift: (u32, u32),
-    /// Whether an owned Attrezzo boosts the output (and wears with work).
-    pub uses_tool: bool,
+    /// What the job is, one short Italian sentence.
+    pub description: Cow<'static, str>,
     pub work: Work,
+    /// Workers wanted per carriage of the workplace kind, for a job the
+    /// Custode added; None for the builtin jobs, staffed by the quotas of
+    /// `World::staff_workforce`.
+    pub staff: Option<u16>,
+    /// When the Custode added it (None: a builtin job).
+    pub added: Option<GameTime>,
+}
+
+impl JobDef {
+    pub fn name(&self) -> &'static str {
+        self.job.name()
+    }
 }
 
 /// What a minute of work does (see `World::produce`).
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Work {
     /// Makes the recipe's output into the workplace storage, taking its
     /// input (if any) from the recipe's source.
-    Make(&'static RecipeDef),
+    Make(RecipeId),
     /// Makes one of the recipes: the one whose output is scarcest on the
     /// train first (lowest share of its storage in the workplaces and
     /// outlets), falling back to the next if it can't be made.
-    MakeScarcest(&'static [RecipeDef]),
+    MakeScarcest(Cow<'static, [RecipeId]>),
     /// Makes the first recipe (the staple) while its output fills less than
     /// `keep` of the workplace storage; above that, like
     /// [`Work::MakeScarcest`] over all of them. Food first: the surplus
     /// labour makes the rest.
     MakeStaple {
-        recipes: &'static [RecipeDef],
-        keep: fn(&SimParams) -> f32,
+        recipes: Cow<'static, [RecipeId]>,
+        keep: Num,
     },
     /// Brings the items sold at the Mercati from the nearest carriages of
     /// `from` to the workplace, the item it has least of first.
     Trade {
         from: CarriageKind,
         /// Units moved per minute of work.
-        rate: fn(&SimParams) -> f32,
+        rate: Num,
     },
+    /// Makes nothing: a service to the people in the workplace (a guard, a
+    /// doctor, a clerk). Every minute of work raises `need` of everyone
+    /// else in the same carriage by `per_minute` (up to 1).
+    Service { need: Need, per_minute: f32 },
 }
 
 impl Work {
-    pub fn recipes(&self) -> &'static [RecipeDef] {
+    pub fn recipes(&self) -> &[RecipeId] {
         match self {
-            Work::Make(recipe) => std::slice::from_ref(*recipe),
+            Work::Make(recipe) => std::slice::from_ref(recipe),
             Work::MakeScarcest(recipes) | Work::MakeStaple { recipes, .. } => recipes,
-            Work::Trade { .. } => &[],
+            Work::Trade { .. } | Work::Service { .. } => &[],
         }
     }
 }
 
-pub static JOBS: [JobDef; Job::COUNT] = [
-    JobDef {
-        job: Job::Contadino,
+/// Code of each builtin job in the saves and in `Debug`, by id.
+pub(crate) const BUILTIN_JOB_CODES: [&str; Job::BUILTIN_COUNT] =
+    ["Contadino", "Cuoco", "Operaio", "Mercante"];
+
+/// Names, place and shift of each builtin job, by id.
+pub(crate) static BUILTIN_JOB_INFOS: [JobInfo; Job::BUILTIN_COUNT] = [
+    JobInfo {
+        key: "contadino",
         name: "contadino",
+        plural: "contadini",
         workplace: CarriageKind::Serra,
         station: StationKind::GrowBed,
         shift: (7, 16),
         uses_tool: true,
-        work: Work::MakeStaple {
-            recipes: &[recipes::VERDURA, recipes::COTONE, recipes::ERBE],
-            keep: |p| p.verdura_keep_fill,
-        },
     },
-    JobDef {
-        job: Job::Cuoco,
+    JobInfo {
+        key: "cuoco",
         name: "cuoco",
+        plural: "cuochi",
         workplace: CarriageKind::Mensa,
         station: StationKind::Stove,
         shift: (6, 15),
         uses_tool: false,
-        work: Work::MakeStaple {
-            recipes: &[recipes::RAZIONE, recipes::TE],
-            keep: |p| p.razioni_keep_fill,
-        },
     },
-    JobDef {
-        job: Job::Operaio,
+    JobInfo {
+        key: "operaio",
         name: "operaio",
+        plural: "operai",
         workplace: CarriageKind::Officina,
         station: StationKind::Workbench,
         shift: (8, 17),
         uses_tool: true,
-        work: Work::MakeScarcest(&[
-            recipes::ATTREZZO,
-            recipes::VESTITO,
-            recipes::COPERTA,
-            recipes::LAMPADA,
-            recipes::GIOCATTOLO,
-            recipes::METALLO,
-            recipes::TESSUTO,
-        ]),
     },
-    JobDef {
-        job: Job::Mercante,
+    JobInfo {
+        key: "mercante",
         name: "mercante",
+        plural: "mercanti",
         workplace: CarriageKind::Mercato,
         station: StationKind::Counter,
         shift: (9, 18),
         uses_tool: false,
-        work: Work::Trade {
-            from: CarriageKind::Officina,
-            rate: |p| p.goods_per_trade_minute,
-        },
     },
 ];
 
-impl Job {
-    pub fn def(self) -> &'static JobDef {
-        &JOBS[self.index()]
-    }
-}
+pub static JOBS: [JobDef; Job::BUILTIN_COUNT] = [
+    JobDef {
+        job: Job::Contadino,
+        description: Cow::Borrowed("Coltiva le aiuole di una Serra: verdura, poi cotone ed erbe."),
+        work: Work::MakeStaple {
+            recipes: Cow::Borrowed(&[RecipeId::VERDURA, RecipeId::COTONE, RecipeId::ERBE]),
+            keep: Num::Param(|p| p.verdura_keep_fill),
+        },
+        staff: None,
+        added: None,
+    },
+    JobDef {
+        job: Job::Cuoco,
+        description: Cow::Borrowed("Cucina in Mensa: razioni per tutti, poi il tè."),
+        work: Work::MakeStaple {
+            recipes: Cow::Borrowed(&[RecipeId::RAZIONE, RecipeId::TE]),
+            keep: Num::Param(|p| p.razioni_keep_fill),
+        },
+        staff: None,
+        added: None,
+    },
+    JobDef {
+        job: Job::Operaio,
+        description: Cow::Borrowed(
+            "Lavora al banco di un'Officina: metallo, tessuto e quello che manca di più.",
+        ),
+        work: Work::MakeScarcest(Cow::Borrowed(&[
+            RecipeId::ATTREZZO,
+            RecipeId::VESTITO,
+            RecipeId::COPERTA,
+            RecipeId::LAMPADA,
+            RecipeId::GIOCATTOLO,
+            RecipeId::METALLO,
+            RecipeId::TESSUTO,
+        ])),
+        staff: None,
+        added: None,
+    },
+    JobDef {
+        job: Job::Mercante,
+        description: Cow::Borrowed("Porta attrezzi e vestiti dalle Officine al suo Mercato."),
+        work: Work::Trade {
+            from: CarriageKind::Officina,
+            rate: Num::Param(|p| p.goods_per_trade_minute),
+        },
+        staff: None,
+        added: None,
+    },
+];

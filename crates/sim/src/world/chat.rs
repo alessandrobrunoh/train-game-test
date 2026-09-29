@@ -22,6 +22,7 @@
 
 use super::{GiveError, World};
 use crate::action::Action;
+use crate::catalog::Catalog;
 use crate::chat::{
     Band, CHAT_BONUS_COOLDOWN_MINUTES, CHAT_GREET_AFFINITY, CHAT_LOGS_KEPT, ChatAction, ChatError,
     ChatLine, ChatLog, ChatReply, FAVOUR_AFFINITY, FAVOUR_DAYS, FAVOUR_MAX_TOKEN_SHARE,
@@ -297,7 +298,9 @@ impl World {
         let stranger = tie.is_none();
         let seed = self.chat_seed(id, intent.map_or(99, |k| k as u64));
         // "Quanto costa un vestito?": the item named, if any.
-        let named = typed.as_deref().and_then(mentioned_item);
+        let named = typed
+            .as_deref()
+            .and_then(|t| mentioned_item(&self.catalog, t));
         let effects = match intent {
             Some(intent) => self.chat_effects(i, intent, band, seed, named),
             None => Effects::of(Known::Nothing),
@@ -478,14 +481,11 @@ impl World {
         if n.age < LifeStage::GIOVANE_FROM {
             return None;
         }
-        let owned: Vec<ItemKind> = ItemKind::ALL
-            .into_iter()
-            .filter(|&item| n.wants(item))
-            .collect();
+        let owned: Vec<ItemKind> = self.catalog.kinds().filter(|&item| n.wants(item)).collect();
         let food: Vec<ItemKind> = if n.needs.hunger < FAVOUR_HUNGER {
-            ItemKind::ALL
-                .into_iter()
-                .filter(|&item| item.def().usage == ItemUse::Food && n.accepts_gift(item))
+            self.catalog
+                .kinds()
+                .filter(|&item| item.usage() == ItemUse::Food && n.accepts_gift(item))
                 .collect()
         } else {
             Vec::new()
@@ -494,9 +494,9 @@ impl World {
         if let (Some(job), Some(place)) = (n.job, n.workplace)
             && let Some(c) = self.carriage(place)
         {
-            for recipe in job.def().work.recipes() {
-                for input in recipe.inputs {
-                    let cap = self.params.storage_cap(c.kind, input.item);
+            for &recipe in self.catalog.job(job).work.recipes() {
+                for input in self.catalog.recipe(recipe).inputs.iter() {
+                    let cap = self.catalog.storage_cap(&self.params, c.kind, input.item);
                     if cap > 0.0
                         && c.stock.get(input.item) < FAVOUR_LOW_STOCK * cap
                         && !inputs.contains(&input.item)
@@ -538,7 +538,7 @@ impl World {
             .filter_map(|m| self.price(m, item))
             .min()
             .unwrap_or_else(|| {
-                (item.base_value() as f32 * self.economy.pay_level)
+                (self.catalog.base_value(item) as f32 * self.economy.pay_level)
                     .round()
                     .max(1.0) as u32
             })
@@ -549,14 +549,14 @@ impl World {
     /// what it can of the reward from its own tokens. Returns the tokens paid.
     fn complete_favour(&mut self, i: usize, f: Favour) -> u32 {
         let removed = self.player.inventory.remove(f.item, f.count);
-        let usage = f.item.def().usage;
+        let usage = f.item.usage();
         for _ in 0..removed {
             if usage == ItemUse::Food || usage.is_owned() {
                 self.gift_effect(i, f.item);
             } else if let Some(place) = self.npcs[i].workplace
                 && let Some(c) = self.carriages.get_mut(place.index())
             {
-                let cap = self.params.storage_cap(c.kind, f.item);
+                let cap = self.catalog.storage_cap(&self.params, c.kind, f.item);
                 c.stock.add(f.item, 1.0, cap);
             }
         }
@@ -631,7 +631,7 @@ impl World {
                         .any(|c| c.distance(m) <= KNOWN_MARKET_REACH)
             })
             .collect();
-        let sold: Vec<ItemKind> = ItemKind::ALL.into_iter().filter(|i| i.is_sold()).collect();
+        let sold: Vec<ItemKind> = self.catalog.sold_items();
         if known.is_empty() || sold.is_empty() {
             return Known::NoPrices;
         }
@@ -872,9 +872,9 @@ impl World {
 
 /// The catalog item named in `text` (its name or plural as a word,
 /// accents and case aside), if any: "quanto costa un vestito?" → Vestito.
-pub(crate) fn mentioned_item(text: &str) -> Option<ItemKind> {
+pub(crate) fn mentioned_item(cat: &Catalog, text: &str) -> Option<ItemKind> {
     let words = format!(" {} ", normalize(text));
-    ItemKind::ALL.into_iter().find(|item| {
+    cat.kinds().find(|item| {
         [item.name(), item.plural()]
             .iter()
             .any(|w| words.contains(&format!(" {} ", normalize(w))))

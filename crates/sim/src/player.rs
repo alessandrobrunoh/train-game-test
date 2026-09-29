@@ -353,7 +353,7 @@ impl Default for PlayerCharacter {
 impl PlayerCharacter {
     /// Whether the player can make `recipe`: the basic ones, and those learnt.
     pub fn knows(&self, recipe: &RecipeDef) -> bool {
-        recipe.basic || self.known_recipes.iter().any(|k| k == recipe.key)
+        recipe.basic || self.known_recipes.iter().any(|k| *k == recipe.key)
     }
 
     /// Learns a recipe; false if it was already known.

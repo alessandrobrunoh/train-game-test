@@ -625,10 +625,15 @@ impl World {
     /// are clearly overstaffed. Quotas follow the current population (and,
     /// for the Contadini, their tools and the Serre: see [`World::farm_quota`]).
     fn staff_workforce(&mut self) {
-        let mut quotas = job_quotas(&self.params, &self.carriages, self.npcs.len());
+        let mut quotas = job_quotas(
+            &self.params,
+            &self.catalog,
+            &self.carriages,
+            self.npcs.len(),
+        );
         let farm = Job::Contadino.index();
         quotas[farm] = self.farm_quota(quotas[farm]);
-        let mut counts = [0usize; 4];
+        let mut counts = vec![0usize; self.catalog.job_count()];
         let mut staff = vec![0usize; self.carriages.len()];
         for npc in &self.npcs {
             if let Some(job) = npc.job {
@@ -642,7 +647,7 @@ impl World {
             .carriages
             .iter()
             .any(|c| c.kind == Job::Operaio.workplace_kind());
-        let most_needed = |counts: &[usize; 4]| {
+        let most_needed = |counts: &[usize]| {
             NEEDED_JOBS
                 .into_iter()
                 .find(|j| counts[j.index()] < quotas[j.index()])
@@ -680,15 +685,17 @@ impl World {
                 }
             }
         }
+        // Jobs the Custode added (see `custode.rs`).
+        self.staff_added_jobs(&mut counts, &mut staff);
     }
 
     /// Sets NPC `i`'s job and picks its workplace: the carriage of the right
     /// kind with the fewest workers per station seat (nearest to home on ties).
-    fn assign_job(
+    pub(super) fn assign_job(
         &mut self,
         i: usize,
         job: Option<Job>,
-        counts: &mut [usize; 4],
+        counts: &mut [usize],
         staff: &mut [usize],
     ) {
         let npc = &self.npcs[i];

@@ -2,8 +2,8 @@
 //! con le stesse ricette, comodità nei Dormitori e alla Mensa.
 
 use sim::{
-    CarriageId, CarriageKind, CraftError, INVENTORY_SLOTS, ItemKind, MINUTES_PER_DAY, RECIPES,
-    RecipeDef, SlotInventory, StationKind, UtilityBrain, World,
+    CarriageId, CarriageKind, Catalog, CraftError, INVENTORY_SLOTS, ItemKind, MINUTES_PER_DAY,
+    RECIPES, RecipeDef, RecipeId, SlotInventory, StationKind, UtilityBrain, World,
 };
 
 const DAY: u64 = MINUTES_PER_DAY;
@@ -16,8 +16,12 @@ fn first_of(w: &World, kind: CarriageKind) -> CarriageId {
         .id
 }
 
-fn recipe(key: &str) -> &'static RecipeDef {
-    RecipeDef::by_key(key).expect("recipe")
+fn recipe(key: &str) -> RecipeId {
+    Catalog::builtin().recipe_by_key(key).expect("recipe")
+}
+
+fn def(key: &str) -> RecipeDef {
+    Catalog::builtin().recipe(recipe(key)).clone()
 }
 
 /// Gives the player exactly `items` (whole units).
@@ -51,8 +55,8 @@ fn player_crafts_at_the_right_station_using_exactly_the_inputs() {
         w.player_craft(recipe("lampada"), officina),
         Err(CraftError::Unknown)
     );
-    assert!(w.player.learn(recipe("lampada")));
-    assert!(!w.player.learn(recipe("lampada")));
+    assert!(w.player.learn(&def("lampada")));
+    assert!(!w.player.learn(&def("lampada")));
     assert_eq!(w.player_craft(recipe("lampada"), officina), Ok(1));
     assert_eq!(inv(&w, ItemKind::Metallo), 0);
     assert_eq!(inv(&w, ItemKind::Rottame), 0);
@@ -61,9 +65,9 @@ fn player_crafts_at_the_right_station_using_exactly_the_inputs() {
     // A batch can make more than one unit (Tè: a mazzo di erbe, 3 pots).
     let mensa = first_of(&w, CarriageKind::Mensa);
     w.player.inventory.add(ItemKind::Erbe, 1);
-    let te = recipe("te");
-    assert_eq!(w.player_craft(te, mensa), Ok(te.batch));
-    assert_eq!(inv(&w, ItemKind::Te), te.batch);
+    let batch = def("te").batch;
+    assert_eq!(w.player_craft(recipe("te"), mensa), Ok(batch));
+    assert_eq!(inv(&w, ItemKind::Te), batch);
 }
 
 #[test]
@@ -87,15 +91,12 @@ fn player_craft_fails_without_station_or_inputs_and_changes_nothing() {
         })
     );
     // Missing the second input of a two-input recipe: the first stays too.
-    w.player.learn(recipe("lampada"));
+    w.player.learn(&def("lampada"));
     w.player.inventory.add(ItemKind::Metallo, 1);
     let with_metal = w.player.inventory.clone();
     assert!(matches!(
         w.player_craft(recipe("lampada"), officina),
-        Err(CraftError::Missing {
-            item: ItemKind::Rottame,
-            ..
-        })
+        Err(CraftError::Missing { item, .. }) if item == ItemKind::Rottame
     ));
     assert_eq!(w.player.inventory, with_metal);
     w.player.inventory = kept.clone();
@@ -143,16 +144,16 @@ fn a_full_inventory_blocks_the_result_and_keeps_the_ingredients() {
 #[test]
 fn recipes_available_by_carriage() {
     let w = World::generate(7, 10, 60);
-    let keys = |kind| -> Vec<&str> {
+    let keys = |kind| -> Vec<String> {
         w.recipes_at(first_of(&w, kind))
             .iter()
-            .map(|r| r.key)
+            .map(|&r| w.catalog().recipe(r).key.to_string())
             .collect()
     };
     assert_eq!(keys(CarriageKind::Serra), ["verdura", "cotone", "erbe"]);
     assert_eq!(keys(CarriageKind::Mensa), ["razione", "te"]);
     let officina = keys(CarriageKind::Officina);
-    assert!(officina.contains(&"tessuto") && officina.contains(&"giocattolo"));
+    assert!(officina.iter().any(|k| k == "tessuto") && officina.iter().any(|k| k == "giocattolo"));
     assert!(keys(CarriageKind::Dormitorio).is_empty());
     assert!(keys(CarriageKind::Mercato).is_empty());
     // Every recipe can be made somewhere on the default train.
@@ -160,7 +161,7 @@ fn recipes_available_by_carriage() {
         assert!(
             w.carriages
                 .iter()
-                .any(|c| w.recipes_at(c.id).iter().any(|x| x.key == r.key)),
+                .any(|c| w.recipes_at(c.id).contains(&recipe(&r.key))),
             "{} can't be made",
             r.key
         );
@@ -188,7 +189,7 @@ fn workers_make_every_item_and_the_dormitori_get_comfort() {
     let te_cap: f32 = w
         .carriages
         .iter()
-        .map(|c| w.params.storage_cap(c.kind, ItemKind::Te))
+        .map(|c| w.storage_cap(c.kind, ItemKind::Te))
         .sum();
     assert!(made.made(ItemKind::Te) > 5.0 * f64::from(te_cap));
     for c in w

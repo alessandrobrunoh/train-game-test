@@ -245,7 +245,7 @@ impl UtilityBrain {
         if !world.npc_wants(npc, item) {
             return -1.0;
         }
-        let base = match item.def().usage {
+        let base = match item.usage() {
             ItemUse::Tool => w.buy_tool,
             ItemUse::Clothes => w.buy_clothes,
             ItemUse::Material => w.buy_comfort,
@@ -254,7 +254,7 @@ impl UtilityBrain {
                 return w.buy_food * w.eat * u * u;
             }
         };
-        let comfortable = w.comfortable_savings * item.base_value() as f32;
+        let comfortable = w.comfortable_savings * world.catalog().base_value(item) as f32;
         let wealth = if comfortable > 0.0 {
             (npc.inventory.tokens as f32 / comfortable).min(1.0)
         } else {
@@ -313,9 +313,10 @@ impl UtilityBrain {
                 } else {
                     -1.0
                 };
-                ItemKind::ALL
-                    .into_iter()
-                    .filter(|item| item.def().usage != ItemUse::Food)
+                world
+                    .catalog()
+                    .kinds()
+                    .filter(|item| item.usage() != ItemUse::Food)
                     .map(|item| self.buy_score(world, npc, item))
                     .fold(sell, f32::max)
             }

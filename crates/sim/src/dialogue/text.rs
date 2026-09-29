@@ -388,7 +388,7 @@ fn thread(s: &Script, rng: &mut Mix) -> Thread {
             (None, Some(_)) => GOSSIP_SPITE,
         },
         Topic::Complaint => match s.news {
-            Some(News::Shortage(ItemKind::Razione)) => COMPLAINT_FOOD,
+            Some(News::Shortage(item)) if item == ItemKind::Razione => COMPLAINT_FOOD,
             Some(News::BirthDenied) => COMPLAINT_BIRTH,
             Some(News::Austerity | News::PayCut) => COMPLAINT_MONEY,
             _ => rng.one_of(&[
@@ -416,15 +416,16 @@ fn small_talk(s: &Script) -> Thread {
 }
 
 fn work(job: Job, good: bool) -> Thread {
-    let open = match (job, good) {
-        (Job::Contadino, true) => WORK_GOOD_CONTADINO,
-        (Job::Contadino, false) => WORK_BAD_CONTADINO,
-        (Job::Cuoco, true) => WORK_GOOD_CUOCO,
-        (Job::Cuoco, false) => WORK_BAD_CUOCO,
-        (Job::Operaio, true) => WORK_GOOD_OPERAIO,
-        (Job::Operaio, false) => WORK_BAD_OPERAIO,
-        (Job::Mercante, true) => WORK_GOOD_MERCANTE,
-        (Job::Mercante, false) => WORK_BAD_MERCANTE,
+    // New jobs talk like the Operai: work at a bench, whatever it is.
+    let open = match (job.code(), good) {
+        ("Contadino", true) => WORK_GOOD_CONTADINO,
+        ("Contadino", false) => WORK_BAD_CONTADINO,
+        ("Cuoco", true) => WORK_GOOD_CUOCO,
+        ("Cuoco", false) => WORK_BAD_CUOCO,
+        ("Mercante", true) => WORK_GOOD_MERCANTE,
+        ("Mercante", false) => WORK_BAD_MERCANTE,
+        (_, true) => WORK_GOOD_OPERAIO,
+        (_, false) => WORK_BAD_OPERAIO,
     };
     if good {
         Thread {
@@ -523,7 +524,7 @@ fn news_open(news: News, about: bool) -> Pool {
         News::Protest(Grievance::FoodShortage) => NEWS_PROTEST_FOOD,
         News::Concession(Grievance::BirthDenied) => NEWS_CONCESSION_BIRTHS,
         News::Concession(Grievance::FoodShortage) => NEWS_CONCESSION_FOOD,
-        News::Shortage(ItemKind::Razione) => NEWS_SHORTAGE_FOOD,
+        News::Shortage(item) if item == ItemKind::Razione => NEWS_SHORTAGE_FOOD,
         News::Shortage(_) => NEWS_SHORTAGE,
         News::Restocked(_) => NEWS_RESTOCKED,
         News::Austerity => NEWS_AUSTERITY,
@@ -563,7 +564,7 @@ fn news_specific(news: News) -> (Option<Pool>, Pool) {
         News::Protest(Grievance::FoodShortage) => (None, PROTEST_FOOD_FOLLOW),
         News::Concession(Grievance::BirthDenied) => (None, CONCESSION_BIRTHS_FOLLOW),
         News::Concession(Grievance::FoodShortage) => (None, CONCESSION_FOOD_FOLLOW),
-        News::Shortage(ItemKind::Razione) => (None, SHORTAGE_FOOD_FOLLOW),
+        News::Shortage(item) if item == ItemKind::Razione => (None, SHORTAGE_FOOD_FOLLOW),
         News::Shortage(_) => (None, SHORTAGE_FOLLOW),
         News::Restocked(_) => (None, RESTOCKED_FOLLOW),
         News::BirthDenied => (None, BIRTH_DENIED_FOLLOW),
@@ -972,21 +973,24 @@ fn pick(
 
 /// "in serra", "in cucina"...: where someone with `job` works.
 pub(super) fn workplace(job: Option<Job>) -> &'static str {
-    match job {
-        Some(Job::Contadino) => "in serra",
-        Some(Job::Cuoco) => "in cucina",
-        Some(Job::Operaio) => "in officina",
-        Some(Job::Mercante) => "al banco",
+    match job.map(Job::code) {
+        Some("Contadino") => "in serra",
+        Some("Cuoco") => "in cucina",
+        Some("Operaio") => "in officina",
+        Some("Mercante") => "al banco",
+        Some(_) => "al lavoro",
         None => "in giro",
     }
 }
 
 pub(super) fn job_word(job: Option<Job>, sex: Sex) -> &'static str {
     match job {
-        Some(Job::Contadino) => sex.pick("contadina", "contadino"),
-        Some(Job::Cuoco) => sex.pick("cuoca", "cuoco"),
-        Some(Job::Operaio) => sex.pick("operaia", "operaio"),
-        Some(Job::Mercante) => "mercante",
+        Some(j) => match j.code() {
+            "Contadino" => sex.pick("contadina", "contadino"),
+            "Cuoco" => sex.pick("cuoca", "cuoco"),
+            "Operaio" => sex.pick("operaia", "operaio"),
+            _ => j.name(),
+        },
         None => sex.pick("disoccupata", "disoccupato"),
     }
 }
@@ -997,7 +1001,9 @@ fn news_item(news: Option<News>) -> (&'static str, bool) {
     match news {
         Some(News::Shortage(item) | News::Restocked(item)) => (
             item.plural(),
-            matches!(item, ItemKind::Verdura | ItemKind::Razione),
+            item == ItemKind::Verdura
+                || item == ItemKind::Razione
+                || (!item.is_builtin() && item.plural().ends_with('e')),
         ),
         _ => ("scorte", true),
     }

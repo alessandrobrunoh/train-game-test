@@ -580,7 +580,7 @@ fn fifty_years_stay_balanced_with_turnover() {
         for _ in 0..w.params.days_per_year {
             w.run(&mut brain, 6 * 60);
             for &m in &markets {
-                for item in ItemKind::SOLD {
+                for item in w.catalog().sold_items() {
                     shelves += 1;
                     empty_shelves += usize::from(w.carriages[m.index()].stock.count(item) == 0);
                 }

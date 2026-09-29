@@ -93,8 +93,8 @@ fn main() {
                 .count();
         }
         let s = Stats::of(&world);
-        let mut bought = [0usize; ItemKind::COUNT];
-        let mut broke = [0usize; ItemKind::COUNT];
+        let mut bought = vec![0usize; world.catalog().item_count()];
+        let mut broke = vec![0usize; world.catalog().item_count()];
         // Il registro tiene solo gli ultimi `max_events`: si leggono i nuovi dalla coda.
         let new_events = (world.events_total() - events_before) as usize;
         for e in &world.events[world.events.len().saturating_sub(new_events)..] {
@@ -196,13 +196,14 @@ fn print_items(world: &World, days: u64) {
     println!("\nOggetti: scorte finali (in carrozza), prodotti al giorno dagli NPC, valore base");
     let stock = world.total_stock();
     let c = &world.economy.counters;
-    for item in ItemKind::ALL {
+    for def in world.catalog().items() {
+        let item = def.kind;
         println!(
             "  {:<11} {:6.0}   {:6.1}/g   {:3} gettoni",
             item.name(),
             stock.get(item),
             c.made(item) / days.max(1) as f64,
-            item.base_value(),
+            def.base_value,
         );
     }
 }

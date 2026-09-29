@@ -58,8 +58,8 @@ pub(super) fn need_factors(p: &SimParams, levels: &[Comfort], npc: &Npc) -> (f32
 
 /// Units of a Dormitorio good wanted for `residents` people of whom
 /// `children` are children.
-fn target(p: &SimParams, item: ItemKind, residents: usize, children: usize) -> f32 {
-    match item.amenity() {
+fn target(p: &SimParams, amenity: Option<Amenity>, residents: usize, children: usize) -> f32 {
+    match amenity {
         Some(Amenity::Bedding) => residents as f32 * p.coperte_per_resident,
         Some(Amenity::Light) => residents as f32 * p.lampade_per_resident,
         Some(Amenity::Toys) => children as f32 * p.giocattoli_per_child,
@@ -68,8 +68,8 @@ fn target(p: &SimParams, item: ItemKind, residents: usize, children: usize) -> f
 }
 
 /// Share of a Dormitorio good worn out every midnight.
-fn wear(p: &SimParams, item: ItemKind) -> f32 {
-    match item.amenity() {
+fn wear(p: &SimParams, amenity: Option<Amenity>) -> f32 {
+    match amenity {
         Some(Amenity::Bedding) => p.coperta_wear_per_day,
         Some(Amenity::Light) => p.lampada_wear_per_day,
         Some(Amenity::Toys) => p.giocattolo_wear_per_day,
@@ -112,7 +112,10 @@ impl World {
                     return Comfort::default();
                 }
                 let (r, k) = (residents[c.id.index()], children[c.id.index()]);
-                let level = |item| coverage(c.stock.get(item), target(p, item, r, k));
+                let level = |item: ItemKind| {
+                    let amenity = self.catalog.item(item).amenity;
+                    coverage(c.stock.get(item), target(p, amenity, r, k))
+                };
                 Comfort {
                     bedding: level(ItemKind::Coperta),
                     light: level(ItemKind::Lampada),
@@ -148,12 +151,13 @@ impl World {
         let Some(c) = self.carriage(carriage) else {
             return 0.0;
         };
-        if item.amenity().is_none_or(|a| a.place() != c.kind) || c.kind != CarriageKind::Dormitorio
-        {
+        let amenity = self.catalog.get_item(item).and_then(|d| d.amenity);
+        if amenity.is_none_or(|a| a.place() != c.kind) || c.kind != CarriageKind::Dormitorio {
             return 0.0;
         }
         let (r, k) = (residents[carriage.index()], children[carriage.index()]);
-        target(&self.params, item, r, k).min(self.params.storage_cap(c.kind, item))
+        let cap = self.catalog.storage_cap(&self.params, c.kind, item);
+        target(&self.params, amenity, r, k).min(cap)
     }
 
     /// NPC `i` just sat down to eat: a cup of Tè if its Mensa has some.
@@ -180,7 +184,8 @@ impl World {
     pub(super) fn furnish_dorms(&mut self) {
         let (residents, children) = self.households();
         for item in DORM_GOODS {
-            let keep = 1.0 - wear(&self.params, item);
+            let amenity = self.catalog.item(item).amenity;
+            let keep = 1.0 - wear(&self.params, amenity);
             let dorms: Vec<usize> = self
                 .carriages
                 .iter()
@@ -192,8 +197,8 @@ impl World {
                 let c = &mut self.carriages[d];
                 let worn = c.stock.get(item) * keep;
                 c.stock.set(item, worn);
-                let cap = p.storage_cap(c.kind, item);
-                let wanted = target(p, item, residents[d], children[d]).min(cap);
+                let cap = self.catalog.storage_cap(p, c.kind, item);
+                let wanted = target(p, amenity, residents[d], children[d]).min(cap);
                 let mut missing = (wanted - worn).floor();
                 if missing < 1.0 {
                     continue;

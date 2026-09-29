@@ -23,8 +23,8 @@
 //! - Comfort: Cuochi brew Tè from Erbe, drunk with the meals; every
 //!   midnight the Officine hand out Coperte, Lampade and Giocattoli to the
 //!   Dormitori, where they help sleep and keep residents company.
-//! - Recipes ([`defs::RECIPES`]) are shared by NPC workers and the player
-//!   ([`World::player_craft`]).
+//! - Recipes (in the world's catalog, [`World::catalog`]) are shared by NPC
+//!   workers and the player ([`World::player_craft`]).
 //! - Money is a closed loop ([`Economy`]): wages and stipends are paid every
 //!   midnight from the administration's treasury; purchases (the player's
 //!   too), fines, a tax on large savings and estates without heirs go back
@@ -34,7 +34,11 @@
 //!   Vestiti slow tiredness and wear daily. Broken ones are bought again.
 //!
 //! Per-kind properties (items, recipes, carriages, stations, jobs) are data
-//! tables in [`defs`].
+//! tables in [`defs`]. Items, recipes and jobs grow during a game: every
+//! world owns a [`Catalog`] seeded with the builtin rows, and the Custode
+//! ([`custode`], [`World::review`], [`World::apply`], [`World::schedule`])
+//! adds what the Narratore proposes and makes sense, recording every
+//! decision in the world ([`World::decisions`]) so a save replays the game.
 //!
 //! Every storage is capped per carriage and item; Verdura and Razioni spoil a
 //! little every midnight.
@@ -75,13 +79,16 @@
 pub mod action;
 pub mod brain;
 pub mod carriage;
+pub mod catalog;
 pub mod chat;
+pub mod custode;
 pub mod defs;
 pub mod deliberation;
 pub mod dialogue;
 pub mod event;
 pub mod ids;
 pub mod item;
+pub mod job;
 mod names;
 pub mod npc;
 pub mod params;
@@ -94,12 +101,15 @@ pub mod world;
 pub use action::{Action, ActionKind, ActionOption, DecisionRequest};
 pub use brain::{Brain, RandomBrain, THINK, UtilityBrain, UtilityWeights};
 pub use carriage::{Carriage, CarriageKind, Owner, Station, StationKind};
+pub use catalog::Catalog;
 pub use chat::{
     Band, CHAT_MEMORY_LINES, ChatAction, ChatError, ChatLine, ChatLog, ChatReply, Favour, Intent,
     IntentReader, KeywordReader, Speaker,
 };
+pub use custode::{Applied, Plan, Rejection};
 pub use defs::{
-    Amenity, CarriageDef, ItemCategory, ItemDef, ItemUse, JobDef, RECIPES, RecipeDef, Work,
+    Amenity, CarriageDef, Consume, ItemCategory, ItemDef, ItemUse, JobDef, Num, RECIPES, RecipeDef,
+    RecipeId, Work,
 };
 pub use deliberation::{
     Choice, Deliberation, DeliberationAnswer, DeliberationCounters, DeliberationId,
@@ -110,7 +120,8 @@ pub use dialogue::{
 };
 pub use event::{BirthDenial, DeathCause, Event, EventKind};
 pub use ids::{CarriageId, NpcId, StationId};
-pub use item::{ItemKind, Stock};
+pub use item::{ItemInfo, ItemInfoData, ItemKind, Stock};
+pub use job::{JobInfo, JobInfoData};
 pub use npc::{
     Inventory, Job, LifeStage, MAX_RELATIONS, NPC_ITEM_SLOTS, Needs, Npc, Relation, RelationKind,
     Sex, Traits,
@@ -125,7 +136,8 @@ pub use player::{
 pub use stats::Stats;
 pub use time::{GameTime, MINUTES_PER_DAY, MINUTES_PER_HOUR};
 pub use world::{
-    BuyError, Comfort, CraftError, Economy, EconomyCounters, GiveError, LifeCounters, Tally, World,
+    BuyError, Comfort, CraftError, Economy, EconomyCounters, GiveError, LifeCounters, PerKind,
+    Tally, World,
 };
 pub use world::{
     Buyer, Listing, ListingId, MarketOffer, Offer, OfferSource, STALL_LOG_KEPT, Seller, StallError,

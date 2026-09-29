@@ -368,23 +368,10 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
     }
 }
 
-/// Stored name of an item (the variant name).
+/// Stored name of an item (the builtin variant name, or the key of an item
+/// the Custode added).
 pub(crate) fn item_name(item: ItemKind) -> &'static str {
-    match item {
-        ItemKind::Verdura => "Verdura",
-        ItemKind::Razione => "Razione",
-        ItemKind::Rottame => "Rottame",
-        ItemKind::Attrezzo => "Attrezzo",
-        ItemKind::Vestito => "Vestito",
-        ItemKind::Cotone => "Cotone",
-        ItemKind::Erbe => "Erbe",
-        ItemKind::Metallo => "Metallo",
-        ItemKind::Tessuto => "Tessuto",
-        ItemKind::Te => "Te",
-        ItemKind::Coperta => "Coperta",
-        ItemKind::Lampada => "Lampada",
-        ItemKind::Giocattolo => "Giocattolo",
-    }
+    item.code()
 }
 
 pub(crate) fn cause_name(cause: DeathCause) -> &'static str {

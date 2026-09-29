@@ -129,7 +129,7 @@ fn money_is_conserved_for_30_days() {
     let market = first_of(&w, CarriageKind::Mercato);
     let serra = first_of(&w, CarriageKind::Serra);
     let officina = first_of(&w, CarriageKind::Officina);
-    let coperta = sim::RecipeDef::by_key("coperta").unwrap();
+    let coperta = w.catalog().recipe_by_key("coperta").unwrap();
     w.player.tokens = 1000;
     let expected = w.money_supply();
     let (mut crafted, mut sold, mut given) = (0, 0, 0);
@@ -285,7 +285,7 @@ fn pay_level_follows_the_treasury_within_bounds() {
     };
     let (_, distance) = w.nearest_producer(market, ItemKind::Attrezzo).unwrap();
     let transport = (w.params.transport_per_carriage * distance as f32).round() as u32;
-    let base = ItemKind::Attrezzo.base_value() + transport;
+    let base = w.catalog().base_value(ItemKind::Attrezzo) + transport;
     assert_eq!(full_price(&mut w), base);
     // A flush treasury: pay (and prices) go up a step a day, up to the cap.
     let extra = 10 * w.economy.treasury;

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
 use crate::brain::{Brain, THINK};
 use crate::carriage::{Carriage, CarriageKind, Owner, StationKind};
-use crate::defs::{ItemUse, RecipeDef, StationCount};
+use crate::catalog::Catalog;
+use crate::defs::{ItemUse, StationCount};
 use crate::deliberation::{
     Deliberation, DeliberationCounters, Gathering, Grievance, ResolvedDeliberation,
 };
@@ -29,6 +30,7 @@ mod chat;
 mod comfort;
 mod conversation;
 mod craft;
+mod custode;
 mod deliberate;
 mod economy;
 mod life;
@@ -40,7 +42,7 @@ mod stalls;
 pub use chat::KNOWN_MARKET_REACH;
 pub use comfort::Comfort;
 pub use craft::CraftError;
-pub use economy::{Economy, EconomyCounters, Tally};
+pub use economy::{Economy, EconomyCounters, PerKind, Tally};
 pub use life::LifeCounters;
 pub use market::{Market, MarketQuote, PriceSample, SellError, TREND_DAYS, Trend, mercato_price};
 pub use mensa::{MensaOccupancy, MensaRole};
@@ -99,6 +101,13 @@ const LAYOUT: [CarriageKind; 10] = [
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct World {
     pub clock: GameTime,
+    /// Items, recipes and jobs of this world (see [`World::catalog`]).
+    #[serde(default)]
+    catalog: Catalog,
+    /// Proposals waiting for their minute, the decisions taken, the derived
+    /// statistics (see [`crate::custode`]).
+    #[serde(default, with = "crate::custode::json_text")]
+    custode: crate::custode::CustodeState,
     pub params: SimParams,
     /// Ordered head to tail; `carriages[i].id == CarriageId(i)`.
     pub carriages: Vec<Carriage>,
@@ -121,7 +130,7 @@ pub struct World {
     #[serde(default)]
     last_birth_denied_log: Option<GameTime>,
     /// Edge-trigger for Shortage / Restocked events, indexed by item.
-    shortages: [bool; ItemKind::COUNT],
+    shortages: Vec<bool>,
     rng: ChaCha8Rng,
     /// Randomness of the stalls and of the NPCs' belongings (see
     /// `stalls.rs`), a stream of its own so that it leaves the rest alone.
@@ -212,6 +221,7 @@ impl World {
         assert!(n_carriages <= u16::MAX as usize);
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let clock = GameTime::from_dhm(1, 6, 0);
+        let catalog = Catalog::builtin();
 
         // --- Carriages (stations are added once we know who uses them) ---
         let mut per_kind = [0usize; CarriageKind::COUNT];
@@ -385,7 +395,7 @@ impl World {
         let workers: Vec<usize> = (0..n_npcs)
             .filter(|&i| LifeStage::of_age(ages[i]).works())
             .collect();
-        let quotas = job_quotas(&params, &carriages, n_npcs);
+        let quotas = job_quotas(&params, &catalog, &carriages, n_npcs);
         let mut jobs: Vec<Option<Job>> = Vec::with_capacity(workers.len());
         for job in NEEDED_JOBS {
             jobs.extend(std::iter::repeat_n(Some(job), quotas[job.index()]));
@@ -404,7 +414,7 @@ impl World {
         // equal contiguous groups over that job's carriages (head to tail).
         // Loads stay balanced and people tend to work near where they live.
         let mut workplace_of = vec![None; n_npcs];
-        for job in Job::ALL {
+        for job in catalog.job_kinds() {
             let places = of_kind(job.workplace_kind());
             let mut staff: Vec<usize> = (0..n_npcs).filter(|&i| job_of[i] == Some(job)).collect();
             staff.sort_by_key(|&i| (home_of[i], i));
@@ -535,15 +545,18 @@ impl World {
         };
         let total_beds: usize = dorm_residents.iter().map(|&r| beds_of(r)).sum();
         let peak_population = max_population_for(&params, total_beds).max(n_npcs);
-        let peak = job_quotas(&params, &carriages, peak_population);
-        let per_place: [usize; Job::COUNT] = Job::ALL.map(|job| {
-            let places = carriages
-                .iter()
-                .filter(|c| c.kind == job.workplace_kind())
-                .count()
-                .max(1);
-            peak[job.index()].div_ceil(places)
-        });
+        let peak = job_quotas(&params, &catalog, &carriages, peak_population);
+        let per_place: Vec<usize> = catalog
+            .job_kinds()
+            .map(|job| {
+                let places = carriages
+                    .iter()
+                    .filter(|c| c.kind == job.workplace_kind())
+                    .count()
+                    .max(1);
+                peak[job.index()].div_ceil(places)
+            })
+            .collect();
         let mut kind_count = [0usize; CarriageKind::COUNT];
         for c in &carriages {
             kind_count[c.kind.index()] += 1;
@@ -588,9 +601,9 @@ impl World {
                 c.stock.set(item, amount);
             }
             // Storage declared with the items (see `defs::Store`).
-            for item in ItemKind::ALL {
-                for store in item.def().stores.iter().filter(|s| s.carriage == c.kind) {
-                    c.stock.set(item, store.start);
+            for def in catalog.items() {
+                for store in def.stores.iter().filter(|s| s.carriage == c.kind) {
+                    c.stock.set(def.kind, store.start);
                 }
             }
         }
@@ -613,10 +626,12 @@ impl World {
         };
 
         let economy = Economy::start(&params, &npcs);
-        let specialties = market::assign_specialties(seed, &carriages, &params);
-        let market = Market::new(&carriages, specialties);
+        let specialties = market::assign_specialties(seed, &catalog, &carriages, &params);
+        let market = Market::new(&carriages, specialties, &catalog);
         let mut world = World {
             clock,
+            catalog,
+            custode: Default::default(),
             params,
             carriages,
             npcs,
@@ -626,7 +641,7 @@ impl World {
             founders: n_npcs as u32,
             life: LifeCounters::default(),
             last_birth_denied_log: None,
-            shortages: [false; ItemKind::COUNT],
+            shortages: vec![false; ItemKind::BUILTIN_COUNT],
             rng,
             trade_rng: ChaCha8Rng::seed_from_u64(seed ^ TRADE_SEED),
             deliberations: Vec::new(),
@@ -658,6 +673,17 @@ impl World {
     // ------------------------------------------------------------------
     // Queries
     // ------------------------------------------------------------------
+
+    /// Items, recipes and jobs of this world: the builtin ones and what the
+    /// Custode added (see [`crate::custode`]).
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Most of `item` a carriage of `kind` stores (see [`Catalog::storage_cap`]).
+    pub fn storage_cap(&self, kind: CarriageKind, item: ItemKind) -> f32 {
+        self.catalog.storage_cap(&self.params, kind, item)
+    }
 
     pub fn npc(&self, id: NpcId) -> Option<&Npc> {
         self.npc_index(id).map(|i| &self.npcs[i])
@@ -824,6 +850,7 @@ impl World {
     pub fn price(&self, carriage: CarriageId, item: ItemKind) -> Option<u32> {
         price_at(
             &self.params,
+            &self.catalog,
             self.economy.pay_level,
             &self.market,
             self.carriage(carriage)?,
@@ -906,6 +933,8 @@ impl World {
     ///    once if [`Brain::answers_deliberations`] is false).
     pub fn tick(&mut self, brain: &mut dyn Brain) {
         let now = self.clock;
+        // Proposals whose minute came, statistics on the hour (see `custode.rs`).
+        self.custode_tick();
 
         // Conversations that are over end for both (before their actions do).
         self.end_conversations();
@@ -1071,22 +1100,18 @@ impl World {
                 && c.has_free(StationKind::Table)
         };
         let can_sleep_at = |c: &Carriage| c.has_free(StationKind::Bed);
-        let (level, market) = (self.economy.pay_level, &self.market);
+        let (level, market, cat) = (self.economy.pay_level, &self.market, &self.catalog);
         // What the NPC would buy (catalog-driven, see `stalls.rs`); food is
         // only bought where it already is, nobody walks to a stall to eat.
-        let mut wanted = [None; ItemKind::COUNT];
-        let mut n_wanted = 0;
-        for item in ItemKind::ALL {
-            if stalls::wants_item(p, level, market, npc, item) {
-                wanted[n_wanted] = Some(item);
-                n_wanted += 1;
-            }
-        }
-        let wanted = &wanted[..n_wanted];
+        let wanted: Vec<ItemKind> = cat
+            .kinds()
+            .filter(|&item| stalls::wants_item(p, cat, level, market, npc, item))
+            .collect();
         let wants_something = !wanted.is_empty();
         let can_shop_at = |c: &Carriage| {
-            wanted.iter().flatten().any(|&item| {
-                item.def().usage != ItemUse::Food && can_buy_at(p, level, market, now, npc, c, item)
+            wanted.iter().any(|&item| {
+                item.usage() != ItemUse::Food
+                    && can_buy_at(p, cat, level, market, now, npc, c, item)
             })
         };
 
@@ -1140,8 +1165,8 @@ impl World {
             push(Action::Work(station), minutes, None);
         }
 
-        for &item in wanted.iter().flatten() {
-            if can_buy_at(p, level, market, now, npc, carriage, item) {
+        for &item in &wanted {
+            if can_buy_at(p, cat, level, market, now, npc, carriage, item) {
                 push(Action::Buy(item), p.buy_minutes, None);
             }
         }
@@ -1323,8 +1348,15 @@ impl World {
             }
             Action::Buy(item) => {
                 let level = self.economy.pay_level;
-                let offer =
-                    stalls::best_offer(&self.params, level, &self.market, here, item, npc.id);
+                let offer = stalls::best_offer(
+                    &self.params,
+                    &self.catalog,
+                    level,
+                    &self.market,
+                    here,
+                    item,
+                    npc.id,
+                );
                 let price = offer.map_or(0, |(price, _)| price);
                 let from = match offer {
                     Some((_, stalls::Source::Listing(k))) => {
@@ -1344,19 +1376,12 @@ impl World {
             Action::Travel { to } => {
                 let dest = self.carriage(to);
                 let shopping = dest.and_then(|c| {
-                    ItemKind::ALL.into_iter().find(|&item| {
+                    self.catalog.kinds().find(|&item| {
                         let level = self.economy.pay_level;
-                        item.def().usage != ItemUse::Food
-                            && stalls::wants_item(&self.params, level, &self.market, npc, item)
-                            && can_buy_at(
-                                &self.params,
-                                level,
-                                &self.market,
-                                self.clock,
-                                npc,
-                                c,
-                                item,
-                            )
+                        let (p, cat) = (&self.params, &self.catalog);
+                        item.usage() != ItemUse::Food
+                            && stalls::wants_item(p, cat, level, &self.market, npc, item)
+                            && can_buy_at(p, cat, level, &self.market, self.clock, npc, c, item)
                     })
                 });
                 let selling = dest.is_some_and(|c| c.kind == CarriageKind::Mercato)
@@ -1562,6 +1587,7 @@ impl World {
                 let level = self.economy.pay_level;
                 can_buy_at(
                     &self.params,
+                    &self.catalog,
                     level,
                     &self.market,
                     self.clock,
@@ -1653,7 +1679,9 @@ impl World {
             return;
         }
         let each = p.rottame_per_carriage_hour * self.carriages.len() as f32 / officine as f32;
-        let cap = p.storage_cap(CarriageKind::Officina, ItemKind::Rottame);
+        let cap = self
+            .catalog
+            .storage_cap(p, CarriageKind::Officina, ItemKind::Rottame);
         let mut lost = 0.0;
         for c in self
             .carriages
@@ -1667,8 +1695,12 @@ impl World {
 
     /// Midnight: perishable items spoil.
     fn spoil(&mut self) {
-        for item in ItemKind::ALL {
-            let keep = 1.0 - self.params.spoilage_per_day(item).clamp(0.0, 1.0);
+        for item in self.catalog.clone().kinds() {
+            let keep = 1.0
+                - self
+                    .catalog
+                    .spoilage_per_day(&self.params, item)
+                    .clamp(0.0, 1.0);
             if keep < 1.0 {
                 let mut spoiled = 0.0;
                 for c in &mut self.carriages {
@@ -1677,10 +1709,10 @@ impl World {
                     spoiled += amount - c.stock.get(item);
                 }
                 let c = &mut self.economy.counters;
-                match item {
-                    ItemKind::Verdura => c.verdura_spoiled.add(spoiled),
-                    ItemKind::Razione => c.razioni_spoiled.add(spoiled),
-                    _ => {}
+                if item == ItemKind::Verdura {
+                    c.verdura_spoiled.add(spoiled);
+                } else if item == ItemKind::Razione {
+                    c.razioni_spoiled.add(spoiled);
                 }
             }
         }
@@ -1696,8 +1728,11 @@ impl World {
 
     fn check_shortages(&mut self) {
         let mut famine = false;
-        for item in ItemKind::SHORTAGE_REPORTED {
+        for item in self.catalog.shortage_reported() {
             let empty = self.available(item) < 1.0;
+            if self.shortages.len() <= item.index() {
+                self.shortages.resize(item.index() + 1, false);
+            }
             let flag = &mut self.shortages[item.index()];
             if empty != *flag {
                 *flag = empty;
@@ -1776,29 +1811,33 @@ impl fmt::Display for GiveError {
 /// empty (see [`mercato_price`]).
 fn price_at(
     p: &SimParams,
+    cat: &Catalog,
     level: f32,
     market: &Market,
     c: &Carriage,
     item: ItemKind,
 ) -> Option<u32> {
-    if c.kind != CarriageKind::Mercato || !item.is_sold() {
+    let def = cat.get_item(item)?;
+    if c.kind != CarriageKind::Mercato || !def.sold {
         return None;
     }
-    let cap = p.storage_cap(c.kind, item);
+    let cap = cat.storage_cap(p, c.kind, item);
     let fill = if cap > 0.0 {
         (c.stock.get(item) / cap).clamp(0.0, 1.0)
     } else {
         0.0
     };
     let distance = market.distance(c.id, item);
-    Some(mercato_price(p, level, item.base_value(), distance, fill))
+    Some(mercato_price(p, level, def.base_value, distance, fill))
 }
 
 /// Whether `npc` can buy `item` at `c` at time `now` (pay level `level`): a
 /// Mercato with a whole unit on its shelf or stalls, the NPC wants it and can
 /// pay the cheapest offer (the Mercati close at night).
+#[allow(clippy::too_many_arguments)]
 fn can_buy_at(
     p: &SimParams,
+    cat: &Catalog,
     level: f32,
     market: &Market,
     now: GameTime,
@@ -1807,8 +1846,8 @@ fn can_buy_at(
     item: ItemKind,
 ) -> bool {
     !p.is_night(now.hour())
-        && stalls::wants_item(p, level, market, npc, item)
-        && stalls::best_offer(p, level, market, c, item, npc.id)
+        && stalls::wants_item(p, cat, level, market, npc, item)
+        && stalls::best_offer(p, cat, level, market, c, item, npc.id)
             .is_some_and(|(price, _)| price <= npc.inventory.tokens)
 }
 
@@ -1831,8 +1870,13 @@ fn has_kind(carriages: &[Carriage], kind: CarriageKind) -> bool {
 /// has a tool), one Mercante per [`NPCS_PER_MERCANTE`] (at least one per
 /// Mercato). 0 for jobs whose workplace the train lacks; Operaio is not
 /// sized (it takes everyone else).
-fn job_quotas(p: &SimParams, carriages: &[Carriage], population: usize) -> [usize; Job::COUNT] {
-    let mut quotas = [0; Job::COUNT];
+fn job_quotas(
+    p: &SimParams,
+    cat: &Catalog,
+    carriages: &[Carriage],
+    population: usize,
+) -> Vec<usize> {
+    let mut quotas = vec![0; cat.job_count()];
     let daily_razioni = population as f32 * MEALS_PER_DAY * p.razioni_per_meal * FOOD_SAFETY_MARGIN;
     let quota = |amount: f32, rate: f32| {
         let needed = (amount / (EXPECTED_WORK_MINUTES_PER_DAY * rate)).ceil();
@@ -1844,9 +1888,10 @@ fn job_quotas(p: &SimParams, carriages: &[Carriage], population: usize) -> [usiz
     };
     let available = |job: Job| has_kind(carriages, job.workplace_kind());
     // Side products: Tè for the meals (from Erbe), Cotone for the Vestiti.
-    let rate = |key: &str| RecipeDef::by_key(key).map_or(0.0, |r| r.rate(p));
+    let recipe = |key: &str| cat.recipe_by_key(key).map(|r| cat.recipe(r));
+    let rate = |key: &str| recipe(key).map_or(0.0, |r| r.rate(p));
     let daily_te = population as f32 * MEALS_PER_DAY * p.te_per_meal;
-    let erbe_per_te = RecipeDef::by_key("te")
+    let erbe_per_te = recipe("te")
         .and_then(|r| r.inputs.first().map(|i| r.per_output(i, p)))
         .unwrap_or(0.0);
     let daily_cotone = population as f32 * p.clothes_wear_per_day * p.tessuto_per_vestito;

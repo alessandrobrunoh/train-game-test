@@ -213,7 +213,7 @@ impl World {
         }
         let name = self.npcs[i].name.clone();
         self.player.inventory.remove(item, 1);
-        let gain = if item.def().usage.is_owned() {
+        let gain = if item.usage().is_owned() {
             2.0 * GIFT_AFFINITY
         } else {
             GIFT_AFFINITY
@@ -226,25 +226,26 @@ impl World {
     /// What NPC `i` gets from one `item` the player hands over: food feeds,
     /// Tè refreshes, an owned good arrives new (see [`World::player_give`]).
     pub(super) fn gift_effect(&mut self, i: usize, item: ItemKind) {
-        let restore = self.params.meal_restore;
-        let (te_energy, te_social) = (self.params.te_energy_boost, self.params.te_social_boost);
+        let consume = self.catalog.get_item(item).and_then(|d| d.consume);
+        let p = &self.params;
         let target = &mut self.npcs[i];
-        match item {
-            ItemKind::Razione | ItemKind::Verdura => {
-                let amount = if item == ItemKind::Razione {
-                    restore
-                } else {
-                    restore / 2.0
-                };
-                target.needs.hunger = (target.needs.hunger + amount).min(1.0);
-                target.starving_minutes = 0;
-            }
-            ItemKind::Te => {
+        match consume {
+            // Food and drinks, from the catalog ([`crate::Consume`]).
+            Some(c) => {
+                let (hunger, energy, social) = (c.hunger.get(p), c.energy.get(p), c.social.get(p));
                 let needs = &mut target.needs;
-                needs.energy = (needs.energy + 2.0 * te_energy).min(1.0);
-                needs.social = (needs.social + 2.0 * te_social).min(1.0);
+                if hunger > 0.0 {
+                    needs.hunger = (needs.hunger + hunger).min(1.0);
+                    target.starving_minutes = 0;
+                }
+                if energy > 0.0 {
+                    needs.energy = (needs.energy + energy).min(1.0);
+                }
+                if social > 0.0 {
+                    needs.social = (needs.social + social).min(1.0);
+                }
             }
-            _ => {
+            None => {
                 if let Some(slot) = target.inventory.slot_mut(item) {
                     *slot = Some(1.0);
                 }
@@ -454,6 +455,6 @@ mod tests {
             w.player_give(id, ItemKind::Razione),
             Err(GiveError::NotOwned)
         );
-        assert!(ItemUse::Food == ItemKind::Razione.def().usage);
+        assert!(ItemUse::Food == ItemKind::Razione.usage());
     }
 }

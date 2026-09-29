@@ -320,7 +320,9 @@ impl fmt::Display for Event {
                 "L'amministrazione nega un figlio a {mother_name} e {father_name}: {reason}"
             ),
             EventKind::Shortage { item } => match item {
-                ItemKind::Razione => write!(f, "Carestia: nessuna Mensa ha più razioni"),
+                item if *item == ItemKind::Razione => {
+                    write!(f, "Carestia: nessuna Mensa ha più razioni")
+                }
                 item => write!(
                     f,
                     "Scarsità: nessun {} ha più {}",
@@ -342,7 +344,9 @@ impl fmt::Display for Event {
                 item.with_article()
             ),
             EventKind::ItemBroke { name, item, .. } => match item {
-                ItemKind::Vestito => write!(f, "Il vestito di {name} è ridotto a brandelli"),
+                item if *item == ItemKind::Vestito => {
+                    write!(f, "Il vestito di {name} è ridotto a brandelli")
+                }
                 item => write!(f, "L'{} di {name} si è rotto", item.name()),
             },
             EventKind::PlayerTook {

@@ -92,7 +92,7 @@ fn at_equal_stock_price_grows_with_distance() {
     }
     // The Mercati of a default train: same stock, different distances.
     let w = World::generate(42, 20, 400);
-    for item in ItemKind::SOLD {
+    for item in w.catalog().sold_items() {
         let mut quotes: Vec<(u32, u32, f32)> = of_kind(&w, CarriageKind::Mercato)
             .into_iter()
             .map(|m| {
@@ -123,7 +123,12 @@ fn specialties_are_deterministic_and_cover_every_recipe() {
             for c in &a.carriages {
                 let s = a.specialties(c.id);
                 assert_eq!(s, b.specialties(c.id), "seed {seed} carriage {}", c.id);
-                let recipes: Vec<ItemKind> = c.kind.recipes().iter().map(|r| r.output).collect();
+                let cat = a.catalog();
+                let recipes: Vec<ItemKind> = cat
+                    .recipes_of_kind(c.kind)
+                    .iter()
+                    .map(|&r| cat.recipe(r).output)
+                    .collect();
                 assert!(
                     s.iter().all(|i| recipes.contains(i)),
                     "{s:?} in a {}",
@@ -138,8 +143,8 @@ fn specialties_are_deterministic_and_cover_every_recipe() {
             }
             // Every item made on this train has a specialist, and so a
             // nearest producer from everywhere.
-            for item in ItemKind::ALL {
-                let made = a.carriages.iter().any(|c| c.kind.makes(item));
+            for item in a.catalog().kinds() {
+                let made = a.carriages.iter().any(|c| a.catalog().makes(c.kind, item));
                 let specialist = a
                     .carriages
                     .iter()
@@ -167,7 +172,7 @@ fn specialties_are_deterministic_and_cover_every_recipe() {
     // Every Officina specializes: none makes everything.
     let w = World::generate(42, 20, 400);
     let officine = of_kind(&w, CarriageKind::Officina);
-    let recipes = CarriageKind::Officina.recipes().len();
+    let recipes = w.catalog().recipes_of_kind(CarriageKind::Officina).len();
     assert!(
         officine
             .iter()
@@ -217,7 +222,7 @@ fn officine_make_their_specialties_first() {
     }
     // The Mercati are full: the Mercanti take nothing from the Officine.
     for m in of_kind(&w, CarriageKind::Mercato) {
-        for item in ItemKind::SOLD {
+        for item in w.catalog().sold_items() {
             let cap = w.params.market_goods_cap;
             w.carriages[m.index()].stock.set(item, cap);
         }
@@ -238,17 +243,16 @@ fn officine_make_their_specialties_first() {
         made(&w, v, ItemKind::Vestito)
     );
     // With its specialty's storage full, an Officina makes the rest.
-    let cap = w
-        .params
-        .storage_cap(CarriageKind::Officina, ItemKind::Attrezzo);
+    let cap = w.storage_cap(CarriageKind::Officina, ItemKind::Attrezzo);
     w.carriages[a.index()].stock.set(ItemKind::Attrezzo, cap);
     w.carriages[a.index()].stock.set(ItemKind::Rottame, 100.0);
     // Something other than its specialty gets made (inputs like Metallo and
     // Tessuto are consumed by other recipes, so compare item by item).
-    let others: Vec<ItemKind> = CarriageKind::Officina
-        .recipes()
+    let cat = w.catalog().clone();
+    let others: Vec<ItemKind> = cat
+        .recipes_of_kind(CarriageKind::Officina)
         .iter()
-        .map(|r| r.output)
+        .map(|&r| cat.recipe(r).output)
         .filter(|&item| item != ItemKind::Attrezzo)
         .collect();
     let before: Vec<f32> = others.iter().map(|&i| made(&w, a, i)).collect();
@@ -363,7 +367,7 @@ fn player_sales_are_paid_from_the_treasury() {
     assert_eq!(w.carriages[market.index()].stock.get(item), stock + 1.0);
     assert!(matches!(
         w.events.last().unwrap().kind,
-        EventKind::PlayerSold { item: ItemKind::Vestito, price, carriage } if price == paid && carriage == market
+        EventKind::PlayerSold { item, price, carriage } if item == ItemKind::Vestito && price == paid && carriage == market
     ));
     assert!(
         w.events
@@ -445,7 +449,8 @@ fn money_is_conserved_with_player_trade() {
             if minute % 97 == 0 && (10..17).contains(&w.clock.hour()) {
                 let market = markets[(minute as usize / 97) % markets.len()];
                 staff_counter(&mut w, market);
-                let item = ItemKind::SOLD[(day as usize + minute as usize) % ItemKind::SOLD.len()];
+                let goods = w.catalog().sold_items();
+                let item = goods[(day as usize + minute as usize) % goods.len()];
                 if minute % 2 == 0 {
                     if w.player_buy(market, item).is_ok() {
                         bought += 1;

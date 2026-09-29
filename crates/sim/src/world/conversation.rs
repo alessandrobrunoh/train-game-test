@@ -476,7 +476,8 @@ impl World {
                     return 0.0;
                 }
                 let base = match item.news {
-                    News::TheftCaught | News::Shortage(ItemKind::Razione) => 1.5,
+                    News::TheftCaught => 1.5,
+                    News::Shortage(item) if item == ItemKind::Razione => 1.5,
                     News::Death | News::Austerity => 1.2,
                     News::Birth | News::Couple | News::Protest(_) | News::Concession(_) => 1.0,
                     News::Widowed | News::Shortage(_) | News::TheftUnseen => 0.8,
