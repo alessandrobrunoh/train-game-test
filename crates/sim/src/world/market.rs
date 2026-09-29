@@ -24,9 +24,10 @@
 //!   lives in the sim rather than in the game: deterministic, saved with the
 //!   world and available headless.
 //! - **Player sales** ([`World::player_sell`]): the Mercato pays the player
-//!   [`SimParams::player_sell_share`] of its price, from the treasury. Like
-//!   the player's purchases (tokens in) they change the money supply (tokens
-//!   out): the player's tokens live outside the sim.
+//!   [`SimParams::player_sell_share`] of its price (a little more or less by
+//!   the Mercante's affinity), from the treasury. The player's tokens are
+//!   in the sim ([`crate::PlayerCharacter::tokens`]): the money supply does
+//!   not change.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -245,8 +246,10 @@ pub struct MarketQuote {
     pub item: ItemKind,
     /// Selling price now.
     pub price: u32,
-    /// What the Mercato pays the player for one ([`World::player_sell`]).
+    /// What the Mercato pays the player for one ([`World::player_sell_price`]).
     pub buyback: u32,
+    /// What the Mercato asks the player for one ([`World::player_price`]).
+    pub player_price: u32,
     /// Whole units on the shelf, and how many fit.
     pub stock: u32,
     pub cap: u32,
@@ -269,6 +272,8 @@ pub enum SellError {
     NoRoom,
     /// The treasury cannot pay.
     NoMoney,
+    /// The player has none.
+    NotOwned,
 }
 
 impl fmt::Display for SellError {
@@ -278,6 +283,7 @@ impl fmt::Display for SellError {
             SellError::NoMerchant => f.write_str("nessun mercante al bancone"),
             SellError::NoRoom => f.write_str("lo scaffale è pieno"),
             SellError::NoMoney => f.write_str("la cassa del treno è vuota"),
+            SellError::NotOwned => f.write_str("non ce l'hai"),
         }
     }
 }
@@ -382,7 +388,8 @@ impl World {
                 Some(MarketQuote {
                     item,
                     price,
-                    buyback: self.buyback(price),
+                    buyback: self.player_sell_price(carriage, item).unwrap_or(0),
+                    player_price: self.player_price(carriage, item).unwrap_or(price),
                     stock: c.stock.count(item),
                     cap: self.params.storage_cap(c.kind, item).max(0.0).floor() as u32,
                     producer,
@@ -405,23 +412,35 @@ impl World {
         self.price(carriage, item).map(|price| self.buyback(price))
     }
 
-    /// The player sells one `item` to the Mercato `carriage`, which pays
-    /// [`World::sell_price`] into `tokens` from the treasury and puts the
-    /// item on its shelf. A Mercante must be at the counter and the shelf
-    /// must have room. The game checks that the player owns the item. The
-    /// tokens leave the sim (the player's live outside it): the money supply
-    /// goes down by the payment. Returns the payment.
-    pub fn player_sell(
-        &mut self,
-        carriage: CarriageId,
-        item: ItemKind,
-        tokens: &mut u32,
-    ) -> Result<u32, SellError> {
+    /// What the Mercato `carriage` pays the player now for one `item`:
+    /// [`World::sell_price`], higher or lower by the affinity of the
+    /// Mercante on duty (like [`World::player_price`]), never above what it
+    /// asks the player.
+    pub fn player_sell_price(&self, carriage: CarriageId, item: ItemKind) -> Option<u32> {
+        let pay = self.sell_price(carriage, item)?;
+        let affinity = self
+            .merchant_on_duty(carriage)
+            .map_or(0.0, crate::Npc::player_affinity);
+        let factor = 1.0 + super::player::PRICE_PER_AFFINITY * affinity.clamp(-1.0, 1.0);
+        let pay = (pay as f32 * factor).floor() as u32;
+        let ask = self.player_price(carriage, item).unwrap_or(0);
+        Some(pay.min(ask.saturating_sub(1)))
+    }
+
+    /// The player sells one `item` from its inventory to the Mercato
+    /// `carriage`, which pays [`World::player_sell_price`] from the treasury
+    /// and puts the item on its shelf. A Mercante must be at the counter and
+    /// the shelf must have room. Tokens only move between the treasury and
+    /// the player: the money supply does not change. Returns the payment.
+    pub fn player_sell(&mut self, carriage: CarriageId, item: ItemKind) -> Result<u32, SellError> {
         let pay = self
-            .sell_price(carriage, item)
+            .player_sell_price(carriage, item)
             .ok_or(SellError::NotForSale)?;
         if self.merchant_on_duty(carriage).is_none() {
             return Err(SellError::NoMerchant);
+        }
+        if !self.player.inventory.has(item, 1) {
+            return Err(SellError::NotOwned);
         }
         let cap = self.params.storage_cap(CarriageKind::Mercato, item);
         let c = &mut self.carriages[carriage.index()];
@@ -432,8 +451,9 @@ impl World {
             return Err(SellError::NoMoney);
         }
         c.stock.add(item, 1.0, cap);
+        self.player.inventory.remove(item, 1);
         self.economy.treasury -= u64::from(pay);
-        *tokens = tokens.saturating_add(pay);
+        self.player.tokens = self.player.tokens.saturating_add(pay);
         self.economy.counters.player_sales += u64::from(pay);
         self.log(EventKind::PlayerSold {
             item,

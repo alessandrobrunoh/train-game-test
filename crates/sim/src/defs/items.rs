@@ -107,6 +107,9 @@ pub struct ItemDef {
     pub base_value: u32,
     pub usage: ItemUse,
     pub category: ItemCategory,
+    /// Most units that stack in one inventory slot (see
+    /// [`crate::SlotInventory`]); None: [`DEFAULT_STACK_LIMIT`].
+    pub stack_limit: Option<u32>,
     /// Whether NPCs buy it at the Mercati.
     pub sold: bool,
     /// Carriages where people get it: a shortage means none of them has a
@@ -123,6 +126,11 @@ pub struct ItemDef {
     pub stores: &'static [Store],
 }
 
+/// Units per inventory slot of an item without [`ItemDef::stack_limit`]
+/// (The Escapists style: materials pile up to 10; the catalog sets 5 for
+/// food and drinks and 1 for durable goods).
+pub const DEFAULT_STACK_LIMIT: u32 = 10;
+
 pub static ITEMS: [ItemDef; ItemKind::COUNT] = ROWS;
 
 // A `const` copy, readable at compile time (see `count`/`select`).
@@ -136,6 +144,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 1,
         usage: ItemUse::Food,
         category: ItemCategory::Raw,
+        stack_limit: None,
         sold: false,
         outlet: CarriageKind::Serra,
         shortage_reported: false,
@@ -152,6 +161,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 2,
         usage: ItemUse::Food,
         category: ItemCategory::Consumable,
+        stack_limit: Some(5),
         sold: false,
         outlet: CarriageKind::Mensa,
         shortage_reported: true,
@@ -168,6 +178,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 1,
         usage: ItemUse::Material,
         category: ItemCategory::Raw,
+        stack_limit: None,
         sold: false,
         outlet: CarriageKind::Officina,
         shortage_reported: false,
@@ -184,6 +195,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 40,
         usage: ItemUse::Tool,
         category: ItemCategory::Durable,
+        stack_limit: Some(1),
         sold: true,
         outlet: CarriageKind::Mercato,
         shortage_reported: true,
@@ -200,6 +212,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 12,
         usage: ItemUse::Clothes,
         category: ItemCategory::Durable,
+        stack_limit: Some(1),
         sold: true,
         outlet: CarriageKind::Mercato,
         shortage_reported: true,
@@ -216,6 +229,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 1,
         usage: ItemUse::Material,
         category: ItemCategory::Raw,
+        stack_limit: None,
         sold: false,
         outlet: CarriageKind::Serra,
         shortage_reported: false,
@@ -236,6 +250,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 1,
         usage: ItemUse::Material,
         category: ItemCategory::Raw,
+        stack_limit: None,
         sold: false,
         outlet: CarriageKind::Serra,
         shortage_reported: false,
@@ -256,6 +271,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 3,
         usage: ItemUse::Material,
         category: ItemCategory::Intermediate,
+        stack_limit: None,
         sold: false,
         outlet: CarriageKind::Officina,
         shortage_reported: false,
@@ -276,6 +292,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 3,
         usage: ItemUse::Material,
         category: ItemCategory::Intermediate,
+        stack_limit: None,
         sold: false,
         outlet: CarriageKind::Officina,
         shortage_reported: false,
@@ -296,6 +313,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 1,
         usage: ItemUse::Food,
         category: ItemCategory::Consumable,
+        stack_limit: Some(5),
         sold: false,
         outlet: CarriageKind::Mensa,
         shortage_reported: false,
@@ -316,6 +334,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 10,
         usage: ItemUse::Material,
         category: ItemCategory::Durable,
+        stack_limit: Some(1),
         sold: false,
         outlet: CarriageKind::Dormitorio,
         shortage_reported: false,
@@ -343,6 +362,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 15,
         usage: ItemUse::Material,
         category: ItemCategory::Durable,
+        stack_limit: Some(1),
         sold: false,
         outlet: CarriageKind::Dormitorio,
         shortage_reported: false,
@@ -370,6 +390,7 @@ const ROWS: [ItemDef; ItemKind::COUNT] = [
         base_value: 10,
         usage: ItemUse::Material,
         category: ItemCategory::Durable,
+        stack_limit: Some(1),
         sold: false,
         outlet: CarriageKind::Dormitorio,
         shortage_reported: false,
@@ -407,6 +428,12 @@ impl ItemKind {
     /// Shared use where it is kept, if any.
     pub fn amenity(self) -> Option<Amenity> {
         self.def().amenity
+    }
+
+    /// Most units one slot of a [`crate::SlotInventory`] holds, from the
+    /// catalog ([`ItemDef::stack_limit`], at least 1).
+    pub fn stack_size(self) -> u32 {
+        self.def().stack_limit.unwrap_or(DEFAULT_STACK_LIMIT).max(1)
     }
 
     /// Items sold at the Mercati, in [`ItemKind::ALL`] order.

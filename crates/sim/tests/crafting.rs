@@ -2,8 +2,8 @@
 //! con le stesse ricette, comodità nei Dormitori e alla Mensa.
 
 use sim::{
-    CarriageId, CarriageKind, CraftError, ItemKind, MINUTES_PER_DAY, RECIPES, RecipeDef,
-    StationKind, Stock, UtilityBrain, World,
+    CarriageId, CarriageKind, CraftError, INVENTORY_SLOTS, ItemKind, MINUTES_PER_DAY, RECIPES,
+    RecipeDef, SlotInventory, StationKind, UtilityBrain, World,
 };
 
 const DAY: u64 = MINUTES_PER_DAY;
@@ -20,50 +20,50 @@ fn recipe(key: &str) -> &'static RecipeDef {
     RecipeDef::by_key(key).expect("recipe")
 }
 
+/// Gives the player exactly `items` (whole units).
+fn give(w: &mut World, items: &[(ItemKind, u32)]) {
+    w.player.inventory = SlotInventory::new(INVENTORY_SLOTS);
+    for &(item, n) in items {
+        assert_eq!(w.player.inventory.add(item, n), n);
+    }
+}
+
 #[test]
 fn player_crafts_at_the_right_station_using_exactly_the_inputs() {
     let mut w = World::generate(7, 10, 60);
     let officina = first_of(&w, CarriageKind::Officina);
-    let before = w.clone();
-    let mut items = Stock::default();
-    items.set(ItemKind::Tessuto, 3.0);
-    items.set(ItemKind::Verdura, 1.0);
+    give(&mut w, &[(ItemKind::Tessuto, 3), (ItemKind::Verdura, 1)]);
+    let carriages = w.carriages.clone();
+    let inv = |w: &World, item| w.player.inventory.count(item);
 
     // Coperta: 2 Tessuto → 1 Coperta, at a workbench.
-    assert_eq!(
-        w.player_craft(recipe("coperta"), &mut items, officina),
-        Ok(1)
-    );
-    assert_eq!(items.count(ItemKind::Tessuto), 1);
-    assert_eq!(items.count(ItemKind::Coperta), 1);
-    assert_eq!(
-        items.count(ItemKind::Verdura),
-        1,
-        "unrelated items untouched"
-    );
-    // Crafting uses no world randomness and changes no carriage.
-    assert_eq!(
-        serde_json::to_string(&w).unwrap(),
-        serde_json::to_string(&before).unwrap()
-    );
+    assert_eq!(w.player_craft(recipe("coperta"), officina), Ok(1));
+    assert_eq!(inv(&w, ItemKind::Tessuto), 1);
+    assert_eq!(inv(&w, ItemKind::Coperta), 1);
+    assert_eq!(inv(&w, ItemKind::Verdura), 1, "unrelated items untouched");
+    // Crafting changes no carriage.
+    assert_eq!(w.carriages, carriages);
 
-    // A multi-input recipe uses every input.
-    items.set(ItemKind::Metallo, 1.0);
-    items.set(ItemKind::Rottame, 1.0);
+    // A multi-input recipe uses every input (Lampada has to be learnt first).
+    w.player.inventory.add(ItemKind::Metallo, 1);
+    w.player.inventory.add(ItemKind::Rottame, 1);
     assert_eq!(
-        w.player_craft(recipe("lampada"), &mut items, officina),
-        Ok(1)
+        w.player_craft(recipe("lampada"), officina),
+        Err(CraftError::Unknown)
     );
-    assert_eq!(items.count(ItemKind::Metallo), 0);
-    assert_eq!(items.count(ItemKind::Rottame), 0);
-    assert_eq!(items.count(ItemKind::Lampada), 1);
+    assert!(w.player.learn(recipe("lampada")));
+    assert!(!w.player.learn(recipe("lampada")));
+    assert_eq!(w.player_craft(recipe("lampada"), officina), Ok(1));
+    assert_eq!(inv(&w, ItemKind::Metallo), 0);
+    assert_eq!(inv(&w, ItemKind::Rottame), 0);
+    assert_eq!(inv(&w, ItemKind::Lampada), 1);
 
     // A batch can make more than one unit (Tè: a mazzo di erbe, 3 pots).
     let mensa = first_of(&w, CarriageKind::Mensa);
-    items.set(ItemKind::Erbe, 1.0);
+    w.player.inventory.add(ItemKind::Erbe, 1);
     let te = recipe("te");
-    assert_eq!(w.player_craft(te, &mut items, mensa), Ok(te.batch));
-    assert_eq!(items.count(ItemKind::Te), te.batch);
+    assert_eq!(w.player_craft(te, mensa), Ok(te.batch));
+    assert_eq!(inv(&w, ItemKind::Te), te.batch);
 }
 
 #[test]
@@ -71,16 +71,15 @@ fn player_craft_fails_without_station_or_inputs_and_changes_nothing() {
     let mut w = World::generate(7, 10, 60);
     let officina = first_of(&w, CarriageKind::Officina);
     let mensa = first_of(&w, CarriageKind::Mensa);
-    let mut items = Stock::default();
-    items.set(ItemKind::Tessuto, 1.5);
-    let kept = items;
+    give(&mut w, &[(ItemKind::Tessuto, 1)]);
+    let kept = w.player.inventory.clone();
 
     assert_eq!(
-        w.player_craft(recipe("coperta"), &mut items, mensa),
+        w.player_craft(recipe("coperta"), mensa),
         Err(CraftError::WrongPlace(StationKind::Workbench))
     );
     assert_eq!(
-        w.player_craft(recipe("coperta"), &mut items, officina),
+        w.player_craft(recipe("coperta"), officina),
         Err(CraftError::Missing {
             item: ItemKind::Tessuto,
             needed: 2,
@@ -88,22 +87,23 @@ fn player_craft_fails_without_station_or_inputs_and_changes_nothing() {
         })
     );
     // Missing the second input of a two-input recipe: the first stays too.
-    items.set(ItemKind::Metallo, 1.0);
-    let with_metal = items;
+    w.player.learn(recipe("lampada"));
+    w.player.inventory.add(ItemKind::Metallo, 1);
+    let with_metal = w.player.inventory.clone();
     assert!(matches!(
-        w.player_craft(recipe("lampada"), &mut items, officina),
+        w.player_craft(recipe("lampada"), officina),
         Err(CraftError::Missing {
             item: ItemKind::Rottame,
             ..
         })
     ));
-    assert_eq!(items, with_metal);
-    items = kept;
+    assert_eq!(w.player.inventory, with_metal);
+    w.player.inventory = kept.clone();
     assert_eq!(
-        w.player_craft(recipe("coperta"), &mut items, CarriageId(999)),
+        w.player_craft(recipe("coperta"), CarriageId(999)),
         Err(CraftError::NoSuchCarriage)
     );
-    assert_eq!(items, kept);
+    assert_eq!(w.player.inventory, kept);
     assert!(
         !CraftError::Missing {
             item: ItemKind::Tessuto,
@@ -113,6 +113,31 @@ fn player_craft_fails_without_station_or_inputs_and_changes_nothing() {
         .to_string()
         .is_empty()
     );
+}
+
+#[test]
+fn a_full_inventory_blocks_the_result_and_keeps_the_ingredients() {
+    let mut w = World::generate(7, 10, 60);
+    let officina = first_of(&w, CarriageKind::Officina);
+    // 2 Tessuto in their own slot, the other slots full of Attrezzi (one each).
+    give(&mut w, &[(ItemKind::Tessuto, 2)]);
+    w.player
+        .inventory
+        .add(ItemKind::Attrezzo, INVENTORY_SLOTS as u32);
+    assert_eq!(w.player.inventory.free_slots(), 0);
+    // The Tessuto slot empties, and the Coperta takes it.
+    assert_eq!(w.player_craft(recipe("coperta"), officina), Ok(1));
+    // With 4 Tessuto in one slot, using 2 frees no slot: no room.
+    give(&mut w, &[(ItemKind::Tessuto, 4)]);
+    w.player
+        .inventory
+        .add(ItemKind::Attrezzo, INVENTORY_SLOTS as u32);
+    let kept = w.player.inventory.clone();
+    assert_eq!(
+        w.player_craft(recipe("coperta"), officina),
+        Err(CraftError::NoRoom)
+    );
+    assert_eq!(w.player.inventory, kept);
 }
 
 #[test]

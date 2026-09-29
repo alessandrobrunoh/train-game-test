@@ -19,7 +19,7 @@ fn dormitory_beds_are_spread_over_both_floors() {
         let beds = |floor| {
             c.stations
                 .iter()
-                .filter(|s| s.kind == StationKind::Bed && s.floor == floor)
+                .filter(|s| s.kind == StationKind::Bed && s.floor == floor && s.is_shared())
                 .count()
         };
         let (ground, upper) = (beds(0), beds(1));

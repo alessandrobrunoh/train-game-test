@@ -93,11 +93,29 @@ pub struct Station {
     /// Storey (0 = ground floor, where the gangways are).
     #[serde(default)]
     pub floor: u8,
+    /// Who the station belongs to: a private station (the player's bed, see
+    /// [`crate::Cabin`]) is never used by NPCs and is not counted among the
+    /// carriage's beds. None: shared.
+    #[serde(default)]
+    pub owner: Option<Owner>,
+}
+
+/// Owner of a private [`Station`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Owner {
+    /// The player ([`crate::PlayerCharacter`]).
+    Player,
 }
 
 impl Station {
+    /// Whether an NPC can use it now: shared, and not full.
     pub fn has_room(&self) -> bool {
-        self.occupancy < self.capacity
+        self.owner.is_none() && self.occupancy < self.capacity
+    }
+
+    /// Whether it is a shared station (NPCs may use it).
+    pub fn is_shared(&self) -> bool {
+        self.owner.is_none()
     }
 }
 
@@ -145,7 +163,11 @@ impl Carriage {
     /// one (its own bed), or the next free one after it. Spreads people over
     /// all the stations (and floors) instead of filling the first ones.
     pub fn free_station_for(&self, kind: StationKind, who: NpcId) -> Option<StationId> {
-        let of_kind = || self.stations.iter().filter(move |s| s.kind == kind);
+        let of_kind = || {
+            self.stations
+                .iter()
+                .filter(move |s| s.kind == kind && s.is_shared())
+        };
         let n = of_kind().count();
         if n == 0 {
             return None;
@@ -177,6 +199,7 @@ impl Carriage {
                 capacity,
                 occupancy: 0,
                 floor,
+                owner: None,
             });
         }
     }
@@ -184,6 +207,25 @@ impl Carriage {
     /// Storeys (1, or more with stairs; see [`crate::defs::CarriageDef::floors`]).
     pub fn floors(&self) -> u8 {
         self.kind.def().floors.max(1)
+    }
+
+    /// Adds a private station of `kind` on `floor`, owned by `owner`; returns its id.
+    pub(crate) fn push_private_station(
+        &mut self,
+        kind: StationKind,
+        floor: u8,
+        owner: Owner,
+    ) -> StationId {
+        let id = StationId(self.stations.len() as u16);
+        self.stations.push(Station {
+            id,
+            kind,
+            capacity: 1,
+            occupancy: 0,
+            floor,
+            owner: Some(owner),
+        });
+        id
     }
 
     /// Storey of `station` (0 if unknown).

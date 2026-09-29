@@ -684,6 +684,7 @@ fn player_takes_whole_units_from_storage() {
     w.carriages[mensa.index()].stock.set(ItemKind::Razione, 2.5);
     assert_eq!(w.player_take(mensa, ItemKind::Razione, 1), 1);
     assert_eq!(w.player_take(mensa, ItemKind::Razione, 5), 1);
+    assert_eq!(w.player.inventory.count(ItemKind::Razione), 2);
     assert!((w.carriages[mensa.index()].stock.get(ItemKind::Razione) - 0.5).abs() < 1e-5);
     // Only half a ration left, and no scrap in a Mensa.
     assert_eq!(w.player_take(mensa, ItemKind::Razione, 1), 0);
@@ -712,22 +713,19 @@ fn player_buys_only_from_a_staffed_market() {
     let market = first_of(&w, CarriageKind::Mercato);
     let mensa = first_of(&w, CarriageKind::Mensa);
     let item = ItemKind::Vestito;
-    let mut tokens = 100;
+    w.player.tokens = 100;
 
     assert_eq!(
-        w.player_buy(mensa, ItemKind::Razione, &mut tokens),
+        w.player_buy(mensa, ItemKind::Razione),
         Err(sim::BuyError::NotForSale)
     );
     assert_eq!(
-        w.player_buy(market, ItemKind::Razione, &mut tokens),
+        w.player_buy(market, ItemKind::Razione),
         Err(sim::BuyError::NotForSale)
     );
     // Nobody is at the counter yet (everyone starts idle).
     assert!(w.merchant_on_duty(market).is_none());
-    assert_eq!(
-        w.player_buy(market, item, &mut tokens),
-        Err(sim::BuyError::NoMerchant)
-    );
+    assert_eq!(w.player_buy(market, item), Err(sim::BuyError::NoMerchant));
 
     // Put a Mercante to work at the first counter.
     let counter = w.carriages[market.index()]
@@ -743,17 +741,23 @@ fn player_buys_only_from_a_staffed_market() {
     w.carriages[market.index()].stations[counter.index()].occupancy += 1;
     assert_eq!(w.merchant_on_duty(market).map(|n| n.id), Some(w.npcs[m].id));
 
+    // A Mercante who never met the player asks the Mercato's price.
     let price = w.price(market, item).unwrap();
-    let mut poor = price - 1;
+    assert_eq!(w.player_price(market, item), Some(price));
+    w.player.tokens = price - 1;
     assert_eq!(
-        w.player_buy(market, item, &mut poor),
+        w.player_buy(market, item),
         Err(sim::BuyError::TooExpensive(price))
     );
-    assert_eq!(poor, price - 1);
+    assert_eq!(w.player.tokens, price - 1);
 
+    w.player.tokens = 100;
     let before = w.carriages[market.index()].stock.get(item);
-    assert_eq!(w.player_buy(market, item, &mut tokens), Ok(price));
-    assert_eq!(tokens, 100 - price);
+    assert_eq!(w.player_buy(market, item), Ok(price));
+    assert_eq!(w.player.tokens, 100 - price);
+    assert_eq!(w.player.inventory.count(item), 1);
+    // The Mercante likes the customer a little more.
+    assert!(w.npcs[m].player_affinity() > 0.0);
     let after = w.carriages[market.index()].stock.get(item);
     assert!((before - after - 1.0).abs() < 1e-5);
     assert!(matches!(
@@ -762,15 +766,22 @@ fn player_buys_only_from_a_staffed_market() {
     ));
 
     w.carriages[market.index()].stock.set(item, 0.5);
-    assert_eq!(
-        w.player_buy(market, item, &mut tokens),
-        Err(sim::BuyError::OutOfStock)
-    );
+    assert_eq!(w.player_buy(market, item), Err(sim::BuyError::OutOfStock));
+    // A full inventory: nothing bought, nothing paid.
+    w.carriages[market.index()].stock.set(item, 5.0);
+    w.player.inventory.add(ItemKind::Attrezzo, 99);
+    let tokens = w.player.tokens;
+    assert_eq!(w.player_buy(market, item), Err(sim::BuyError::NoRoom));
+    assert_eq!(w.player.tokens, tokens);
 }
 
 #[test]
 fn player_gives_food_and_goods() {
     let (mut w, _) = world();
+    w.player.inventory.add(ItemKind::Razione, 1);
+    w.player.inventory.add(ItemKind::Verdura, 1);
+    w.player.inventory.add(ItemKind::Rottame, 1);
+    w.player.inventory.add(ItemKind::Vestito, 1);
     let id = w.npcs[0].id;
     w.npcs[0].needs.hunger = 0.1;
     w.npcs[0].starving_minutes = 5;
@@ -807,6 +818,14 @@ fn player_gives_food_and_goods() {
     assert_eq!(
         w.player_give(NpcId(99_999), ItemKind::Razione),
         Err(sim::GiveError::NoSuchNpc)
+    );
+    // Given away: the player has no more Razioni nor Vestiti.
+    assert_eq!(w.player.inventory.count(ItemKind::Razione), 0);
+    assert_eq!(w.player.inventory.count(ItemKind::Vestito), 0);
+    w.npcs[0].needs.hunger = 0.1;
+    assert_eq!(
+        w.player_give(id, ItemKind::Razione),
+        Err(sim::GiveError::NotOwned)
     );
     let gifts = w
         .events

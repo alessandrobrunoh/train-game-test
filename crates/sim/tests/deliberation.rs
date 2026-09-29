@@ -740,6 +740,7 @@ fn deliberations_whose_premise_is_gone_are_cancelled() {
     w.params.theft_temptation_per_hour = 0.0;
     let d = w.deliberation_of(id).cloned().expect("tempted");
     // Someone gives the youth clothes: no reason to steal any more.
+    w.player.inventory.add(ItemKind::Vestito, 1);
     w.player_give(id, ItemKind::Vestito).unwrap();
     let cancelled = w.deliberation_counters.cancelled;
     w.run(&mut brain, d.deadline - w.clock + 1);

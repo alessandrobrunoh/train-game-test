@@ -5,7 +5,7 @@
 //!   of the output of one of the job's recipes (see [`Work`] for which one),
 //!   bounded by the storage of the workplace and by the inputs, taken from
 //!   their [`Source`] (nearest carriages first).
-//! - [`World::player_craft`]: one whole batch from the player's own items,
+//! - [`World::player_craft`]: one whole batch from the player's inventory,
 //!   in a carriage that has the recipe's station. It is instant in the sim:
 //!   the game makes the player wait the recipe's minutes first.
 //!
@@ -17,7 +17,7 @@ use super::World;
 use crate::carriage::{CarriageKind, StationKind};
 use crate::defs::{RECIPES, RecipeDef, Source, Work};
 use crate::ids::CarriageId;
-use crate::item::{ItemKind, Stock};
+use crate::item::ItemKind;
 use crate::npc::Job;
 use crate::params::SimParams;
 
@@ -33,6 +33,10 @@ pub enum CraftError {
         needed: u32,
         have: u32,
     },
+    /// The player has not learnt it yet.
+    Unknown,
+    /// No room in the inventory for what it makes.
+    NoRoom,
 }
 
 impl fmt::Display for CraftError {
@@ -50,6 +54,8 @@ impl fmt::Display for CraftError {
                 };
                 write!(f, "servono {needed} {name}, ne hai {have}")
             }
+            CraftError::Unknown => f.write_str("non conosci questa ricetta"),
+            CraftError::NoRoom => f.write_str("l'inventario è pieno"),
         }
     }
 }
@@ -69,32 +75,41 @@ impl World {
     // ------------------------------------------------------------------
 
     /// The player makes one batch of `recipe` in `carriage` from its own
-    /// `items`: the carriage must have the recipe's station and `items`
-    /// the whole inputs ([`RecipeDef::player_inputs`]), which are used up.
-    /// Returns the units made (added to `items`). Whether the player knows
-    /// the recipe, and the time it takes ([`RecipeDef::player_minutes`]),
-    /// are up to the game. No randomness: the world stays deterministic.
+    /// inventory: it must know the recipe ([`crate::PlayerCharacter::knows`]),
+    /// the carriage must have the recipe's station and the inventory the
+    /// whole inputs ([`RecipeDef::player_inputs`]), which are used up, and
+    /// room for the batch once they are gone. Returns the units made (added
+    /// to the inventory). The time it takes ([`RecipeDef::player_minutes`])
+    /// is up to the game. No randomness: the world stays deterministic.
     pub fn player_craft(
         &mut self,
         recipe: &RecipeDef,
-        items: &mut Stock,
         carriage: CarriageId,
     ) -> Result<u32, CraftError> {
+        if !self.player.knows(recipe) {
+            return Err(CraftError::Unknown);
+        }
         let c = self.carriage(carriage).ok_or(CraftError::NoSuchCarriage)?;
         if !c.stations.iter().any(|s| s.kind == recipe.station) {
             return Err(CraftError::WrongPlace(recipe.station));
         }
         let inputs = recipe.player_inputs(&self.params);
+        let items = &self.player.inventory;
         for &(item, needed) in &inputs {
             let have = items.count(item);
             if have < needed {
                 return Err(CraftError::Missing { item, needed, have });
             }
         }
-        for (item, needed) in inputs {
-            items.take(item, needed as f32);
+        // Tried on a copy: a full inventory keeps its ingredients.
+        let mut after = items.clone();
+        for &(item, needed) in &inputs {
+            after.remove(item, needed);
         }
-        items.add(recipe.output, recipe.batch as f32, f32::INFINITY);
+        if after.add(recipe.output, recipe.batch) < recipe.batch {
+            return Err(CraftError::NoRoom);
+        }
+        self.player.inventory = after;
         Ok(recipe.batch)
     }
 

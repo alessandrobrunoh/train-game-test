@@ -11,6 +11,7 @@ use crate::defs::ItemUse;
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
 use crate::personality::Personality;
+use crate::player::{PlayerTie, Regard};
 use crate::time::{GameTime, MINUTES_PER_DAY};
 
 /// Needs in `0..=1`, where 1 means fully satisfied.
@@ -223,6 +224,11 @@ pub struct Npc {
     /// personalities): derived from the id, see [`Npc::personality`].
     #[serde(default)]
     pub personality: Option<Personality>,
+    /// What the NPC thinks of the player (None: they never had to do with
+    /// each other). Kept apart from [`Npc::relations`], which are between
+    /// NPCs: see [`crate::player`].
+    #[serde(default)]
+    pub player: Option<PlayerTie>,
 }
 
 /// Character traits in `0..=1`, drawn at birth and never changed. They weigh
@@ -324,6 +330,16 @@ impl Npc {
     /// Affinity with `other` (0 without a tie).
     pub fn affinity(&self, other: NpcId) -> f32 {
         self.relation(other).map_or(0.0, |r| r.affinity)
+    }
+
+    /// Affinity with the player (0 if they never met).
+    pub fn player_affinity(&self) -> f32 {
+        self.player.map_or(0.0, |t| t.affinity)
+    }
+
+    /// How the NPC regards the player.
+    pub fn regard(&self) -> Regard {
+        Regard::of(self.player.as_ref())
     }
 
     /// Ties of a given kind.

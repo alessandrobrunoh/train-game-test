@@ -26,8 +26,9 @@
 //! - Recipes ([`defs::RECIPES`]) are shared by NPC workers and the player
 //!   ([`World::player_craft`]).
 //! - Money is a closed loop ([`Economy`]): wages and stipends are paid every
-//!   midnight from the administration's treasury; purchases, fines, a tax on
-//!   large savings and estates without heirs go back to it. Pay and prices
+//!   midnight from the administration's treasury; purchases (the player's
+//!   too), fines, a tax on large savings and estates without heirs go back
+//!   to it. Pay and prices
 //!   follow a slow feedback on the treasury.
 //! - Owned Attrezzi boost Contadini/Operai output and wear with work; owned
 //!   Vestiti slow tiredness and wear daily. Broken ones are bought again.
@@ -51,6 +52,12 @@
 //! Italian question with 2–4 options; a brain may answer them, otherwise a
 //! built-in rule decides. See [`World::open_deliberations`].
 //!
+//! The player ([`player`], [`World::player`]) is a character of the train:
+//! its place (synced by the game), tokens (part of the money supply),
+//! slot inventory, cabin with a private bed and a chest, known recipes;
+//! NPCs keep an affinity with it ([`Npc::player`]) that moves prices, gifts
+//! and greetings.
+//!
 //! Conversations ([`dialogue`]): a chat (`Action::Socialize`) with someone
 //! free nearby becomes a two-sided [`Conversation`] with a topic, a tone set
 //! by the pair's tie and [`Personality`], and short Italian lines for speech
@@ -73,13 +80,14 @@ mod names;
 pub mod npc;
 pub mod params;
 pub mod personality;
+pub mod player;
 pub mod stats;
 pub mod time;
 pub mod world;
 
 pub use action::{Action, ActionKind, ActionOption, DecisionRequest};
 pub use brain::{Brain, RandomBrain, THINK, UtilityBrain, UtilityWeights};
-pub use carriage::{Carriage, CarriageKind, Station, StationKind};
+pub use carriage::{Carriage, CarriageKind, Owner, Station, StationKind};
 pub use defs::{
     Amenity, CarriageDef, ItemCategory, ItemDef, ItemUse, JobDef, RECIPES, RecipeDef, Work,
 };
@@ -98,10 +106,19 @@ pub use npc::{
 };
 pub use params::SimParams;
 pub use personality::{Personality, Temper};
+pub use player::{
+    CHEST_SLOTS, Cabin, ChestError, DEFAULT_PLAYER_NAME, Greeting, INVENTORY_SLOTS, ItemStack,
+    MAX_PLAYER_NAME_CHARS, PLAYER_START_TOKENS, Place, PlayerCharacter, PlayerTie, Regard,
+    SleepError, SlotInventory, clean_player_name,
+};
 pub use stats::Stats;
 pub use time::{GameTime, MINUTES_PER_DAY, MINUTES_PER_HOUR};
 pub use world::{
     BuyError, Comfort, CraftError, Economy, EconomyCounters, GiveError, LifeCounters, Tally, World,
+};
+pub use world::{
+    GIFT_AFFINITY, GREET_AFFINITY, GREET_COOLDOWN_MINUTES, GREET_MINUTES, PRICE_PER_AFFINITY,
+    PURCHASE_AFFINITY, THEFT_SEEN_AFFINITY,
 };
 pub use world::{Market, MarketQuote, PriceSample, SellError, TREND_DAYS, Trend, mercato_price};
 pub use world::{MensaOccupancy, MensaRole};

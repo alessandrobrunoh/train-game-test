@@ -1,10 +1,10 @@
 //! Economia: tesoreria, salari, sussidi, tasse e contabilità.
 //!
 //! Money is a closed loop: the tokens in circulation are those in the NPCs'
-//! pockets plus the administration's [`Economy::treasury`], and their sum
-//! ([`World::money_supply`]) only changes when the player (who lives outside
-//! the sim) buys something ([`World::player_buy`], money in) or sells
-//! something to a Mercato ([`World::player_sell`], money out).
+//! and the player's pockets plus the administration's [`Economy::treasury`],
+//! and their sum ([`World::money_supply`]) never changes: the player's
+//! purchases ([`World::player_buy`]) pay the treasury, its sales to a
+//! Mercato ([`World::player_sell`]) are paid by it.
 //!
 //! - Out of the treasury: wages (per minute of work, at
 //!   [`crate::SimParams::wage_per_hour`]) and stipends for who has no job
@@ -233,11 +233,11 @@ impl Economy {
 }
 
 impl World {
-    /// All tokens in the sim: the treasury plus every NPC's. Constant except
-    /// for player purchases ([`World::player_buy`]), which bring tokens in,
-    /// and sales ([`World::player_sell`]), which take them out.
+    /// All tokens in the sim: the treasury, every NPC's and the player's.
+    /// Constant: tokens only move between them.
     pub fn money_supply(&self) -> u64 {
         self.economy.treasury
+            + u64::from(self.player.tokens)
             + self
                 .npcs
                 .iter()

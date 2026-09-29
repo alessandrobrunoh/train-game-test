@@ -13,7 +13,9 @@ pub struct NpcId(pub u32);
 
 /// Carriage identifier. It is also the carriage's position along the train
 /// (0 = head) and its index into `World::carriages`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct CarriageId(pub u16);
 
 /// Station identifier, **local to its carriage**: it is the index into

@@ -86,7 +86,11 @@ fn generation_sizes_the_treasury_on_the_payroll() {
         w.economy.treasury
     );
     assert_eq!(w.economy.pay_level, 1.0);
-    assert_eq!(w.money_supply(), w.economy.treasury + npc_tokens(&w));
+    assert_eq!(
+        w.money_supply(),
+        w.economy.treasury + npc_tokens(&w) + u64::from(w.player.tokens)
+    );
+    assert_eq!(w.player.tokens, sim::PLAYER_START_TOKENS);
     for n in &w.npcs {
         let t = n.inventory.tokens;
         if n.job.is_some() {
@@ -108,8 +112,8 @@ fn generation_sizes_the_treasury_on_the_payroll() {
 }
 
 /// Every token stays in the sim through wages, stipends, purchases, taxes,
-/// fines, help, births, deaths and inheritances; only the player's purchases
-/// bring new ones in.
+/// fines, help, births, deaths and inheritances, and through what the
+/// player buys, sells, takes, crafts and gives.
 #[test]
 fn money_is_conserved_for_30_days() {
     let params = SimParams {
@@ -124,8 +128,11 @@ fn money_is_conserved_for_30_days() {
     let mut brain = UtilityBrain::new(7);
     let market = first_of(&w, CarriageKind::Mercato);
     let serra = first_of(&w, CarriageKind::Serra);
-    let mut expected = w.money_supply();
-    let mut player_tokens = 1000u32;
+    let officina = first_of(&w, CarriageKind::Officina);
+    let coperta = sim::RecipeDef::by_key("coperta").unwrap();
+    w.player.tokens = 1000;
+    let expected = w.money_supply();
+    let (mut crafted, mut sold, mut given) = (0, 0, 0);
     for day in 0..30 {
         for minute in 0..DAY {
             w.run(&mut brain, 1);
@@ -135,16 +142,25 @@ fn money_is_conserved_for_30_days() {
                 "money changed on day {day} at {}",
                 w.clock
             );
-            // Now and then the player shops, takes and gives.
+            // Now and then the player shops, sells, takes, crafts and gives.
             if minute == 11 * 60 && day % 3 == 0 {
                 staff_counter(&mut w, market);
                 let item = [ItemKind::Vestito, ItemKind::Attrezzo][day % 2];
-                if let Ok(price) = w.player_buy(market, item, &mut player_tokens) {
-                    expected += u64::from(price);
+                let _ = w.player_buy(market, item);
+                if day % 2 == 1 && w.player_sell(market, ItemKind::Vestito).is_ok() {
+                    sold += 1;
                 }
                 w.player_take(serra, ItemKind::Verdura, 2);
-                let id = w.npcs[day % w.npcs.len()].id;
-                let _ = w.player_give(id, ItemKind::Razione);
+                w.player_take(officina, ItemKind::Tessuto, 2);
+                if w.player_craft(coperta, officina).is_ok() {
+                    crafted += 1;
+                }
+                let k = day % w.npcs.len();
+                let id = w.npcs[k].id;
+                w.npcs[k].needs.hunger = 0.2;
+                if w.player_give(id, ItemKind::Verdura).is_ok() {
+                    given += 1;
+                }
                 assert_eq!(w.money_supply(), expected, "player on day {day}");
             }
         }
@@ -158,6 +174,10 @@ fn money_is_conserved_for_30_days() {
     );
     assert!(c.pay > 0 && c.purchases > 0 && c.taxes > 0, "{c:?}");
     assert!(c.player_purchases > 0, "the player never bought");
+    assert!(
+        sold > 0 && crafted > 0 && given > 0,
+        "{sold} {crafted} {given}"
+    );
     assert!(d.thefts > 0 && d.help_given > 0, "{d:?}");
     assert!(c.inherited + c.estates > 0, "{c:?}");
     // Nobody held tokens for nothing: the treasury is neither empty nor all.
@@ -214,7 +234,7 @@ fn austerity_pays_everyone_the_same_share() {
     // Half, rounded up: with an odd `due` a ratio just below 1/2 would round
     // most shares down by a whole token.
     w.economy.treasury = due.div_ceil(2);
-    let supply = npc_tokens(&w) + due.div_ceil(2);
+    let supply = npc_tokens(&w) + u64::from(w.player.tokens) + due.div_ceil(2);
     w.run(&mut brain, 2);
     assert_eq!(w.money_supply(), supply);
     assert!(w.economy.treasury < 50, "{} left", w.economy.treasury);
@@ -289,7 +309,7 @@ fn pay_level_follows_the_treasury_within_bounds() {
     assert_eq!(raised(&w), 1);
     // An empty one: down a step a day, down to the floor.
     w.economy.treasury = 0;
-    let supply = npc_tokens(&w);
+    let supply = npc_tokens(&w) + u64::from(w.player.tokens);
     past_midnight(&mut w, &mut brain);
     assert!(w.economy.pay_level < w.params.pay_level_max);
     w.economy.pay_level = 0.52;
@@ -366,17 +386,15 @@ fn player_purchases_feed_the_treasury() {
     let market = first_of(&w, CarriageKind::Mercato);
     staff_counter(&mut w, market);
     let (treasury, supply) = (w.economy.treasury, w.money_supply());
-    let mut tokens = 100;
-    let price = w
-        .player_buy(market, ItemKind::Vestito, &mut tokens)
-        .unwrap();
-    assert_eq!(tokens, 100 - price);
+    let tokens = w.player.tokens;
+    let price = w.player_buy(market, ItemKind::Vestito).unwrap();
+    assert_eq!(w.player.tokens, tokens - price);
     assert_eq!(w.economy.treasury, treasury + u64::from(price));
-    assert_eq!(w.money_supply(), supply + u64::from(price));
+    assert_eq!(w.money_supply(), supply);
     assert_eq!(w.economy.counters.player_purchases, u64::from(price));
     // Taking and giving move goods, not money.
     w.player_take(first_of(&w, CarriageKind::Serra), ItemKind::Verdura, 3);
-    assert_eq!(w.money_supply(), supply + u64::from(price));
+    assert_eq!(w.money_supply(), supply);
 }
 
 #[test]

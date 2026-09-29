@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
 use crate::brain::{Brain, THINK};
-use crate::carriage::{Carriage, CarriageKind, StationKind};
+use crate::carriage::{Carriage, CarriageKind, Owner, StationKind};
 use crate::defs::{RecipeDef, StationCount};
 use crate::deliberation::{
     Deliberation, DeliberationCounters, Gathering, Grievance, ResolvedDeliberation,
@@ -22,6 +22,7 @@ use crate::names;
 use crate::npc::{Inventory, Job, LifeStage, Needs, Npc, Relation, RelationKind, Sex, Traits};
 use crate::params::SimParams;
 use crate::personality::Personality;
+use crate::player::{Cabin, PlayerCharacter};
 use crate::time::GameTime;
 
 mod comfort;
@@ -32,6 +33,7 @@ mod economy;
 mod life;
 mod market;
 mod mensa;
+mod player;
 
 pub use comfort::Comfort;
 pub use craft::CraftError;
@@ -39,6 +41,10 @@ pub use economy::{Economy, EconomyCounters, Tally};
 pub use life::LifeCounters;
 pub use market::{Market, MarketQuote, PriceSample, SellError, TREND_DAYS, Trend, mercato_price};
 pub use mensa::{MensaOccupancy, MensaRole};
+pub use player::{
+    GIFT_AFFINITY, GREET_AFFINITY, GREET_COOLDOWN_MINUTES, GREET_MINUTES, PRICE_PER_AFFINITY,
+    PURCHASE_AFFINITY, THEFT_SEEN_AFFINITY,
+};
 
 /// Expected minutes of actual work per worker per day, used to size the
 /// workforce at generation time.
@@ -156,6 +162,9 @@ pub struct World {
     /// Events already looked at for `news` (see `events_total`).
     #[serde(default)]
     news_seen: u64,
+    /// The player, a character of the train (see [`crate::player`]).
+    #[serde(default)]
+    pub player: PlayerCharacter,
     /// Scratch buffer reused every tick (see `presence_index`).
     #[serde(skip)]
     presence: Presence,
@@ -439,6 +448,7 @@ impl World {
                 traits,
                 meal_shift: Some(shift_of[i]),
                 personality: Some(personality),
+                player: None,
             });
         }
 
@@ -570,6 +580,23 @@ impl World {
             }
         }
 
+        // The player's cabin: a private bed upstairs in the first Dormitorio.
+        let home = dorms.first().map(|&d| {
+            let c = &mut carriages[d.index()];
+            let floor = c.floors() - 1;
+            let bed = c.push_private_station(StationKind::Bed, floor, Owner::Player);
+            Cabin {
+                carriage: d,
+                bed,
+                floor,
+            }
+        });
+        let player = PlayerCharacter {
+            place: home.map(|h| h.place()).unwrap_or_default(),
+            home,
+            ..PlayerCharacter::default()
+        };
+
         let economy = Economy::start(&params, &npcs);
         let specialties = market::assign_specialties(seed, &carriages, &params);
         let market = Market::new(&carriages, specialties);
@@ -604,6 +631,7 @@ impl World {
             last_chat_log: [None; 2],
             news: Vec::new(),
             news_seen: 0,
+            player,
             presence: Presence::default(),
             load: Vec::new(),
         };
@@ -800,105 +828,6 @@ impl World {
         })
     }
 
-    // ------------------------------------------------------------------
-    // Player
-    // ------------------------------------------------------------------
-    //
-    // The player is not an NPC: the game keeps its inventory and calls these
-    // to act on the world. None of them uses randomness, so the world stays
-    // deterministic given the same sequence of calls.
-
-    /// The player takes up to `units` whole units of `item` from the storage
-    /// of `carriage` (for free, but it is logged). Returns the units taken.
-    pub fn player_take(&mut self, carriage: CarriageId, item: ItemKind, units: u32) -> u32 {
-        let Some(c) = self.carriages.get_mut(carriage.index()) else {
-            return 0;
-        };
-        let amount = units.min(c.stock.count(item));
-        if amount == 0 {
-            return 0;
-        }
-        c.stock.take(item, amount as f32);
-        self.log(EventKind::PlayerTook {
-            item,
-            amount,
-            carriage,
-        });
-        amount
-    }
-
-    /// The player buys one `item` at the Mercato `carriage`, paying the
-    /// current price from `tokens`. A Mercante must be at the counter.
-    /// Returns the price paid.
-    pub fn player_buy(
-        &mut self,
-        carriage: CarriageId,
-        item: ItemKind,
-        tokens: &mut u32,
-    ) -> Result<u32, BuyError> {
-        let price = self.price(carriage, item).ok_or(BuyError::NotForSale)?;
-        if self.merchant_on_duty(carriage).is_none() {
-            return Err(BuyError::NoMerchant);
-        }
-        let c = &mut self.carriages[carriage.index()];
-        if c.stock.count(item) < 1 {
-            return Err(BuyError::OutOfStock);
-        }
-        if *tokens < price {
-            return Err(BuyError::TooExpensive(price));
-        }
-        c.stock.take(item, 1.0);
-        *tokens -= price;
-        // The player's tokens come from outside the sim: they enter circulation.
-        self.deposit(price);
-        self.economy.counters.player_purchases += u64::from(price);
-        self.log(EventKind::PlayerBought {
-            item,
-            price,
-            carriage,
-        });
-        Ok(price)
-    }
-
-    /// The player gives one `item` to `npc`, if it accepts it
-    /// ([`Npc::accepts_gift`]). Food feeds (a Razione like a meal, raw Verdura
-    /// half as much); a pot of Tè gives twice what a cup at a meal does; an
-    /// Attrezzo or Vestito arrives new. On error nothing changes and the
-    /// player keeps the item.
-    pub fn player_give(&mut self, npc: NpcId, item: ItemKind) -> Result<(), GiveError> {
-        let i = self.npc_index(npc).ok_or(GiveError::NoSuchNpc)?;
-        let restore = self.params.meal_restore;
-        let (te_energy, te_social) = (self.params.te_energy_boost, self.params.te_social_boost);
-        let target = &mut self.npcs[i];
-        if !target.accepts_gift(item) {
-            return Err(GiveError::NotWanted);
-        }
-        match item {
-            ItemKind::Razione | ItemKind::Verdura => {
-                let amount = if item == ItemKind::Razione {
-                    restore
-                } else {
-                    restore / 2.0
-                };
-                target.needs.hunger = (target.needs.hunger + amount).min(1.0);
-                target.starving_minutes = 0;
-            }
-            ItemKind::Te => {
-                let needs = &mut target.needs;
-                needs.energy = (needs.energy + 2.0 * te_energy).min(1.0);
-                needs.social = (needs.social + 2.0 * te_social).min(1.0);
-            }
-            _ => {
-                if let Some(slot) = target.inventory.slot_mut(item) {
-                    *slot = Some(1.0);
-                }
-            }
-        }
-        let name = target.name.clone();
-        self.log(EventKind::PlayerGave { npc, name, item });
-        Ok(())
-    }
-
     fn log(&mut self, kind: EventKind) {
         self.events.push(Event {
             time: self.clock,
@@ -1018,6 +947,7 @@ impl World {
         }
 
         self.run_deliberations(brain);
+        self.player_tick();
         self.trim_events();
         self.clock = now + 1;
     }
@@ -1719,6 +1649,8 @@ pub enum BuyError {
     OutOfStock,
     /// Not enough tokens; holds the price.
     TooExpensive(u32),
+    /// The player's inventory is full.
+    NoRoom,
 }
 
 impl fmt::Display for BuyError {
@@ -1728,6 +1660,7 @@ impl fmt::Display for BuyError {
             BuyError::NoMerchant => f.write_str("nessun mercante al bancone"),
             BuyError::OutOfStock => f.write_str("esaurito"),
             BuyError::TooExpensive(price) => write!(f, "servono {price} gettoni"),
+            BuyError::NoRoom => f.write_str("l'inventario è pieno"),
         }
     }
 }
@@ -1739,6 +1672,10 @@ pub enum GiveError {
     NoSuchNpc,
     /// Not hungry, already owns one, or has no use for it.
     NotWanted,
+    /// The player has none.
+    NotOwned,
+    /// The NPC distrusts the player ([`crate::Regard::Wary`]).
+    Distrust,
 }
 
 impl fmt::Display for GiveError {
@@ -1746,6 +1683,8 @@ impl fmt::Display for GiveError {
         match self {
             GiveError::NoSuchNpc => f.write_str("non c'è più"),
             GiveError::NotWanted => f.write_str("non gli serve"),
+            GiveError::NotOwned => f.write_str("non ce l'hai"),
+            GiveError::Distrust => f.write_str("non accetta niente da te"),
         }
     }
 }

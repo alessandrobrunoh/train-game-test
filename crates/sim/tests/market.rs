@@ -330,32 +330,35 @@ fn player_sales_are_paid_from_the_treasury() {
     w.clock = GameTime::from_dhm(1, 10, 0);
     let market = of_kind(&w, CarriageKind::Mercato)[0];
     let item = ItemKind::Vestito;
-    let mut tokens = 5;
-    assert_eq!(
-        w.player_sell(market, item, &mut tokens),
-        Err(SellError::NoMerchant)
-    );
+    w.player.tokens = 5;
+    assert_eq!(w.player_sell(market, item), Err(SellError::NoMerchant));
     staff_counter(&mut w, market);
     let serra = of_kind(&w, CarriageKind::Serra)[0];
     assert_eq!(
-        w.player_sell(serra, ItemKind::Verdura, &mut tokens),
+        w.player_sell(serra, ItemKind::Verdura),
         Err(SellError::NotForSale)
     );
     assert_eq!(
-        w.player_sell(market, ItemKind::Rottame, &mut tokens),
+        w.player_sell(market, ItemKind::Rottame),
         Err(SellError::NotForSale)
     );
+    // Only what the player owns.
+    assert_eq!(w.player_sell(market, item), Err(SellError::NotOwned));
+    w.player.inventory.add(item, 3);
     let (supply, treasury) = (w.money_supply(), w.economy.treasury);
     let stock = w.carriages[market.index()].stock.get(item);
     let price = w.price(market, item).unwrap();
     let expected = w.sell_price(market, item).unwrap();
     assert!(expected > 0 && expected < price);
-    let paid = w.player_sell(market, item, &mut tokens).unwrap();
+    // The Mercante never met the player: the plain buyback.
+    assert_eq!(w.player_sell_price(market, item), Some(expected));
+    let paid = w.player_sell(market, item).unwrap();
     assert_eq!(paid, expected);
-    assert_eq!(tokens, 5 + paid);
+    assert_eq!(w.player.tokens, 5 + paid);
+    assert_eq!(w.player.inventory.count(item), 2);
     assert_eq!(w.economy.treasury, treasury - u64::from(paid));
-    // The tokens left the sim with the player.
-    assert_eq!(w.money_supply(), supply - u64::from(paid));
+    // The tokens moved from the treasury to the player: nothing is created.
+    assert_eq!(w.money_supply(), supply);
     assert_eq!(w.economy.counters.player_sales, u64::from(paid));
     assert_eq!(w.carriages[market.index()].stock.get(item), stock + 1.0);
     assert!(matches!(
@@ -372,29 +375,57 @@ fn player_sales_are_paid_from_the_treasury() {
     // A full shelf buys nothing; nor does an empty treasury.
     let cap = w.params.market_goods_cap;
     w.carriages[market.index()].stock.set(item, cap);
-    assert_eq!(
-        w.player_sell(market, item, &mut tokens),
-        Err(SellError::NoRoom)
-    );
+    assert_eq!(w.player_sell(market, item), Err(SellError::NoRoom));
     w.carriages[market.index()].stock.set(item, 0.0);
     w.economy.treasury = 0;
-    let before = tokens;
-    assert_eq!(
-        w.player_sell(market, item, &mut tokens),
-        Err(SellError::NoMoney)
-    );
-    assert_eq!(tokens, before);
+    let before = w.player.tokens;
+    assert_eq!(w.player_sell(market, item), Err(SellError::NoMoney));
+    assert_eq!(w.player.tokens, before);
     // Buying it back costs more than it paid: no free money.
     w.economy.treasury = treasury;
     w.carriages[market.index()].stock.set(item, stock);
-    let mut tokens = 100;
-    let sold = w.player_sell(market, item, &mut tokens).unwrap();
-    let bought = w.player_buy(market, item, &mut tokens).unwrap();
+    w.player.tokens = 100;
+    let sold = w.player_sell(market, item).unwrap();
+    let bought = w.player_buy(market, item).unwrap();
     assert!(bought > sold, "sold {sold}, bought {bought}");
 }
 
-/// Every token stays in the sim, except those the player brings in by
-/// buying and takes out by selling.
+#[test]
+fn a_friendly_merchant_gives_the_player_better_prices() {
+    let mut w = World::generate_with_params(42, 10, 100, quiet());
+    w.clock = GameTime::from_dhm(1, 10, 0);
+    let market = of_kind(&w, CarriageKind::Mercato)[0];
+    let item = ItemKind::Attrezzo;
+    staff_counter(&mut w, market);
+    let m = w.merchant_on_duty(market).unwrap().id;
+    let i = w.npcs.iter().position(|n| n.id == m).unwrap();
+    let price = w.price(market, item).unwrap();
+    let buyback = w.sell_price(market, item).unwrap();
+    let tie = |affinity| {
+        Some(sim::PlayerTie {
+            affinity,
+            ..sim::PlayerTie::default()
+        })
+    };
+    w.npcs[i].player = tie(1.0);
+    let friendly = w.player_price(market, item).unwrap();
+    assert!(friendly < price, "{friendly} vs {price}");
+    assert!(w.player_sell_price(market, item).unwrap() > buyback);
+    assert!(w.player_sell_price(market, item).unwrap() < friendly);
+    w.npcs[i].player = tie(-1.0);
+    let wary = w.player_price(market, item).unwrap();
+    assert!(wary > price, "{wary} vs {price}");
+    assert!(w.player_sell_price(market, item).unwrap() < buyback);
+    // The market window shows the player's prices.
+    let quote = w
+        .market_quotes(market)
+        .into_iter()
+        .find(|q| q.item == item)
+        .unwrap();
+    assert_eq!(quote.player_price, wary);
+}
+
+/// Every token stays in the sim, also when the player buys and sells.
 #[test]
 fn money_is_conserved_with_player_trade() {
     let params = SimParams {
@@ -405,8 +436,8 @@ fn money_is_conserved_with_player_trade() {
     let mut w = World::generate_with_params(8, 20, 300, params);
     let mut brain = UtilityBrain::new(8);
     let markets = of_kind(&w, CarriageKind::Mercato);
-    let mut expected = w.money_supply();
-    let mut player = 200u32;
+    w.player.tokens = 200;
+    let expected = w.money_supply();
     let (mut sold, mut bought) = (0, 0);
     for day in 0..12u64 {
         for minute in 0..DAY {
@@ -416,12 +447,10 @@ fn money_is_conserved_with_player_trade() {
                 staff_counter(&mut w, market);
                 let item = ItemKind::SOLD[(day as usize + minute as usize) % ItemKind::SOLD.len()];
                 if minute % 2 == 0 {
-                    if let Ok(price) = w.player_buy(market, item, &mut player) {
-                        expected += u64::from(price);
+                    if w.player_buy(market, item).is_ok() {
                         bought += 1;
                     }
-                } else if let Ok(pay) = w.player_sell(market, item, &mut player) {
-                    expected -= u64::from(pay);
+                } else if w.player_sell(market, item).is_ok() {
                     sold += 1;
                 }
             }

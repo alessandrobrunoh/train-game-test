@@ -57,12 +57,13 @@ pub struct LifeCounters {
 }
 
 impl World {
-    /// Bed capacity of a carriage (0 if it is not a Dormitorio).
+    /// Bed capacity of a carriage for its NPCs (0 if it is not a
+    /// Dormitorio; the player's private bed does not count).
     pub fn beds(&self, carriage: CarriageId) -> usize {
         self.carriage(carriage).map_or(0, |c| {
             c.stations
                 .iter()
-                .filter(|s| s.kind == StationKind::Bed)
+                .filter(|s| s.kind == StationKind::Bed && s.is_shared())
                 .map(|s| usize::from(s.capacity))
                 .sum()
         })
@@ -596,6 +597,7 @@ impl World {
             // The family eats together.
             meal_shift: Some(meal_shift),
             personality: Some(personality),
+            player: None,
         };
         for &parent in &[mother, father] {
             self.npcs[parent].relations.push(Relation {

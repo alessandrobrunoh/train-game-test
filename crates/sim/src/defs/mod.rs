@@ -25,7 +25,7 @@ mod specialties;
 pub use carriages::{
     CARRIAGES, CarriageDef, STATIONS, StationCount, StationDef, StationRule, Storage,
 };
-pub use items::{Amenity, ITEMS, ItemCategory, ItemDef, ItemUse, Store};
+pub use items::{Amenity, DEFAULT_STACK_LIMIT, ITEMS, ItemCategory, ItemDef, ItemUse, Store};
 pub use jobs::{JOBS, JobDef, Work};
 pub use recipes::{Input, RECIPES, RecipeDef, Source};
 
@@ -167,6 +167,10 @@ mod tests {
                 || item == ItemKind::Razione;
             assert!(used, "{item:?} has no use");
             assert!(def.base_value > 0, "{item:?} is worth nothing");
+            assert!(item.stack_size() >= 1, "{item:?} can't be carried");
+            if def.usage.is_owned() {
+                assert_eq!(item.stack_size(), 1, "{item:?}: one per slot");
+            }
             assert!(!def.name.is_empty() && !def.plural.is_empty());
             assert!(!def.with_article.is_empty() && !def.description.is_empty());
         }
