@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 use sim::{ItemKind, NpcId, Stock, UtilityBrain, World};
+use sim_laya::{LayaBrain, LayaConfig};
 
 /// Gettoni con cui il giocatore comincia la partita.
 pub const PLAYER_START_TOKENS: u32 = 50;
@@ -26,11 +27,27 @@ impl Plugin for StatePlugin {
     }
 }
 
+/// Il cervello degli NPC: `UtilityBrain`, più Laya quando il giocatore lo
+/// attiva (vedi `brain_ui.rs`). Nei salvataggi va solo il `UtilityBrain`
+/// ([`LayaBrain::fallback`]); il resto è stato di esecuzione.
+pub type GameBrain = LayaBrain<UtilityBrain>;
+
+/// Cervello del gioco sopra `utility`, con Laya spento finché non lo si sceglie.
+pub fn new_brain(utility: UtilityBrain) -> GameBrain {
+    LayaBrain::new(
+        utility,
+        LayaConfig {
+            enabled: false,
+            ..LayaConfig::default()
+        },
+    )
+}
+
 /// Il mondo simulato e il cervello che decide per gli NPC.
 #[derive(Resource)]
 pub struct Sim {
     pub world: World,
-    pub brain: UtilityBrain,
+    pub brain: GameBrain,
 }
 
 /// Velocità del tempo di gioco.

@@ -292,7 +292,7 @@ pub fn encode_game(
     let header = SaveHeader::of(run_id, slot, now_ms(), &sim.world);
     let body = SaveBodyRef {
         world: &sim.world,
-        brain: &sim.brain,
+        brain: sim.brain.fallback(),
         player: player.to_array(),
         tokens: inventory.tokens,
         items: inventory.items,
@@ -375,7 +375,8 @@ impl GameAccess<'_, '_> {
         let (left, right) = TrainLayout::from_world(&game.world).inner_bounds();
         let player = Vec2::new(game.player.x.clamp(left + 8.0, right - 8.0), game.player.y);
         self.sim.world = game.world;
-        self.sim.brain = game.brain;
+        // Tiene la modalità scelta (e il modello caricato), dimentica il resto.
+        self.sim.brain.replace_fallback(game.brain);
         *self.inventory = game.inventory;
         *self.clock = game.clock;
         *self.run = game.run;
@@ -892,6 +893,7 @@ fn random_seed() -> u64 {
 mod tests {
     use super::*;
     use crate::save_file::tests::{TempDir, world_bytes};
+    use crate::state::new_brain;
     use crate::stations::StationLayout;
     use crate::train::Carriage;
     use sim::MINUTES_PER_DAY;
@@ -918,7 +920,7 @@ mod tests {
     fn save_load_continue_matches_continuing_without_saving() {
         let mut sim = Sim {
             world: World::generate(3, 12, 150),
-            brain: UtilityBrain::new(3),
+            brain: new_brain(UtilityBrain::new(3)),
         };
         sim.world.run(&mut sim.brain, 3 * MINUTES_PER_DAY + 321);
         let bytes = save_bytes(&sim, "rapido");
@@ -936,7 +938,10 @@ mod tests {
         sim.world.run(&mut sim.brain, ticks);
         loaded.world.run(&mut loaded.brain, ticks);
         assert_eq!(world_bytes(&loaded.world), world_bytes(&sim.world));
-        assert_eq!(brain_bytes(&loaded.brain), brain_bytes(&sim.brain));
+        assert_eq!(
+            brain_bytes(&loaded.brain),
+            brain_bytes(sim.brain.fallback())
+        );
     }
 
     /// Dimensioni e tempi di un salvataggio del treno di default (400 persone)
@@ -945,7 +950,7 @@ mod tests {
     fn save_size_and_timing_after_a_few_years() {
         let mut sim = Sim {
             world: World::generate(SIM_SEED, SIM_CARRIAGES, SIM_NPCS),
-            brain: UtilityBrain::new(SIM_SEED),
+            brain: new_brain(UtilityBrain::new(SIM_SEED)),
         };
         let start = Instant::now();
         sim.world

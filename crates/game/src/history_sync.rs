@@ -419,7 +419,7 @@ mod tests {
             })
             .insert_resource(Sim {
                 world: World::generate(42, 20, 400),
-                brain: UtilityBrain::new(42),
+                brain: crate::state::new_brain(UtilityBrain::new(42)),
             });
         let advance = |app: &mut App, days: u64| {
             let mut sim = app.world_mut().resource_mut::<Sim>();

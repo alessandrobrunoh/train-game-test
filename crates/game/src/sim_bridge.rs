@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use sim::{UtilityBrain, World};
 
-use crate::state::{Sim, SimClock, SimPerf};
+use crate::state::{Sim, SimClock, SimPerf, new_brain};
 
 // --- Parametri della partita -----------------------------------------------
 
@@ -46,7 +46,7 @@ const SPEED_KEYS: [KeyCode; 5] = [
 pub fn new_sim() -> Sim {
     Sim {
         world: World::generate(SIM_SEED, SIM_CARRIAGES, SIM_NPCS),
-        brain: UtilityBrain::new(SIM_SEED),
+        brain: new_brain(UtilityBrain::new(SIM_SEED)),
     }
 }
 

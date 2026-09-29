@@ -16,6 +16,7 @@ use sim::{
     Stats, World,
 };
 
+use crate::brain_ui::BrainWindow;
 use crate::history_ui::HistoryWindow;
 use crate::population::PopulationWindow;
 use crate::saves::SavesWindow;
@@ -121,6 +122,7 @@ fn time_panel(
     mut population: ResMut<PopulationWindow>,
     mut saves: ResMut<SavesWindow>,
     mut history: ResMut<HistoryWindow>,
+    mut brain: ResMut<BrainWindow>,
     cache: Res<UiCache>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -166,6 +168,7 @@ fn time_panel(
                 ui.separator();
                 ui.toggle_value(&mut population.open, "Popolazione (G)");
                 ui.toggle_value(&mut history.open, "Storia (H)");
+                ui.toggle_value(&mut brain.open, "Cervello (B)");
                 if ui.toggle_value(&mut saves.open, "Partite (Esc)").changed() {
                     saves.refresh();
                 }
@@ -254,6 +257,7 @@ fn inspector(
                         .show(ui, |ui| {
                             clicked =
                                 npc_details(ui, &sim.world, npc, &mut following, &mut show_history);
+                            crate::brain_ui::decision_section(ui, &sim.brain, npc);
                         });
                 }
                 None => missing_npc(ui, &sim.world, id),

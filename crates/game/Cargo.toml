@@ -8,6 +8,8 @@ bevy = "0.19.1"
 bevy_egui = "0.42.0"
 egui_plot = "0.37.0"
 sim = { path = "../sim" }
+# Cervello ibrido Laya + UtilityBrain (vedi `brain_ui.rs`); il modello vero solo con la feature `laya`.
+sim-laya = { path = "../sim-laya" }
 # Storico SQLite della partita (vedi `history_sync.rs`).
 history = { path = "../history" }
 # Salvataggi (vedi `saves.rs`): cartella dati per piattaforma, formato binario
@@ -16,6 +18,13 @@ directories = "6.0.0"
 lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
 serde = { version = "1", features = ["derive"] }
+
+[features]
+default = []
+# Modello Laya vero (CPU): `cargo run -p game --features laya`.
+laya = ["sim-laya/laya"]
+# Laya sulla GPU Apple (Metal). Implica `laya`.
+laya-metal = ["laya", "sim-laya/metal"]
 
 [dev-dependencies]
 # Solo per il test sulla copertura dei glifi del font del gioco.
