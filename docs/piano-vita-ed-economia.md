@@ -20,6 +20,76 @@ Legenda: **[S]** = crate `sim` · **[G]** = crate `game` · **[T]** = test da ag
 
 ---
 
+## Direzione nuova: il mondo lo costruisce l'AI (2026-09-29)
+
+Decisione dell'utente: le regole del mondo non le scriviamo noi. **Il mondo si costruisce da solo, in tempo reale, con modelli LLM che ragionano**: oggetti, ricette, arredi, carrozze, lavori, soldi, leggi, fazioni, religioni, malattie ed eventi nascono mentre il treno va avanti.
+
+Principio: **l'AI propone, il motore decide.** Le "leggi di natura" restano codice (tempo, spazio, materia, fame, morte, azioni di base) perché un LLM da solo non è coerente. Tutto il resto lo costruisce l'AI sopra queste leggi, e ogni proposta passa da un controllo prima di entrare nel mondo.
+
+### Struttura a strati
+
+```
+game        Bevy: disegna e mostra la cronaca, i pensieri, le notifiche
+narrator    [nuovo] il Narratore: osserva il treno, propone novità
+            (oggetti, regole, eventi, istituzioni)
+minds       (oggi sim-laya) menti a livelli: regole veloci per la folla,
+            Laya locale, modello grande per i personaggi chiave
+llm         [nuovo] client: .env (URL, chiave, modello, budget), chiamate in
+            background, timeout, modello finto per i test, registro delle risposte
+sim         il motore, deterministico, senza AI e senza Bevy:
+            - fisica: tempo, spazio, materia, fame, morte
+            - azioni di base: muovi, prendi, dai, scambia, trasforma, costruisci, colpisci
+            - cataloghi ampliabili durante la partita (oggetti, ricette, arredi, lavori)
+            - Custode: controlla ogni proposta prima di applicarla
+history     la cronaca
+```
+
+Flusso: la `sim` produce un riassunto dello stato; `minds` e `narrator` decidono quando serve l'AI; `llm` chiama in background, dentro il budget; il Custode controlla la risposta, che viene applicata a un **minuto di gioco fissato** e registrata nel salvataggio, così la partita si può rigiocare. Se la risposta non arriva in tempo decide il cervello veloce: il mondo non aspetta mai.
+
+### Idee da far nascere (non da scrivere a mano)
+
+- **Economia che nasce:** niente soldi predefiniti. Si parte come nel film, con la testa del treno che distribuisce razioni e buoni: i buoni sono il seme della moneta. Servono proprietà, scambio tra NPC (offerta, controfferta), promesse e debiti, reputazione. Il Narratore propone le istituzioni: buoni razione, gettoni di una fazione, banco dei pegni, inflazione.
+- **Carrozze e arredi dinamici:** una carrozza "è" un Dormitorio perché contiene letti, non per un'etichetta. Gli arredi sono oggetti con posizione e proprietario: si spostano, si rompono, si rubano (il letto portato al Mercato).
+- **Proprietà e accesso:** chi può stare dove; espulsioni; classi sociali (la testa chiusa ai poveri). **Tunnel** al piano -1 sotto tutte le carrozze: buio, senza controlli, ratti e contrabbando.
+- **Crimine e ordine:** fame → furto → testimoni → guardie → punizione; il lavoro di guardia nasce dalla domanda.
+- **Lavori che nascono dai bisogni:** domanda misurata ogni giorno, salari che salgono con la carenza, attitudini (in parte ereditate) ed esperienza. Se nessun lavoro copre un bisogno, il Narratore ne inventa uno combinando le azioni di base (es. "Erborista": Infuso da Erbe, cura malattia lieve).
+- **Mente:** memoria, umore, stress, convinzioni che si diffondono chiacchierando; fazioni, religioni, politica; crisi mentali, di solito lievi e raramente gravi (anche violente), con segnali prima e conseguenze dopo, regolabili o disattivabili.
+- **Malattie e ratti:** contagio tra chi sta nello stesso posto; ratti nel tunnel che mangiano le scorte; dottori e derattizzatori nascono dalla domanda.
+- **Crafting a griglia** (stile Minecraft) con oggetti che hanno proprietà (materiale, qualità, usura) invece di un elenco fisso.
+- **Camminata vera:** gli NPC in viaggio sono visibili mentre attraversano le carrozze, corrono se sono in ritardo sul turno.
+
+### Problemi e soluzioni
+
+| Problema | Soluzione |
+|---|---|
+| Costo: centinaia di NPC con un modello grande costano troppo | Livelli di pensiero; una chiamata decide per un gruppo; budget orario rigido (`LLM_MAX_CALLS_PER_HOUR`). |
+| Lentezza: secondi per risposta | Richieste con scadenza a minuto fisso; fallback sul cervello veloce. |
+| Incoerenza e memoria | "Canone" del mondo scritto e aggiornato; memorie riassunte; il Custode rifiuta le contraddizioni. |
+| Risposte non valide | Formato JSON fisso, controllo, un solo nuovo tentativo, poi si rinuncia. |
+| Ripetitività | Registro di ciò che è già stato inventato; temi a caso; guida di stile. |
+| Mondo che si rompe | Fisica nel codice; il Narratore ha l'obiettivo "tieni viva la storia"; qualche disastro è accettato. |
+| Test e determinismo | Risposte registrate nel salvataggio (rigiocabile); modello finto; test sulle invarianti. |
+| Codice scritto dall'AI | All'inizio solo dati che combinano azioni di base; uno script con limiti di esecuzione solo dopo. |
+| Grafica delle cose nuove | Disegni procedurali da materiale e forma; icone generiche. |
+| Divertimento | Cronaca, pensieri visibili, notifiche: il giocatore deve capire perché succedono le cose. |
+| Censura della violenza da parte dei fornitori | Meccaniche nel codice, l'AI dà motivi e racconto; fornitore configurabile. |
+| Italiano dei modelli piccoli | Testi visibili dal modello grande o passati dalla grammatica di `dialogue::grammar`. |
+| Portata del progetto | Prototipi misurati; ogni passo giocabile da solo. |
+
+### Ordine di lavoro
+
+1. **A1. Crate `llm` + `.env`:** configurazione (`LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL`, timeout, budget), client compatibile OpenAI (OpenAI, OpenRouter, Ollama, LM Studio…), coda in background, modello finto, registro per rigiocare.
+   *Fatto:* `crates/llm` (`LlmConfig::load`, `OpenAiClient`, `LlmQueue` con `Budget`, `MockLlm`, `Recorder`/`Replay`, `complete_json` con un nuovo tentativo), `.env.example`, prova con `cargo run -p llm --example llm_ping`. Nessun crate dipende ancora da `llm`: lo userà il Narratore (A3).
+2. **A2. Cataloghi ampliabili + Custode in `sim`:** oggetti, ricette e lavori diventano dati aggiungibili durante la partita (oggi sono `static`).
+3. **A3. Narratore prototipo:** una novità per giorno di gioco; misurare costo, lentezza e qualità.
+4. **A4. Economia che nasce:** proprietà, scambio, buoni razione della testa.
+5. **A5. Menti pensanti:** memoria e riflessione per pochi NPC chiave.
+6. **A6. Contenuti del mondo:** arredi mobili, accessi e classi, tunnel, ratti, malattie, fazioni, crisi mentali.
+
+Effetto sulle fasi sotto: la **Fase 4** resta, ma l'inventario non deve legarsi ai tipi fissi di oggetto; la **Fase 2** (lavori e carrozze) diventa A2 (cataloghi ampliabili) più i lavori che nascono dai bisogni, invece di un elenco scritto da noi. La **Fase 6d** (tesoreria e salari fissi) sarà sostituita da A4.
+
+---
+
 ## Stato attuale (punto di partenza)
 
 | Area | Cosa c'è | Cosa manca |
