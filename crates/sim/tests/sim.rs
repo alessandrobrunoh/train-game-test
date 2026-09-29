@@ -196,11 +196,12 @@ fn generated_options_are_valid() {
                         assert_ne!(to, here.id);
                         assert!(w.carriage(to).is_some());
                         assert!(o.goal.is_some());
-                        assert_eq!(o.minutes, w.travel_minutes(here.id, to).max(1));
+                        assert_eq!(o.minutes, w.trip_minutes(npc, to).max(1));
                     }
                     Action::Socialize(other) => {
                         assert_ne!(other, id);
                         assert_eq!(w.npc(other).unwrap().carriage, here.id);
+                        assert_eq!(w.npc(other).unwrap().floor, npc.floor);
                     }
                     Action::Buy(item) => {
                         assert_eq!(here.kind, CarriageKind::Mercato);

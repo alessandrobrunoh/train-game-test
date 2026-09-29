@@ -417,6 +417,7 @@ impl World {
                 born,
                 age,
                 carriage: home,
+                floor: 0,
                 home,
                 job,
                 workplace,
@@ -550,7 +551,13 @@ impl World {
                         workers.div_ceil(usize::from(rule.capacity)) + 1
                     }
                 };
-                c.push_stations(rule.kind, n, rule.capacity);
+                let floors = if rule.spread { c.floors() } else { 1 };
+                for f in 0..floors {
+                    // Ground floor first; it takes the remainder.
+                    let share = n / usize::from(floors)
+                        + usize::from(usize::from(f) < n % usize::from(floors));
+                    c.push_stations(rule.kind, share, rule.capacity, f);
+                }
             }
             for &(item, amount) in def.start_stock {
                 c.stock.set(item, amount);
@@ -625,7 +632,7 @@ impl World {
     /// these two talk?" check of the conversations goes through here.
     pub fn same_place(&self, a: &Npc, b: &Npc) -> bool {
         let travelling = |n: &Npc| matches!(n.action, Action::Travel { .. });
-        a.carriage == b.carriage && !travelling(a) && !travelling(b)
+        a.carriage == b.carriage && a.floor == b.floor && !travelling(a) && !travelling(b)
     }
 
     /// NPCs currently in a carriage (travellers count as being in their origin).
@@ -640,6 +647,17 @@ impl World {
 
     pub fn travel_minutes(&self, from: CarriageId, to: CarriageId) -> u64 {
         u64::from(from.distance(to)) * self.params.travel_minutes_per_carriage
+    }
+
+    /// Minutes `npc` takes to walk to `to`: the carriages to cross, plus the
+    /// stairs down if it is on an upper floor.
+    pub fn trip_minutes(&self, npc: &Npc, to: CarriageId) -> u64 {
+        let stairs = if npc.floor > 0 {
+            self.params.stairs_minutes
+        } else {
+            0
+        };
+        self.travel_minutes(npc.carriage, to) + stairs
     }
 
     /// e.g. `Mensa «Il Refettorio» (carrozza 2)`.
@@ -698,7 +716,7 @@ impl World {
         };
         let family = self.family_context(npc);
         Some(format!(
-            "{} ({moment}). {}, {} anni ({}), si trova in {}. Casa: {}. {job} {family}\
+            "{} ({moment}). {}, {} anni ({}), si trova in {}{}. Casa: {}. {job} {family}\
              Possiede {} gettoni, {tool} e {clothes}. \
              Sazietà {} ({:.2}), energia {} ({:.2}), socialità {} ({:.2}).",
             self.clock,
@@ -706,6 +724,7 @@ impl World {
             npc.age,
             npc.stage().name(npc.sex),
             self.carriage_label(npc.carriage),
+            upstairs(npc.floor),
             self.carriage_label(npc.home),
             inv.tokens,
             level(npc.needs.hunger),
@@ -1029,7 +1048,7 @@ impl World {
         presence.spot.clear();
         presence.spot.resize(self.next_npc_id as usize, 0);
         // Who is already in a conversation is not available (marked first).
-        const TALKING: u16 = u16::MAX;
+        const TALKING: u32 = u32::MAX;
         for c in &self.conversations {
             for id in [c.a, c.b] {
                 if let Some(spot) = presence.spot.get_mut(id.0 as usize) {
@@ -1043,7 +1062,7 @@ impl World {
                 *spot = 0;
             } else if available_for_chat(npc) {
                 by_carriage[npc.carriage.index()].push(i);
-                *spot = npc.carriage.0 + 1;
+                *spot = Presence::spot_of(npc.carriage, npc.floor);
             }
         }
         presence
@@ -1059,7 +1078,7 @@ impl World {
             let (action, minutes, goal) = if here != place {
                 (
                     Action::Travel { to: place },
-                    self.travel_minutes(here, place).max(1),
+                    self.trip_minutes(&self.npcs[i], place).max(1),
                     Some(ActionKind::Idle),
                 )
             } else {
@@ -1121,7 +1140,7 @@ impl World {
             push(Action::Wait, p.queue_patience_minutes.max(1), None);
         }
 
-        if let Some(bed) = carriage.free_station(StationKind::Bed) {
+        if let Some(bed) = carriage.free_station_for(StationKind::Bed, npc.id) {
             let minutes = if p.is_long_sleep(now.hour()) {
                 // Who has no job to go to wakes up for its breakfast shift.
                 let late = match npc.job {
@@ -1169,7 +1188,7 @@ impl World {
                     RelationKind::Friend => 0.0,
                     _ => 0.5,
                 };
-            if closeness <= 0.0 || !presence.is_available_in(r.other, here) {
+            if closeness <= 0.0 || !presence.is_available_in(r.other, here, npc.floor) {
                 continue;
             }
             // Keep the two closest, closest first.
@@ -1186,7 +1205,12 @@ impl World {
             let minutes = self.rng.random_range(p.socialize_min..=p.socialize_max);
             push(Action::Socialize(id), minutes, None);
         }
-        for &j in presence.by_carriage[here.index()]
+        let same_floor: Vec<usize> = presence.by_carriage[here.index()]
+            .iter()
+            .copied()
+            .filter(|&j| self.npcs[j].floor == npc.floor)
+            .collect();
+        for &j in same_floor
             .sample(&mut self.rng, 3)
             .filter(|&&j| j != i && !close.contains(&Some(self.npcs[j].id)))
             .take(2)
@@ -1196,7 +1220,9 @@ impl World {
         }
 
         // --- Travel, each with the goal it serves ---
-        let travel = |to: CarriageId| u64::from(to.distance(here)) * p.travel_minutes_per_carriage;
+        let stairs = if npc.floor > 0 { p.stairs_minutes } else { 0 };
+        let travel =
+            |to: CarriageId| u64::from(to.distance(here)) * p.travel_minutes_per_carriage + stairs;
         let nearest = |pred: &dyn Fn(&Carriage) -> bool| {
             self.carriages
                 .iter()
@@ -1299,9 +1325,10 @@ impl World {
                 self.queue_len(npc.carriage)
             ),
             Action::Eat(_) => format!("mangia una razione in {}", here.label()),
-            Action::Sleep(_) if self.params.is_long_sleep(self.clock.hour()) => format!(
-                "va a dormire in {} fino alle {:02}:{:02}",
+            Action::Sleep(bed) if self.params.is_long_sleep(self.clock.hour()) => format!(
+                "va a dormire in {}{} fino alle {:02}:{:02}",
                 here.label(),
+                upstairs(here.floor_of(bed)),
                 end.hour(),
                 end.minute()
             ),
@@ -1380,7 +1407,11 @@ impl World {
                     }
                 }
             }
-            Action::Travel { to } => self.npcs[i].carriage = to,
+            Action::Travel { to } => {
+                // Through the gangways, which are on the ground floor.
+                self.npcs[i].carriage = to;
+                self.npcs[i].floor = 0;
+            }
             // A one-sided chat (conversations end in `end_conversations`):
             // the busy partner still gets a bonus and the tie changes.
             Action::Socialize(partner) => {
@@ -1450,7 +1481,13 @@ impl World {
             minutes = self.start_chat(i, partner, minutes).max(1);
         }
         if let Some(station) = action.station() {
-            self.carriages[here.index()].stations[station.index()].occupancy += 1;
+            let station = &mut self.carriages[here.index()].stations[station.index()];
+            station.occupancy += 1;
+            self.npcs[i].floor = station.floor;
+        }
+        if action == Action::Wait {
+            // The Mensa queues are on the ground floor.
+            self.npcs[i].floor = 0;
         }
         match action {
             Action::Eat(_) => {
@@ -1755,6 +1792,15 @@ fn can_buy_at(
         && price_at(p, level, market, c, item).is_some_and(|price| price <= npc.inventory.tokens)
 }
 
+/// " (al piano di sopra)" for an upper floor, nothing for the ground floor.
+fn upstairs(floor: u8) -> &'static str {
+    if floor > 0 {
+        " (al piano di sopra)"
+    } else {
+        ""
+    }
+}
+
 /// Whether the train has a carriage of `kind`.
 fn has_kind(carriages: &[Carriage], kind: CarriageKind) -> bool {
     carriages.iter().any(|c| c.kind == kind)
@@ -1857,14 +1903,21 @@ fn available_for_chat(npc: &Npc) -> bool {
 /// (a scratch buffer: its allocations are reused).
 #[derive(Clone, Debug, Default)]
 struct Presence {
-    /// NPC indices per carriage.
+    /// NPC indices per carriage (any floor).
     by_carriage: Vec<Vec<usize>>,
-    /// Per NPC id: carriage index + 1, or 0 if not available.
-    spot: Vec<u16>,
+    /// Per NPC id: [`Presence::spot_of`] its carriage and floor, or 0 if not available.
+    spot: Vec<u32>,
 }
 
 impl Presence {
-    fn is_available_in(&self, id: NpcId, carriage: CarriageId) -> bool {
-        self.spot.get(id.0 as usize) == Some(&(carriage.0 + 1))
+    /// Floors a carriage can have, for [`Presence::spot_of`].
+    const FLOOR_SLOTS: u32 = 4;
+
+    fn spot_of(carriage: CarriageId, floor: u8) -> u32 {
+        u32::from(carriage.0) * Self::FLOOR_SLOTS + u32::from(floor).min(Self::FLOOR_SLOTS - 1) + 1
+    }
+
+    fn is_available_in(&self, id: NpcId, carriage: CarriageId, floor: u8) -> bool {
+        self.spot.get(id.0 as usize) == Some(&Self::spot_of(carriage, floor))
     }
 }

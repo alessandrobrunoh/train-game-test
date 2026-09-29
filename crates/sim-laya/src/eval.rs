@@ -276,8 +276,12 @@ pub fn obvious_scenarios(seed: u64, per_kind: usize, k: usize) -> Vec<Scenario> 
             let here = npc_mut(&mut w, id).home;
             let npc = npc_mut(&mut w, id);
             npc.carriage = here;
+            npc.floor = 0;
             npc.needs.social = 0.05 + 0.03 * (v % 3) as f32;
-            npc_mut(&mut w, friend).carriage = here;
+            let friend = npc_mut(&mut w, friend);
+            // Accanto: stessa carrozza e stesso piano.
+            friend.carriage = here;
+            friend.floor = 0;
             push(
                 &mut out,
                 &mut baselines,

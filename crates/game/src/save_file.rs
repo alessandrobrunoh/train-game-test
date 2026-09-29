@@ -33,8 +33,9 @@ use sim::{GameTime, Stock, UtilityBrain, World};
 
 /// Versione del formato dei salvataggi. 6: catalogo degli oggetti e crafting
 /// (Fase 3: `Stock` con 13 oggetti) insieme a prezzi per distanza e
-/// specialità delle carrozze (Fase 6a/6b).
-pub const SAVE_VERSION: u32 = 6;
+/// specialità delle carrozze (Fase 6a/6b). 7: piani delle carrozze
+/// (`Npc::floor`, `Station::floor`, `SimParams::stairs_minutes`).
+pub const SAVE_VERSION: u32 = 7;
 const MAGIC: [u8; 8] = *b"TRAINSAV";
 /// Byte fissi prima dell'intestazione: magic, versione, lunghezza.
 const PREFIX_LEN: usize = MAGIC.len() + 4 + 4;

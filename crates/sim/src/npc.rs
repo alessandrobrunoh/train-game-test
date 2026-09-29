@@ -185,6 +185,12 @@ pub struct Npc {
     pub age: u32,
     /// Carriage the NPC is in. While travelling it stays the origin until arrival.
     pub carriage: CarriageId,
+    /// Storey of the carriage the NPC is on (0 = ground floor). Stations
+    /// set it; travellers keep the floor they left from (they come down the
+    /// stairs first, see [`crate::SimParams::stairs_minutes`]) and arrive on
+    /// the ground floor.
+    #[serde(default)]
+    pub floor: u8,
     /// Dormitorio the NPC lives in.
     pub home: CarriageId,
     pub job: Option<Job>,

@@ -39,6 +39,9 @@ pub struct StationRule {
     /// NPCs one station holds at once.
     pub capacity: u16,
     pub count: StationCount,
+    /// Spread the stations evenly over the carriage's floors (ground floor
+    /// first); otherwise they are all on the ground floor.
+    pub spread: bool,
 }
 
 /// How many stations a [`StationRule`] adds.
@@ -66,6 +69,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
             kind: StationKind::Bed,
             capacity: 1,
             count: StationCount::Beds,
+            spread: true,
         }],
         storage: &[],
         start_stock: &[],
@@ -80,6 +84,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
                 kind: StationKind::Table,
                 capacity: 6,
                 count: StationCount::Seats,
+                spread: false,
             },
             StationRule {
                 kind: StationKind::Stove,
@@ -88,6 +93,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
                     job: Job::Cuoco,
                     peak: true,
                 },
+                spread: false,
             },
         ],
         storage: &[Storage {
@@ -108,6 +114,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
                 job: Job::Contadino,
                 peak: true,
             },
+            spread: false,
         }],
         storage: &[Storage {
             item: ItemKind::Verdura,
@@ -127,6 +134,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
                 job: Job::Operaio,
                 peak: false,
             },
+            spread: false,
         }],
         storage: &[
             Storage {
@@ -160,6 +168,7 @@ pub static CARRIAGES: [CarriageDef; CarriageKind::COUNT] = [
                 job: Job::Mercante,
                 peak: true,
             },
+            spread: false,
         }],
         storage: &[
             Storage {

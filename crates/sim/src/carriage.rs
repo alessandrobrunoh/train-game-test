@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{CarriageId, StationId};
+use crate::ids::{CarriageId, NpcId, StationId};
 use crate::item::Stock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -90,6 +90,9 @@ pub struct Station {
     pub kind: StationKind,
     pub capacity: u16,
     pub occupancy: u16,
+    /// Storey (0 = ground floor, where the gangways are).
+    #[serde(default)]
+    pub floor: u8,
 }
 
 impl Station {
@@ -138,11 +141,34 @@ impl Carriage {
             .map(|s| s.id)
     }
 
+    /// Free station of `kind` for NPC `who`: everyone tends to use the same
+    /// one (its own bed), or the next free one after it. Spreads people over
+    /// all the stations (and floors) instead of filling the first ones.
+    pub fn free_station_for(&self, kind: StationKind, who: NpcId) -> Option<StationId> {
+        let of_kind = || self.stations.iter().filter(move |s| s.kind == kind);
+        let n = of_kind().count();
+        if n == 0 {
+            return None;
+        }
+        of_kind()
+            .cycle()
+            .skip(who.0 as usize % n)
+            .take(n)
+            .find(|s| s.has_room())
+            .map(|s| s.id)
+    }
+
     pub fn has_free(&self, kind: StationKind) -> bool {
         self.free_station(kind).is_some()
     }
 
-    pub(crate) fn push_stations(&mut self, kind: StationKind, count: usize, capacity: u16) {
+    pub(crate) fn push_stations(
+        &mut self,
+        kind: StationKind,
+        count: usize,
+        capacity: u16,
+        floor: u8,
+    ) {
         for _ in 0..count {
             let id = StationId(self.stations.len() as u16);
             self.stations.push(Station {
@@ -150,8 +176,19 @@ impl Carriage {
                 kind,
                 capacity,
                 occupancy: 0,
+                floor,
             });
         }
+    }
+
+    /// Storeys (1, or more with stairs; see [`crate::defs::CarriageDef::floors`]).
+    pub fn floors(&self) -> u8 {
+        self.kind.def().floors.max(1)
+    }
+
+    /// Storey of `station` (0 if unknown).
+    pub fn floor_of(&self, station: StationId) -> u8 {
+        self.station(station).map_or(0, |s| s.floor)
     }
 }
 

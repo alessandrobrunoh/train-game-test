@@ -577,6 +577,7 @@ impl World {
             born: now.0 as i64,
             age: 0,
             carriage: m.carriage,
+            floor: m.floor,
             home,
             job: None,
             workplace: None,
