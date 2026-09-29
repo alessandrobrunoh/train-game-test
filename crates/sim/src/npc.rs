@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::Action;
 use crate::carriage::{CarriageKind, StationKind};
+use crate::defs::ItemUse;
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
 use crate::time::{GameTime, MINUTES_PER_DAY};
@@ -56,48 +57,29 @@ impl Job {
         self as usize
     }
 
-    pub const ALL: [Job; 4] = [Job::Contadino, Job::Cuoco, Job::Operaio, Job::Mercante];
+    pub const COUNT: usize = 4;
+    pub const ALL: [Job; Self::COUNT] = [Job::Contadino, Job::Cuoco, Job::Operaio, Job::Mercante];
 
     pub fn name(self) -> &'static str {
-        match self {
-            Job::Contadino => "contadino",
-            Job::Cuoco => "cuoco",
-            Job::Operaio => "operaio",
-            Job::Mercante => "mercante",
-        }
+        self.def().name
     }
 
     pub fn workplace_kind(self) -> CarriageKind {
-        match self {
-            Job::Contadino => CarriageKind::Serra,
-            Job::Cuoco => CarriageKind::Mensa,
-            Job::Operaio => CarriageKind::Officina,
-            Job::Mercante => CarriageKind::Mercato,
-        }
+        self.def().workplace
     }
 
     pub fn station_kind(self) -> StationKind {
-        match self {
-            Job::Contadino => StationKind::GrowBed,
-            Job::Cuoco => StationKind::Stove,
-            Job::Operaio => StationKind::Workbench,
-            Job::Mercante => StationKind::Counter,
-        }
+        self.def().station
     }
 
     /// Whether an Attrezzo boosts (and wears with) this job's work.
     pub fn uses_tool(self) -> bool {
-        matches!(self, Job::Contadino | Job::Operaio)
+        self.def().uses_tool
     }
 
     /// Work shift as `[start, end)` hours, interrupted by [`Job::LUNCH_BREAK`].
     pub fn shift(self) -> (u32, u32) {
-        match self {
-            Job::Contadino => (7, 16),
-            Job::Cuoco => (6, 15),
-            Job::Operaio => (8, 17),
-            Job::Mercante => (9, 18),
-        }
+        self.def().shift
     }
 
     /// Default lunch break `[start, end)` hours: no work, everyone gets a
@@ -167,10 +149,10 @@ pub struct Inventory {
 impl Inventory {
     /// Durability of the owned unit of `item` (only Attrezzo and Vestito can be owned).
     pub fn durability(&self, item: ItemKind) -> Option<f32> {
-        match item {
-            ItemKind::Attrezzo => self.tool,
-            ItemKind::Vestito => self.clothes,
-            _ => None,
+        match item.def().usage {
+            ItemUse::Tool => self.tool,
+            ItemUse::Clothes => self.clothes,
+            ItemUse::Food | ItemUse::Material => None,
         }
     }
 
@@ -179,10 +161,10 @@ impl Inventory {
     }
 
     pub(crate) fn slot_mut(&mut self, item: ItemKind) -> Option<&mut Option<f32>> {
-        match item {
-            ItemKind::Attrezzo => Some(&mut self.tool),
-            ItemKind::Vestito => Some(&mut self.clothes),
-            _ => None,
+        match item.def().usage {
+            ItemUse::Tool => Some(&mut self.tool),
+            ItemUse::Clothes => Some(&mut self.clothes),
+            ItemUse::Food | ItemUse::Material => None,
         }
     }
 }
@@ -371,22 +353,20 @@ impl Npc {
     /// Whether the NPC would buy `item` at a Mercato (tokens aside): a worker
     /// whose job uses tools without an Attrezzo, anyone without a Vestito.
     pub fn wants(&self, item: ItemKind) -> bool {
-        match item {
-            ItemKind::Attrezzo => {
-                self.job.is_some_and(Job::uses_tool) && self.inventory.tool.is_none()
-            }
-            ItemKind::Vestito => self.inventory.clothes.is_none(),
-            _ => false,
+        match item.def().usage {
+            ItemUse::Tool => self.job.is_some_and(Job::uses_tool) && self.inventory.tool.is_none(),
+            ItemUse::Clothes => self.inventory.clothes.is_none(),
+            ItemUse::Food | ItemUse::Material => false,
         }
     }
 
     /// Whether the NPC accepts `item` from the player ([`crate::World::player_give`]):
     /// food unless nearly full, an Attrezzo or Vestito only if it [`Npc::wants`] it.
     pub fn accepts_gift(&self, item: ItemKind) -> bool {
-        match item {
-            ItemKind::Razione | ItemKind::Verdura => self.needs.hunger < GIFT_FULL_HUNGER,
-            ItemKind::Rottame => false,
-            ItemKind::Attrezzo | ItemKind::Vestito => self.wants(item),
+        match item.def().usage {
+            ItemUse::Food => self.needs.hunger < GIFT_FULL_HUNGER,
+            ItemUse::Material => false,
+            ItemUse::Tool | ItemUse::Clothes => self.wants(item),
         }
     }
 }

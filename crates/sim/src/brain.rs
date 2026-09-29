@@ -17,6 +17,7 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
+use crate::defs::ItemUse;
 use crate::deliberation::{Deliberation, DeliberationAnswer};
 use crate::item::ItemKind;
 use crate::npc::Npc;
@@ -218,10 +219,10 @@ impl UtilityBrain {
         if !npc.wants(item) {
             return -1.0;
         }
-        let base = match item {
-            ItemKind::Attrezzo => w.buy_tool,
-            ItemKind::Vestito => w.buy_clothes,
-            _ => return -1.0,
+        let base = match item.def().usage {
+            ItemUse::Tool => w.buy_tool,
+            ItemUse::Clothes => w.buy_clothes,
+            ItemUse::Food | ItemUse::Material => return -1.0,
         };
         let comfortable = w.comfortable_savings * item.base_value() as f32;
         let wealth = if comfortable > 0.0 {
@@ -274,7 +275,7 @@ impl UtilityBrain {
                 w.socialize * u + if evening { w.evening_social_bonus } else { 0.0 }
             }
             // Travelling to shop: the best thing the NPC could buy there.
-            ActionKind::Buy => [ItemKind::Attrezzo, ItemKind::Vestito]
+            ActionKind::Buy => ItemKind::SOLD
                 .into_iter()
                 .map(|item| self.buy_score(npc, item))
                 .fold(-1.0, f32::max),

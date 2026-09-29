@@ -23,6 +23,9 @@
 //! - Owned Attrezzi boost Contadini/Operai output and wear with work; owned
 //!   Vestiti slow tiredness and wear daily. Broken ones are bought again.
 //!
+//! Per-kind properties (items, recipes, carriages, stations, jobs) are data
+//! tables in [`defs`].
+//!
 //! Every storage is capped per carriage and item; Verdura and Razioni spoil a
 //! little every midnight.
 //!
@@ -45,6 +48,7 @@
 pub mod action;
 pub mod brain;
 pub mod carriage;
+pub mod defs;
 pub mod deliberation;
 pub mod event;
 pub mod ids;
@@ -59,6 +63,7 @@ pub mod world;
 pub use action::{Action, ActionKind, ActionOption, DecisionRequest};
 pub use brain::{Brain, RandomBrain, THINK, UtilityBrain, UtilityWeights};
 pub use carriage::{Carriage, CarriageKind, Station, StationKind};
+pub use defs::{CarriageDef, ItemDef, ItemUse, JobDef, RecipeDef, Work};
 pub use deliberation::{
     Choice, Deliberation, DeliberationAnswer, DeliberationCounters, DeliberationId,
     DeliberationKind, DeliberationOption, Gathering, Grievance, ResolvedDeliberation, Resolver,

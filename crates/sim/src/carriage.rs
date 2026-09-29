@@ -19,7 +19,8 @@ pub enum CarriageKind {
 }
 
 impl CarriageKind {
-    pub const ALL: [CarriageKind; 5] = [
+    pub const COUNT: usize = 5;
+    pub const ALL: [CarriageKind; Self::COUNT] = [
         CarriageKind::Dormitorio,
         CarriageKind::Mensa,
         CarriageKind::Serra,
@@ -27,14 +28,13 @@ impl CarriageKind {
         CarriageKind::Mercato,
     ];
 
+    /// Position in [`CarriageKind::ALL`] (and in per-kind arrays).
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
     pub fn name(self) -> &'static str {
-        match self {
-            CarriageKind::Dormitorio => "Dormitorio",
-            CarriageKind::Mensa => "Mensa",
-            CarriageKind::Serra => "Serra",
-            CarriageKind::Officina => "Officina",
-            CarriageKind::Mercato => "Mercato",
-        }
+        self.def().name
     }
 }
 
@@ -62,15 +62,23 @@ pub enum StationKind {
 }
 
 impl StationKind {
+    pub const COUNT: usize = 6;
+    pub const ALL: [StationKind; Self::COUNT] = [
+        StationKind::Bed,
+        StationKind::Table,
+        StationKind::Stove,
+        StationKind::GrowBed,
+        StationKind::Workbench,
+        StationKind::Counter,
+    ];
+
+    /// Position in [`StationKind::ALL`].
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
     pub fn name(self) -> &'static str {
-        match self {
-            StationKind::Bed => "cuccetta",
-            StationKind::Table => "tavolo",
-            StationKind::Stove => "cucina",
-            StationKind::GrowBed => "aiuola",
-            StationKind::Workbench => "banco da lavoro",
-            StationKind::Counter => "bancone",
-        }
+        self.def().name
     }
 }
 
@@ -96,9 +104,9 @@ pub struct Carriage {
     pub name: String,
     pub kind: CarriageKind,
     pub stations: Vec<Station>,
-    /// Carriage storage. Each kind only stores some items, bounded by
-    /// [`crate::SimParams::storage_cap`]: Serra verdura; Mensa razioni;
-    /// Officina rottame, attrezzi, vestiti; Mercato attrezzi, vestiti.
+    /// Carriage storage. Each kind only stores the items listed in its
+    /// [`crate::defs::CarriageDef::storage`], bounded by
+    /// [`crate::SimParams::storage_cap`].
     pub stock: Stock,
 }
 

@@ -4,6 +4,7 @@
 //! [`Stock`] (carriage storage); only whole units can be eaten or sold, so a
 //! renderer should show [`Stock::count`]. Durable items (Attrezzi, Vestiti)
 //! owned by an NPC live in [`crate::Inventory`] with a durability instead.
+//! Per-kind properties are in the catalog [`crate::defs::ITEMS`].
 
 use std::fmt;
 
@@ -42,67 +43,38 @@ impl ItemKind {
 
     /// Singular, lowercase: "attrezzo".
     pub fn name(self) -> &'static str {
-        match self {
-            ItemKind::Verdura => "verdura",
-            ItemKind::Razione => "razione",
-            ItemKind::Rottame => "rottame",
-            ItemKind::Attrezzo => "attrezzo",
-            ItemKind::Vestito => "vestito",
-        }
+        self.def().name
     }
 
     /// Plural, lowercase: "attrezzi".
     pub fn plural(self) -> &'static str {
-        match self {
-            ItemKind::Verdura => "verdure",
-            ItemKind::Razione => "razioni",
-            ItemKind::Rottame => "rottami",
-            ItemKind::Attrezzo => "attrezzi",
-            ItemKind::Vestito => "vestiti",
-        }
+        self.def().plural
     }
 
     /// With the indefinite article: "un attrezzo", "una razione".
     pub fn with_article(self) -> &'static str {
-        match self {
-            ItemKind::Verdura => "una cassetta di verdura",
-            ItemKind::Razione => "una razione",
-            ItemKind::Rottame => "un pezzo di rottame",
-            ItemKind::Attrezzo => "un attrezzo",
-            ItemKind::Vestito => "un vestito",
-        }
+        self.def().with_article
     }
 
     /// Reference price in tokens (Mercato prices add a scarcity markup).
     pub fn base_value(self) -> u32 {
-        match self {
-            ItemKind::Verdura => 1,
-            ItemKind::Razione => 2,
-            ItemKind::Rottame => 1,
-            ItemKind::Attrezzo => 40,
-            ItemKind::Vestito => 12,
-        }
+        self.def().base_value
     }
 
     /// Whether an owned unit wears out (tracked per NPC in [`crate::Inventory`]).
     pub fn has_durability(self) -> bool {
-        matches!(self, ItemKind::Attrezzo | ItemKind::Vestito)
+        self.def().usage.is_owned()
     }
 
     /// Whether NPCs can buy it at a Mercato.
     pub fn is_sold(self) -> bool {
-        matches!(self, ItemKind::Attrezzo | ItemKind::Vestito)
+        self.def().sold
     }
 
     /// Carriages where the item is made available to people: a shortage means
     /// none of them has a whole unit left.
     pub fn outlet(self) -> CarriageKind {
-        match self {
-            ItemKind::Verdura => CarriageKind::Serra,
-            ItemKind::Razione => CarriageKind::Mensa,
-            ItemKind::Rottame => CarriageKind::Officina,
-            ItemKind::Attrezzo | ItemKind::Vestito => CarriageKind::Mercato,
-        }
+        self.def().outlet
     }
 }
 

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::action::{Action, ActionKind, ActionOption, DecisionRequest};
 use crate::brain::{Brain, THINK};
 use crate::carriage::{Carriage, CarriageKind, StationKind};
+use crate::defs::{RecipeDef, Source, StationCount, Work};
 use crate::deliberation::{
     Deliberation, DeliberationCounters, Gathering, Grievance, ResolvedDeliberation,
 };
@@ -46,13 +47,9 @@ const GENERATED_COUPLE_CHANCE: f64 = 0.7;
 const GENERATED_COUPLE_AGE_GAP: u32 = 6;
 /// Generation: acquaintances drawn among housemates per NPC.
 const GENERATED_FRIENDS: usize = 2;
-/// Items whose shortage is reported (see [`EventKind::Shortage`]).
-const TRACKED_SHORTAGES: [ItemKind; 3] = [ItemKind::Razione, ItemKind::Attrezzo, ItemKind::Vestito];
 /// Generation: starting tokens of workers and of everyone else.
 const STARTING_TOKENS_WORKER: std::ops::Range<u32> = 30..120;
 const STARTING_TOKENS_JOBLESS: std::ops::Range<u32> = 5..45;
-/// Items sold at the Mercati.
-const SOLD: [ItemKind; 2] = [ItemKind::Attrezzo, ItemKind::Vestito];
 
 /// Repeating carriage pattern, head to tail. 20 carriages give 6 Dormitori,
 /// 4 Mense, 4 Serre, 4 Officine and 2 Mercati.
@@ -155,21 +152,13 @@ impl World {
         let clock = GameTime::from_dhm(1, 6, 0);
 
         // --- Carriages (stations are added once we know who uses them) ---
-        let mut per_kind = [0usize; CarriageKind::ALL.len()];
+        let mut per_kind = [0usize; CarriageKind::COUNT];
         let mut carriages: Vec<Carriage> = (0..n_carriages)
             .map(|i| {
                 let kind = LAYOUT[i % LAYOUT.len()];
-                let k = kind as usize;
-                let list = match kind {
-                    CarriageKind::Dormitorio => names::DORM_NAMES,
-                    CarriageKind::Mensa => names::MENSA_NAMES,
-                    CarriageKind::Serra => names::SERRA_NAMES,
-                    CarriageKind::Officina => names::OFFICINA_NAMES,
-                    CarriageKind::Mercato => names::MERCATO_NAMES,
-                };
-                let n = per_kind[k];
-                per_kind[k] += 1;
-                let name = match list.get(n) {
+                let n = per_kind[kind.index()];
+                per_kind[kind.index()] += 1;
+                let name = match kind.def().names.get(n) {
                     Some(name) => (*name).to_string(),
                     None => format!("{} {}", kind.name(), n + 1),
                 };
@@ -190,7 +179,6 @@ impl World {
                 .collect()
         };
         let dorms = of_kind(CarriageKind::Dormitorio);
-        let mense = of_kind(CarriageKind::Mensa);
 
         // --- People: a stationary age pyramid, couples, families, homes ---
         let year = params.minutes_per_year() as i64;
@@ -484,7 +472,7 @@ impl World {
         let total_beds: usize = dorm_residents.iter().map(|&r| beds_of(r)).sum();
         let peak_population = max_population_for(&params, total_beds).max(n_npcs);
         let peak = job_quotas(&params, &carriages, peak_population);
-        let per_place: [usize; 4] = Job::ALL.map(|job| {
+        let per_place: [usize; Job::COUNT] = Job::ALL.map(|job| {
             let places = carriages
                 .iter()
                 .filter(|c| c.kind == job.workplace_kind())
@@ -492,45 +480,42 @@ impl World {
                 .max(1);
             peak[job.index()].div_ceil(places)
         });
-        let mense_count = mense.len().max(1);
+        let mut kind_count = [0usize; CarriageKind::COUNT];
+        for c in &carriages {
+            kind_count[c.kind.index()] += 1;
+        }
         for c in carriages.iter_mut() {
             let id = c.id;
-            let workers_here = |job: Job| {
-                npcs.iter()
-                    .filter(|n| n.job == Some(job) && n.workplace == Some(id))
-                    .count()
-            };
-            let staffed = |job: Job| workers_here(job).max(per_place[job.index()]);
-            match c.kind {
-                CarriageKind::Dormitorio => {
-                    let d = dorms.iter().position(|&d| d == id).unwrap_or(0);
-                    c.push_stations(StationKind::Bed, beds_of(dorm_residents[d]), 1);
-                }
-                CarriageKind::Mensa => {
-                    let seats = (peak_population as f32 * params.mensa_seats_per_person
-                        / mense_count as f32)
-                        .ceil() as usize;
-                    c.push_stations(StationKind::Table, seats.div_ceil(6).max(1), 6);
-                    c.push_stations(StationKind::Stove, staffed(Job::Cuoco) + 1, 1);
-                    c.stock.set(ItemKind::Razione, 100.0);
-                }
-                CarriageKind::Serra => {
-                    let n = staffed(Job::Contadino).div_ceil(2) + 1;
-                    c.push_stations(StationKind::GrowBed, n, 2);
-                    c.stock.set(ItemKind::Verdura, 100.0);
-                }
-                CarriageKind::Officina => {
-                    let n = workers_here(Job::Operaio).div_ceil(2) + 1;
-                    c.push_stations(StationKind::Workbench, n, 2);
-                    c.stock.set(ItemKind::Rottame, 20.0);
-                    c.stock.set(ItemKind::Attrezzo, 5.0);
-                    c.stock.set(ItemKind::Vestito, 5.0);
-                }
-                CarriageKind::Mercato => {
-                    c.push_stations(StationKind::Counter, staffed(Job::Mercante) + 1, 1);
-                    c.stock.set(ItemKind::Attrezzo, 10.0);
-                    c.stock.set(ItemKind::Vestito, 10.0);
-                }
+            let def = c.kind.def();
+            for rule in def.stations {
+                let n = match rule.count {
+                    StationCount::Beds => {
+                        let d = dorms.iter().position(|&d| d == id).unwrap_or(0);
+                        beds_of(dorm_residents.get(d).copied().unwrap_or(0))
+                    }
+                    StationCount::Seats => {
+                        let seats = (peak_population as f32 * params.mensa_seats_per_person
+                            / kind_count[c.kind.index()] as f32)
+                            .ceil() as usize;
+                        seats.div_ceil(usize::from(rule.capacity)).max(1)
+                    }
+                    StationCount::Workers { job, peak } => {
+                        let here = npcs
+                            .iter()
+                            .filter(|n| n.job == Some(job) && n.workplace == Some(id))
+                            .count();
+                        let workers = if peak {
+                            here.max(per_place[job.index()])
+                        } else {
+                            here
+                        };
+                        workers.div_ceil(usize::from(rule.capacity)) + 1
+                    }
+                };
+                c.push_stations(rule.kind, n, rule.capacity);
+            }
+            for &(item, amount) in def.start_stock {
+                c.stock.set(item, amount);
             }
         }
 
@@ -1012,10 +997,10 @@ impl World {
                 && c.has_free(StationKind::Table)
         };
         let can_sleep_at = |c: &Carriage| c.has_free(StationKind::Bed);
-        let wants_something = SOLD.iter().any(|&item| npc.wants(item));
+        let wants_something = ItemKind::SOLD.iter().any(|&item| npc.wants(item));
         let can_shop_at = |c: &Carriage| {
             wants_something
-                && SOLD
+                && ItemKind::SOLD
                     .iter()
                     .any(|&item| can_buy_at(p, self.economy.pay_level, now, npc, c, item))
         };
@@ -1071,7 +1056,7 @@ impl World {
         }
 
         if wants_something {
-            for item in SOLD {
+            for item in ItemKind::SOLD {
                 if can_buy_at(p, self.economy.pay_level, now, npc, carriage, item) {
                     push(Action::Buy(item), p.buy_minutes, None);
                 }
@@ -1253,7 +1238,7 @@ impl World {
             Action::Travel { to } => {
                 let dest = self.carriage(to);
                 let shopping = dest.and_then(|c| {
-                    SOLD.into_iter().find(|&item| {
+                    ItemKind::SOLD.into_iter().find(|&item| {
                         let level = self.economy.pay_level;
                         can_buy_at(&self.params, level, self.clock, npc, c, item)
                     })
@@ -1375,100 +1360,96 @@ impl World {
                 0.0
             }
         };
-        let wasted = match job {
-            Job::Contadino => {
-                let amount = minutes * p.verdura_per_farm_minute * bonus;
-                let cap = cap(ItemKind::Verdura);
-                let added = self.carriages[here.index()]
-                    .stock
-                    .add(ItemKind::Verdura, amount, cap);
-                let c = &mut self.economy.counters;
-                c.verdura_grown.add(added);
-                c.verdura_capped.add(amount - added);
-                1.0 - share(added, amount)
-            }
-            Job::Cuoco => {
-                // The cook fetches Verdura from the Serre (nearest first) and
-                // cooks it into Razioni stored in this Mensa.
-                let per_verdura = p.razioni_per_verdura;
-                if per_verdura <= 0.0 {
-                    return;
-                }
-                let potential = minutes * p.razioni_per_cook_minute;
-                let cap = cap(ItemKind::Razione);
-                let space = cap - self.carriages[here.index()].stock.get(ItemKind::Razione);
-                let mut wanted = potential.min(space.max(0.0)) / per_verdura;
-                let mut used = 0.0;
-                for s in self.nearest_of_kind(CarriageKind::Serra, here) {
-                    if wanted <= 0.0 {
-                        break;
+        let wasted = match &job.def().work {
+            Work::Make(recipe) => {
+                let item = recipe.output;
+                let cap = cap(item);
+                let potential = minutes * (recipe.rate)(p) * bonus;
+                let made = match &recipe.input {
+                    None => self.carriages[here.index()].stock.add(item, potential, cap),
+                    Some(input) => {
+                        // Fetch the input (Verdura from the Serre, nearest
+                        // first) for what fits in storage, then process it.
+                        let per_output = (input.per_output)(p);
+                        if !(per_output > 0.0 && per_output.is_finite()) {
+                            return;
+                        }
+                        let space = cap - self.carriages[here.index()].stock.get(item);
+                        let mut wanted = potential.min(space.max(0.0)) * per_output;
+                        let mut used = 0.0;
+                        let sources = match input.from {
+                            Source::Here => vec![here.index()],
+                            Source::Nearest(kind) => self.nearest_of_kind(kind, here),
+                        };
+                        for s in sources {
+                            if wanted <= 0.0 {
+                                break;
+                            }
+                            let take = self.carriages[s].stock.take(input.item, wanted);
+                            wanted -= take;
+                            used += take;
+                        }
+                        self.carriages[here.index()]
+                            .stock
+                            .add(item, used / per_output, cap)
                     }
-                    let take = self.carriages[s].stock.take(ItemKind::Verdura, wanted);
-                    wanted -= take;
-                    used += take;
-                }
-                let cooked = self.carriages[here.index()].stock.add(
-                    ItemKind::Razione,
-                    used * per_verdura,
-                    cap,
-                );
-                self.economy.counters.razioni_cooked.add(cooked);
-                1.0 - share(cooked, potential)
-            }
-            Job::Operaio => {
-                // Craft whatever is scarcer on the train (Officine + Mercati);
-                // fall back to the other item if that one can't be made.
-                let on_train =
-                    |item| self.available(item) + self.stock_in(CarriageKind::Officina).get(item);
-                let first = if on_train(ItemKind::Attrezzo) <= on_train(ItemKind::Vestito) {
-                    [ItemKind::Attrezzo, ItemKind::Vestito]
-                } else {
-                    [ItemKind::Vestito, ItemKind::Attrezzo]
                 };
+                self.economy.counters.book_made(item, made, potential);
+                1.0 - share(made, potential)
+            }
+            Work::MakeScarcest(recipes) => {
+                // Make whatever is scarcer on the train (workplaces + outlets);
+                // fall back to the next item if that one can't be made.
+                let workplace = job.def().workplace;
+                let on_train = |item| self.available(item) + self.stock_in(workplace).get(item);
+                let mut order: Vec<&RecipeDef> = recipes.iter().collect();
+                order.sort_by(|a, b| {
+                    on_train(a.output)
+                        .partial_cmp(&on_train(b.output))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 let mut wasted = 1.0;
-                for item in first {
-                    let (rate, cost) = match item {
-                        ItemKind::Attrezzo => (p.attrezzi_per_craft_minute, p.rottame_per_attrezzo),
-                        _ => (p.vestiti_per_craft_minute, p.rottame_per_vestito),
-                    };
+                for recipe in order {
+                    let item = recipe.output;
                     let stock = &self.carriages[here.index()].stock;
                     let space = (cap(item) - stock.get(item)).max(0.0);
-                    let by_scrap = if cost > 0.0 {
-                        stock.get(ItemKind::Rottame) / cost
-                    } else {
-                        f32::INFINITY
+                    let (input, cost) = match &recipe.input {
+                        Some(input) => (Some(input.item), (input.per_output)(p)),
+                        None => (None, 0.0),
                     };
-                    let potential = minutes * rate * bonus;
-                    let made = potential.min(space).min(by_scrap);
+                    let by_input = match input {
+                        Some(input) if cost > 0.0 => stock.get(input) / cost,
+                        _ => f32::INFINITY,
+                    };
+                    let potential = minutes * (recipe.rate)(p) * bonus;
+                    let made = potential.min(space).min(by_input);
                     if made > 0.0 {
                         let stock = &mut self.carriages[here.index()].stock;
-                        stock.take(ItemKind::Rottame, made * cost);
-                        stock.add(item, made, f32::INFINITY);
-                        let c = &mut self.economy.counters;
-                        match item {
-                            ItemKind::Attrezzo => c.attrezzi_crafted.add(made),
-                            _ => c.vestiti_crafted.add(made),
+                        if let Some(input) = input {
+                            stock.take(input, made * cost);
                         }
+                        stock.add(item, made, f32::INFINITY);
+                        self.economy.counters.book_made(item, made, potential);
                         wasted = 1.0 - share(made, potential);
                         break;
                     }
                 }
                 wasted
             }
-            Job::Mercante => {
-                // Bring finished goods from the Officine (nearest first), the
-                // item this Mercato has less of first.
-                let potential = minutes * p.goods_per_trade_minute;
+            Work::Trade { from, rate } => {
+                // Bring the goods sold here from the nearest carriages of
+                // `from`, the item this Mercato has less of first.
+                let potential = minutes * rate(p);
                 let mut budget = potential;
-                let mut items = SOLD;
+                let mut items = ItemKind::SOLD;
                 items.sort_by(|a, b| {
                     let stock = &self.carriages[here.index()].stock;
                     stock.get(*a).total_cmp(&stock.get(*b))
                 });
-                let officine = self.nearest_of_kind(CarriageKind::Officina, here);
+                let sources = self.nearest_of_kind(*from, here);
                 for item in items {
                     let cap = cap(item);
-                    for &o in &officine {
+                    for &o in &sources {
                         let space = cap - self.carriages[here.index()].stock.get(item);
                         let wanted = budget.min(space);
                         if wanted <= 0.0 {
@@ -1691,7 +1672,7 @@ impl World {
 
     fn check_shortages(&mut self) {
         let mut famine = false;
-        for item in TRACKED_SHORTAGES {
+        for item in ItemKind::SHORTAGE_REPORTED {
             let empty = self.available(item) < 1.0;
             let flag = &mut self.shortages[item.index()];
             if empty != *flag {
@@ -1801,8 +1782,8 @@ fn has_kind(carriages: &[Carriage], kind: CarriageKind) -> bool {
 /// has a tool), one Mercante per [`NPCS_PER_MERCANTE`] (at least one per
 /// Mercato). 0 for jobs whose workplace the train lacks; Operaio is not
 /// sized (it takes everyone else).
-fn job_quotas(p: &SimParams, carriages: &[Carriage], population: usize) -> [usize; 4] {
-    let mut quotas = [0; 4];
+fn job_quotas(p: &SimParams, carriages: &[Carriage], population: usize) -> [usize; Job::COUNT] {
+    let mut quotas = [0; Job::COUNT];
     let daily_razioni = population as f32 * MEALS_PER_DAY * p.razioni_per_meal * FOOD_SAFETY_MARGIN;
     let quota = |amount: f32, rate: f32| {
         let needed = (amount / (EXPECTED_WORK_MINUTES_PER_DAY * rate)).ceil();

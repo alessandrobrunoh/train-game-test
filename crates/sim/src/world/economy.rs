@@ -78,8 +78,8 @@ pub struct EconomyCounters {
     pub vestiti_crafted: Tally,
     /// Minutes of work per job ([`Job::index`]), and the part of them that
     /// produced nothing (full storage, missing inputs).
-    pub work_minutes: [u64; 4],
-    pub wasted_work_minutes: [Tally; 4],
+    pub work_minutes: [u64; Job::COUNT],
+    pub wasted_work_minutes: [Tally; Job::COUNT],
     /// Tokens paid from the treasury as wages and stipends...
     pub pay: u64,
     /// ...and due but not paid (austerity).
@@ -99,6 +99,20 @@ pub struct EconomyCounters {
 }
 
 impl EconomyCounters {
+    /// Books `made` units of `item` out of a `potential` output.
+    pub(crate) fn book_made(&mut self, item: ItemKind, made: f32, potential: f32) {
+        match item {
+            ItemKind::Verdura => {
+                self.verdura_grown.add(made);
+                self.verdura_capped.add(potential - made);
+            }
+            ItemKind::Razione => self.razioni_cooked.add(made),
+            ItemKind::Attrezzo => self.attrezzi_crafted.add(made),
+            ItemKind::Vestito => self.vestiti_crafted.add(made),
+            ItemKind::Rottame => {}
+        }
+    }
+
     /// Share of `job`'s work that produced nothing, in `0..=1`.
     pub fn wasted_share(&self, job: Job) -> f64 {
         let total = self.work_minutes[job.index()];

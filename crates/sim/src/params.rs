@@ -465,24 +465,15 @@ impl SimParams {
 
     /// How much of `item` a carriage of `kind` can store (0 = not stored there).
     pub fn storage_cap(&self, kind: CarriageKind, item: ItemKind) -> f32 {
-        use CarriageKind as C;
-        use ItemKind as I;
-        match (kind, item) {
-            (C::Serra, I::Verdura) => self.verdura_storage_cap,
-            (C::Mensa, I::Razione) => self.razioni_storage_cap,
-            (C::Officina, I::Rottame) => self.rottame_storage_cap,
-            (C::Officina, I::Attrezzo | I::Vestito) => self.workshop_goods_cap,
-            (C::Mercato, I::Attrezzo | I::Vestito) => self.market_goods_cap,
-            _ => 0.0,
-        }
+        kind.def()
+            .storage
+            .iter()
+            .find(|s| s.item == item)
+            .map_or(0.0, |s| (s.cap)(self))
     }
 
     /// Fraction of `item` stock that spoils every midnight.
     pub fn spoilage_per_day(&self, item: ItemKind) -> f32 {
-        match item {
-            ItemKind::Verdura => self.verdura_spoilage_per_day,
-            ItemKind::Razione => self.razioni_spoilage_per_day,
-            _ => 0.0,
-        }
+        item.def().spoilage.map_or(0.0, |spoilage| spoilage(self))
     }
 }

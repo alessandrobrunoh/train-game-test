@@ -15,7 +15,7 @@
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
-use super::{SOLD, World, price_at};
+use super::{World, price_at};
 use crate::action::Action;
 use crate::brain::Brain;
 use crate::carriage::CarriageKind;
@@ -652,7 +652,7 @@ impl World {
             {
                 continue;
             }
-            let wanted = SOLD
+            let wanted = ItemKind::SOLD
                 .into_iter()
                 .filter(|&item| npc.wants(item))
                 .find_map(|item| {
