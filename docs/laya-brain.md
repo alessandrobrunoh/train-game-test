@@ -297,3 +297,65 @@ Note di design [I]:
 - Un indice restituito tardi è valido solo se il `fingerprint` coincide ancora, cioè se opzioni e contesto non sono cambiati.
 - Per i replay deterministici si registrano le coppie (tick, NPC, idx) applicate, oppure si usa `LayaBrain` in modalità sincrona nei test.
 - Conviene un `max_len` basso, per esempio 256: le righe NPC sono corte e la latenza dipende dalla lunghezza reale della sequenza.
+
+## 9. Stato dell'implementazione (M7)
+
+### Cervello ibrido (`crates/sim-laya/src/brain.rs`)
+- **`LayaBrain<F: ScoredBrain>`** implementa `sim::Brain` sopra un `ChoiceModel` con `UtilityBrain` come ripiego. Segue la bozza del §8:
+  - `decide` non blocca mai;
+  - un worker su un thread dedicato raccoglie lotti di al massimo `batch_rows` righe o `batch_wait` e chiama `predict_batch`;
+  - si usano budget per chiamata, coda massima, pre-filtro top-k (≤ 5, `UtilityBrain::scores`) con rimappatura sugli indici originali, priorità alle carrozze a fuoco (`set_focus`) e alle decisioni con margine piccolo;
+  - una cache LRU e l'impronta usano la stessa chiave: contesto discretizzato più le opzioni in forma astratta (`OptionSig`). Le risposte superate (impronta cambiata) o poco sicure (`min_confidence`) si scartano.
+- **"Sta pensando":** nel `sim` c'è una piccola aggiunta, la scelta speciale `sim::THINK` più `Brain::think_minutes`: l'NPC ozia per quei minuti e poi decide di nuovo. `LayaBrain` la usa per gli NPC a fuoco con una domanda in volo, al massimo per `max_think_minutes`, poi ricade sul ripiego.
+- **Determinismo:**
+  - la modalità sincrona (`attach_sync`) chiama il modello dentro `decide` ed è deterministica;
+  - in modalità asincrona `record_log` registra ogni decisione (`LogEntry`: tick, NPC, indice, fonte), e `ReplayBrain` la rigioca identica (c'è un test).
+- **Salvataggi:** si salva solo il ripiego (`fallback()`, lo stesso `UtilityBrain` di prima: il formato dei salvataggi non cambia). Configurazione, cache e modello sono stato di esecuzione. `replace_fallback` tiene modello e modalità dopo un caricamento.
+- **Statistiche (`LayaStats`):**
+  - decisioni per fonte (utility/laya/cache/pensa);
+  - domande inviate, risposte, fallite, applicate, scartate (poco sicure o superate);
+  - usi della cache, accordo col ripiego, latenza media e massima;
+  - coda, righe per lotto, istogramma della confidenza.
+- **`MockModel`** (`mock.rs`): euristica a parole chiave sul contesto italiano, con latenza configurabile. Serve per i test e per provare il gioco senza pesi.
+- **Modello vero:** `loader.rs` è l'unico punto di contatto con `laya::LayaModel` (feature `laya`, `metal`). Senza la feature restituisce un errore che spiega come abilitarla. `LAYA_MODEL_DIR` carica i pesi da una cartella invece di scaricarli.
+
+### Valutazione (`examples/laya_eval.rs`, `src/eval.rs`)
+```
+cargo run -p sim-laya --example laya_eval                              # utility, random, mock
+cargo run -p sim-laya --release --features laya --example laya_eval    # + Laya (CPU)
+```
+Cosa misura:
+- (a) accuratezza su 40 scenari "ovvi" costruiti modificando lo stato di un NPC (5 tipi × 8);
+- (b) accordo con `UtilityBrain` su 300 decisioni vere di una partita;
+- confidenza media e istogramma, decisioni al secondo.
+
+I modelli vedono solo le top-5 opzioni per utilità. Il contesto è solo italiano: `npc_context` non ha una variante inglese, quindi il confronto con il checkpoint inglese resta da fare.
+
+Risultati del 2026-09-29: seme 1, top-5, contesto italiano. Laya è `laya-multilingual` zero-shot, in release su CPU (feature `laya`, F32, senza Accelerate/Metal).
+
+| Cervello | Ovvi (a) | Accordo (b) | Confidenza media | Decisioni/s |
+|---|---|---|---|---|
+| UtilityBrain | 100% | 100% (etichetta) | — | ~6·10⁶ |
+| UtilityBrain, altro seme | 100% | 93% | — | — |
+| RandomBrain | 32% | 14% | — | — |
+| MockModel | 100% | 95% | 0.65 | ~4·10⁵ |
+| **Laya multilingual** | **42%** | **45%** | **0.43** | **~2** |
+
+Per tipo di scenario, Laya ottiene:
+- dorme 88% e lavora 100%;
+- mangia 0% e compra 0%;
+- chiacchiera 25%.
+
+Il throughput su CPU resta circa 2 righe/s indipendentemente dalla dimensione del lotto (1, 4, 16). Il modello caricato impiega 1–2 s in release e circa 6 s nel gioco in debug. Conferma il §6: zero-shot Laya non batte `UtilityBrain`. Con la soglia di default (0.5) la maggior parte delle risposte viene scartata come poco sicura, quindi nel gioco l'ibrido resta prudente. Prima di usarlo davvero servono il fine-tuning, il fit delle temperature, e la misura con Metal/Accelerate (`--features metal`).
+
+### Nel gioco
+- Finestra **Cervello** (tasto **B**, o il pulsante nel pannello del tempo):
+  - modalità *Utility* / *Laya (ibrido)* / *Mock (prova)*;
+  - stato del modello ("caricamento modello…", "pronto", "errore: …", oppure "non disponibile" senza la feature);
+  - statistiche, cursori per budget, coda, soglia, top-k e margine, e l'opzione "chi è in vista aspetta Laya".
+- Il fuoco sono le carrozze visibili dalla camera.
+- L'ispettore mostra chi ha deciso l'azione corrente (UtilityBrain, Laya, cache, in attesa) e, per Laya, la confidenza e le opzioni con le probabilità.
+- Comandi:
+  - `cargo run -p game` (Laya indisponibile);
+  - `cargo run -p game --features laya` (CPU) oppure `--features laya-metal`;
+  - `TRAINGAME_BRAIN=laya|mock` sceglie la modalità all'avvio.

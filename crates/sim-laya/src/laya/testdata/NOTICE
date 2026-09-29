@@ -1,0 +1,11 @@
+tiny/ and tiny-reference.json are copied unchanged from b0xtch/laya-candle
+(https://github.com/b0xtch/laya-candle, commit b940914a8c4980b29f45b510692bb235710b5568,
+tests/fixtures/), licensed under the Apache License, Version 2.0.
+
+They are a deterministic *synthetic* checkpoint (4-layer ModernBERT, hidden 64,
+random weights, 47-word WordLevel tokenizer) and its golden outputs, generated
+by that project's tests/reference.py with upstream Laya
+(https://github.com/NandhaKishorM/laya, commit 42626c348753fbb17572a813127df2278a1ec527),
+PyTorch 2.14.0, Transformers 5.0.0, CPU float32. They contain no pretrained weights.
+
+Laya is Copyright Convai Innovations and Laya contributors, Apache-2.0.
