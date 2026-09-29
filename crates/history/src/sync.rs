@@ -321,6 +321,13 @@ pub(crate) fn columns(kind: &EventKind) -> Columns {
         EventKind::AdminConceded { protesters, .. } => c.amount = Some(protesters),
         EventKind::Austerity { paid_percent } => c.amount = Some(paid_percent),
         EventKind::PayChanged { level_percent, .. } => c.amount = Some(level_percent),
+        EventKind::Chat {
+            npc, other, about, ..
+        } => {
+            c.npc = Some(npc);
+            c.other = Some(other);
+            c.third = about;
+        }
     }
     c
 }
@@ -351,6 +358,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::AdminConceded { .. } => "AdminConceded",
         EventKind::Austerity { .. } => "Austerity",
         EventKind::PayChanged { .. } => "PayChanged",
+        EventKind::Chat { .. } => "Chat",
     }
 }
 

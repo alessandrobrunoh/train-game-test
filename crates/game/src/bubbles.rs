@@ -11,7 +11,7 @@
 //! L'arte è pixel art generata con `Canvas` una volta sola (fumetti a nove
 //! fette, così si allargano col testo); il testo usa il font del gioco.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use bevy::sprite::{Anchor, BorderRect, SliceScaleMode, SpriteImageMode, TextureSlicer};
@@ -67,7 +67,8 @@ pub struct BubblesPlugin;
 
 impl Plugin for BubblesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, make_art)
+        app.init_resource::<DeliberationHeads>()
+            .add_systems(Startup, make_art)
             .add_systems(
                 PreUpdate,
                 reset_bubbles
@@ -84,10 +85,20 @@ impl Plugin for BubblesPlugin {
                     fit_text,
                 )
                     .chain()
+                    .in_set(BubblesSet)
                     .after(NpcRenderSet),
             );
     }
 }
+
+/// I sistemi dei fumetti delle deliberazioni (i dialoghi di `speech.rs` vengono dopo).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BubblesSet;
+
+/// NPC che hanno sopra la testa un fumetto di deliberazione (pensiero o
+/// risposta): hanno la precedenza sui fumetti dei dialoghi (`speech.rs`).
+#[derive(Resource, Debug, Default)]
+pub(crate) struct DeliberationHeads(pub HashSet<NpcId>);
 
 // --- Arte -------------------------------------------------------------------------
 
@@ -440,7 +451,7 @@ fn speech_bubbles(
 }
 
 /// Pensieri e fumetti seguono la testa; i fumetti svaniscono dopo `SPEECH_SECS`.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn move_bubbles(
     mut commands: Commands,
     time: Res<Time<Real>>,
@@ -461,7 +472,9 @@ fn move_bubbles(
         (Without<ThoughtBubble>, Without<NpcSprite>),
     >,
     mut parts: Query<(Option<&mut Sprite>, Option<&mut TextColor>), Without<SpeechBubble>>,
+    mut heads: ResMut<DeliberationHeads>,
 ) {
+    let mut busy = HashSet::new();
     let dt = time.delta_secs();
     let bob = (time.elapsed_secs() * 2.5).sin().round();
     for (bubble, mut transform, mut visibility) in &mut thoughts {
@@ -471,6 +484,7 @@ fn move_bubbles(
                 transform.translation.x = head.x - 2.0;
                 transform.translation.y = head.y + BUBBLE_GAP - 1.0 + bob;
                 visibility.set_if_neq(Visibility::Inherited);
+                busy.insert(bubble.npc);
             }
             None => {
                 visibility.set_if_neq(Visibility::Hidden);
@@ -486,6 +500,7 @@ fn move_bubbles(
         if let Some(head) = head_of(&index, &sprites, bubble.npc) {
             bubble.head = head;
         }
+        busy.insert(bubble.npc);
         transform.translation.x = bubble.head.x - 1.0;
         transform.translation.y = bubble.head.y + BUBBLE_GAP + 2.0;
         let alpha = ((SPEECH_SECS - bubble.elapsed) / SPEECH_FADE).min(1.0);
@@ -500,6 +515,9 @@ fn move_bubbles(
                 }
             }
         }
+    }
+    if heads.0 != busy {
+        heads.0 = busy;
     }
 }
 

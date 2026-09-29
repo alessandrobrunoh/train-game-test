@@ -41,7 +41,7 @@ fn spawn_hud(mut commands: Commands) {
         ));
     commands.spawn((
         Text::new(
-            "A/D: muovi   Spazio/W: salta   E: interagisci   Q: cambia oggetto   I: inventario   P: pausa   1-5: velocità   Click: seleziona NPC   F: segui NPC   G: popolazione   H: storia   B: cervello   F5: salva   F9: carica   Esc: partite",
+            "A/D: muovi   Spazio/W: salta   E: interagisci   Q: cambia oggetto   I: inventario   P: pausa   1-5: velocità   Click: seleziona NPC   F: segui NPC   V: fumetti   G: popolazione   H: storia   B: cervello   F5: salva   F9: carica   Esc: partite",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),

@@ -2,8 +2,9 @@
 //!
 //! - Nel mondo (solo per gli NPC disegnati, cioè nelle carrozze inquadrate):
 //!   un "+" sopra chi è appena nato, un cuore sopra i due di una nuova coppia,
-//!   ogni tanto un cuoricino sopra due partner che chiacchierano insieme; chi
-//!   muore svanisce in un secondo invece di sparire di colpo.
+//!   ogni tanto un cuoricino sopra due partner che chiacchierano insieme (se
+//!   non c'è una conversazione della sim: allora le reazioni sono in
+//!   `speech.rs`); chi muore svanisce in un secondo invece di sparire di colpo.
 //! - Sullo schermo (in basso a destra): una pila di notifiche con gli eventi
 //!   di vita più recenti (nascite, morti, coppie, maggiore età, pensione,
 //!   vedovanza) e gli esiti notevoli delle deliberazioni (proposte accettate,
@@ -247,7 +248,7 @@ fn spawn_icon(commands: &mut Commands, kind: IconKind, npc: NpcId, head: Vec2) {
 }
 
 /// Testa dello sprite di un NPC disegnato.
-fn head_of(
+pub(crate) fn head_of(
     index: &NpcSpriteIndex,
     sprites: &Query<(&Transform, &NpcVisual), With<NpcSprite>>,
     id: NpcId,
@@ -364,6 +365,11 @@ fn chat_hearts(
         // Una volta per coppia (dal lato dell'id minore), solo tra partner
         // che si parlano a vicenda.
         if npc.id > other || npc.partner() != Some(other) || cooldown.contains_key(&npc.id) {
+            continue;
+        }
+        // Se la sim ha aperto una conversazione, le reazioni (cuori compresi)
+        // le disegna `speech.rs` in base al tono.
+        if world.conversation_of(npc.id).is_some() {
             continue;
         }
         let talks_back = world

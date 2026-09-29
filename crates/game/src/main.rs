@@ -22,6 +22,7 @@ mod prop_art;
 mod save_file;
 mod saves;
 mod sim_bridge;
+mod speech;
 mod state;
 mod stations;
 mod storage;
@@ -74,7 +75,11 @@ fn main() {
             brain_ui::BrainUiPlugin,
         ))
         // Il mondo fuori dal treno (cielo, paesaggio, neve, giorno/notte) e
-        // i fumetti delle deliberazioni.
-        .add_plugins((background::BackgroundPlugin, bubbles::BubblesPlugin))
+        // i fumetti delle deliberazioni e dei dialoghi.
+        .add_plugins((
+            background::BackgroundPlugin,
+            bubbles::BubblesPlugin,
+            speech::SpeechPlugin,
+        ))
         .run();
 }

@@ -21,6 +21,7 @@ use crate::history_ui::HistoryWindow;
 use crate::population::PopulationWindow;
 use crate::saves::SavesWindow;
 use crate::sim_bridge::{DeliberationGrace, SPEEDS, seconds_per_year};
+use crate::speech::{FAST_SPEED, SpeechMode};
 use crate::state::{FollowNpc, PointerOverUi, SelectedNpc, Sim, SimClock, SimPerf};
 use crate::storage::{item_color, plural_title, storable_items};
 /// Quanti eventi mostrare nel registro (i più recenti).
@@ -125,6 +126,7 @@ fn time_panel(
     mut brain: ResMut<BrainWindow>,
     cache: Res<UiCache>,
     grace: Res<DeliberationGrace>,
+    speech: Res<SpeechMode>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -158,9 +160,10 @@ fn time_panel(
                     let response = ui
                         .selectable_label(active, format!("{speed}x"))
                         .on_hover_text(format!(
-                            "Tasto {}: {speed} minuti di gioco al secondo\nUn anno ({days_per_year} giorni) ≈ {}",
+                            "Tasto {}: {speed} minuti di gioco al secondo\nUn anno ({days_per_year} giorni) ≈ {}\n{}",
                             key + 1,
-                            format_seconds(seconds_per_year(speed, days_per_year))
+                            format_seconds(seconds_per_year(speed, days_per_year)),
+                            speech_hint(speed, *speech)
                         ));
                     if response.clicked() && !active {
                         clock.minutes_per_second = speed;
@@ -196,6 +199,16 @@ fn time_panel(
                 ui.horizontal(|ui| stats_row(ui, stats));
             }
         });
+}
+
+/// Riga sui fumetti dei dialoghi nel suggerimento di una velocità.
+fn speech_hint(speed: f32, mode: SpeechMode) -> String {
+    let what = if speed > FAST_SPEED {
+        "solo «…»"
+    } else {
+        "con le battute"
+    };
+    format!("Fumetti dei dialoghi {what} (V: {})", mode.label())
 }
 
 /// "Marta ci pensa… · rallentato: 2 decisioni in corso (60 min/s)".
@@ -363,7 +376,10 @@ fn npc_details(
             format_minutes(until.since(now))
         )),
     );
-    // Le scelte importanti in corso, subito sotto l'azione.
+    // La conversazione in corso (e le ultime), poi le scelte importanti.
+    if let Some(id) = crate::speech::conversation_section(ui, world, npc) {
+        clicked = Some(id);
+    }
     crate::brain_ui::mind_section(ui, world, &sim.brain, npc);
 
     ui.separator();
@@ -594,6 +610,8 @@ pub(crate) enum EventCategory {
     Coppie,
     /// Maggiore età e pensione.
     Eta,
+    /// Litigi e pettegolezzi tra NPC.
+    Chiacchiere,
     /// Acquisti degli NPC e oggetti consumati.
     Acquisti,
     Scarsita,
@@ -601,11 +619,12 @@ pub(crate) enum EventCategory {
 }
 
 impl EventCategory {
-    const ALL: [EventCategory; 7] = [
+    const ALL: [EventCategory; 8] = [
         EventCategory::Nascite,
         EventCategory::Morti,
         EventCategory::Coppie,
         EventCategory::Eta,
+        EventCategory::Chiacchiere,
         EventCategory::Acquisti,
         EventCategory::Scarsita,
         EventCategory::Giocatore,
@@ -635,6 +654,7 @@ impl EventCategory {
             }
             EventKind::Austerity { .. } => EventCategory::Scarsita,
             EventKind::PayChanged { .. } => EventCategory::Acquisti,
+            EventKind::Chat { .. } => EventCategory::Chiacchiere,
         }
     }
 
@@ -644,6 +664,7 @@ impl EventCategory {
             EventCategory::Morti => "morti",
             EventCategory::Coppie => "coppie",
             EventCategory::Eta => "età",
+            EventCategory::Chiacchiere => "chiacchiere",
             EventCategory::Acquisti => "acquisti",
             EventCategory::Scarsita => "scarsità",
             EventCategory::Giocatore => "giocatore",
@@ -656,6 +677,7 @@ impl EventCategory {
             EventCategory::Morti => "Morti e NPC che muoiono di fame",
             EventCategory::Coppie => "Nuove coppie e vedovanze",
             EventCategory::Eta => "Maggiore età e pensione",
+            EventCategory::Chiacchiere => "Litigi e pettegolezzi tra NPC",
             EventCategory::Acquisti => "Acquisti degli NPC e oggetti consumati",
             EventCategory::Scarsita => "Scarsità e nuove scorte",
             EventCategory::Giocatore => "Quello che fai tu",
@@ -712,13 +734,13 @@ fn event_log(mut contexts: EguiContexts, sim: Option<Res<Sim>>, mut filter: ResM
             };
             ui.horizontal(|ui| {
                 ui.weak("Vita:");
-                for category in &EventCategory::ALL[..4] {
+                for category in &EventCategory::ALL[..5] {
                     checkbox(ui, *category);
                 }
             });
             ui.horizontal(|ui| {
                 ui.weak("Economia:");
-                for category in &EventCategory::ALL[4..6] {
+                for category in &EventCategory::ALL[5..7] {
                     checkbox(ui, *category);
                 }
                 ui.separator();
@@ -769,6 +791,11 @@ pub(crate) fn event_color(kind: &EventKind) -> Color32 {
         EventKind::HelpAsked { .. } | EventKind::AdminConceded { .. } => GOOD,
         EventKind::Austerity { .. } => WARNING,
         EventKind::PayChanged { .. } => Color32::GRAY,
+        EventKind::Chat {
+            tone: sim::Tone::Tense,
+            ..
+        } => WARNING,
+        EventKind::Chat { .. } => Color32::GRAY,
     }
 }
 
