@@ -173,6 +173,14 @@ pub enum EventKind {
         protesters: u32,
         until: Option<GameTime>,
     },
+    /// The treasury could not cover the day's wages and stipends: everyone
+    /// got `paid_percent`% of what was due. Logged at most every
+    /// `SimParams::economy_log_days`.
+    Austerity { paid_percent: u32 },
+    /// The administration changed the pay level (wages, stipends and Mercato
+    /// prices), now `level_percent`% of the base, up if `raised`. Logged when it moved
+    /// by 10 points or more, at most every `SimParams::economy_log_days`.
+    PayChanged { level_percent: u32, raised: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -428,6 +436,18 @@ impl fmt::Display for Event {
                     }
                 }
             }
+            EventKind::Austerity { paid_percent } => write!(
+                f,
+                "Tesoreria a secco: l'amministrazione paga solo il {paid_percent}% di salari e sussidi"
+            ),
+            EventKind::PayChanged {
+                level_percent,
+                raised,
+            } => write!(
+                f,
+                "L'amministrazione {} paghe e prezzi: ora al {level_percent}% dei valori base",
+                if *raised { "alza" } else { "abbassa" }
+            ),
         }
     }
 }

@@ -9,12 +9,17 @@
 //! Item flows (see [`item`]):
 //! - Food: Contadini grow Verdura into their Serra; Cuochi at a Mensa cook
 //!   Verdura taken from the Serre (nearest first) into Razioni stored in that
-//!   Mensa; eating takes one Razione. Meals are free for everyone.
+//!   Mensa; eating takes one Razione. Meals are free for everyone. People
+//!   eat in meal shifts ([`Npc::meal_shift`]); in a full Mensa they queue for
+//!   a seat ([`Action::Wait`]); see [`World::mensa_occupancy`].
 //! - Goods: the train sheds Rottame into the Officine every hour; Operai turn
 //!   it into Attrezzi or Vestiti (whichever is scarcer on the train); Mercanti
 //!   bring them to their Mercato, where NPCs buy them with the tokens earned
-//!   as wages. Tokens spent go back to the train administration (they leave
-//!   circulation), wages mint new ones.
+//!   as wages.
+//! - Money is a closed loop ([`Economy`]): wages and stipends are paid every
+//!   midnight from the administration's treasury; purchases, fines, a tax on
+//!   large savings and estates without heirs go back to it. Pay and prices
+//!   follow a slow feedback on the treasury.
 //! - Owned Attrezzi boost Contadini/Operai output and wear with work; owned
 //!   Vestiti slow tiredness and wear daily. Broken ones are bought again.
 //!
@@ -67,4 +72,5 @@ pub use npc::{
 pub use params::SimParams;
 pub use stats::Stats;
 pub use time::{GameTime, MINUTES_PER_DAY, MINUTES_PER_HOUR};
-pub use world::{BuyError, GiveError, LifeCounters, World};
+pub use world::{BuyError, Economy, EconomyCounters, GiveError, LifeCounters, Tally, World};
+pub use world::{MensaOccupancy, MensaRole};

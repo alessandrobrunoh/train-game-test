@@ -99,8 +99,11 @@ pub struct UtilityWeights {
     pub buy_clothes: f32,
     pub comfortable_savings: f32,
     pub idle: f32,
-    /// Score lost per minute of travel.
+    /// Score lost per minute of travel (and of expected wait for a seat).
     pub travel_cost_per_minute: f32,
+    /// Lingering (idling, chatting) in a crowded Mensa scores this less.
+    #[serde(default = "default_crowd_penalty")]
+    pub crowd_penalty: f32,
     /// Uniform noise added to each score (`0..noise`).
     pub noise: f32,
 }
@@ -127,9 +130,14 @@ impl Default for UtilityWeights {
             comfortable_savings: 3.0,
             idle: 0.15,
             travel_cost_per_minute: 0.01,
+            crowd_penalty: default_crowd_penalty(),
             noise: 0.08,
         }
     }
+}
+
+fn default_crowd_penalty() -> f32 {
+    0.4
 }
 
 /// Fast rule-based brain: scores every option from needs, time of day and job
@@ -176,7 +184,12 @@ impl UtilityBrain {
                 } else {
                     0.0
                 };
-                goal + home - minutes * self.weights.travel_cost_per_minute
+                // Going to eat: the queue there counts like more travel.
+                let wait = match option.goal {
+                    Some(ActionKind::Eat) => world.expected_wait_minutes(to).unwrap_or(0) as f32,
+                    _ => 0.0,
+                };
+                goal + home - (minutes + wait) * self.weights.travel_cost_per_minute
             }
             Action::Buy(item) => self.buy_score(npc, item),
             Action::Socialize(other) => {
@@ -190,6 +203,10 @@ impl UtilityBrain {
                     w.friend_bonus * r.affinity + family
                 });
                 self.goal_score(world, npc, ActionKind::Socialize) + (1.0 - npc.needs.social) * tie
+                    - self.crowding(world, npc)
+            }
+            Action::Idle => {
+                self.goal_score(world, npc, ActionKind::Idle) - self.crowding(world, npc)
             }
             action => self.goal_score(world, npc, action.kind()),
         }
@@ -222,7 +239,7 @@ impl UtilityBrain {
         match kind {
             ActionKind::Eat => {
                 let u = 1.0 - npc.needs.hunger;
-                let meal_time = matches!(hour, 6 | 7 | 12 | 13 | 19 | 20);
+                let meal_time = world.params.is_meal_time(world.params.meal_shift(npc), now);
                 // Proper meals at meal times; outside them only when really hungry.
                 let threshold = if meal_time {
                     w.min_hunger_to_eat
@@ -249,10 +266,8 @@ impl UtilityBrain {
                     -1.0
                 }
             }
-            ActionKind::Work => match npc.job {
-                Some(job) if job.in_shift(now) => w.work,
-                _ => -1.0,
-            },
+            ActionKind::Work if world.works_now(npc) => w.work,
+            ActionKind::Work => -1.0,
             ActionKind::Socialize => {
                 let u = 1.0 - npc.needs.social;
                 let evening = (17..22).contains(&hour);
@@ -264,6 +279,20 @@ impl UtilityBrain {
                 .map(|item| self.buy_score(npc, item))
                 .fold(-1.0, f32::max),
             ActionKind::Idle | ActionKind::Travel => w.idle,
+            // Queuing for a seat here: eating, minus the expected wait.
+            ActionKind::Wait => {
+                let wait = world.expected_wait_minutes(npc.carriage).unwrap_or(0) as f32;
+                self.goal_score(world, npc, ActionKind::Eat) - wait * w.travel_cost_per_minute
+            }
+        }
+    }
+
+    /// Penalty for lingering where the NPC is: a crowded Mensa.
+    fn crowding(&self, world: &World, npc: &Npc) -> f32 {
+        if world.is_crowded(npc.carriage) {
+            self.weights.crowd_penalty
+        } else {
+            0.0
         }
     }
 }

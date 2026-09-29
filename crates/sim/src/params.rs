@@ -51,6 +51,28 @@ pub struct SimParams {
     /// earlier it is a nap.
     pub long_sleep_from_hour: u32,
 
+    // --- Meals (turni mensa) ---
+    /// Hour when the first shift's breakfast, lunch and dinner start.
+    pub meal_hours: [u32; 3],
+    /// Meal shifts: everyone belongs to one ([`crate::Npc::meal_shift`]);
+    /// shift `k` eats `k * meal_shift_minutes` after shift 0.
+    pub meal_shifts: u8,
+    pub meal_shift_minutes: u32,
+    /// How long a shift's meal time lasts; the lunch one is also the
+    /// workers' lunch break.
+    pub meal_window_minutes: u32,
+    /// Generation: Mensa seats per inhabitant, split among the Mense (sized
+    /// for the train full to its birth limit).
+    pub mensa_seats_per_person: f32,
+    /// Longest wait in a Mensa queue ([`crate::Action::Wait`]) before the NPC
+    /// decides again (it keeps no place in the queue).
+    pub queue_patience_minutes: u64,
+    /// Longest queue in a Mensa: the next ones eat elsewhere or come back later.
+    pub mensa_queue_max: u16,
+    /// A Mensa with at least this many people idling or chatting in it is
+    /// crowded: brains avoid lingering there, nobody goes there to chat.
+    pub mensa_crowd: u16,
+
     // --- Production chains ---
     /// Verdura grown by a Contadino per minute of work (×`tool_output_bonus` with a tool).
     pub verdura_per_farm_minute: f32,
@@ -70,6 +92,13 @@ pub struct SimParams {
     pub rottame_per_vestito: f32,
     /// Finished goods a Mercante can bring from the Officine per minute of work.
     pub goods_per_trade_minute: f32,
+    /// Contadini are staffed so that the Serre stay about this full (share
+    /// of their Verdura storage): more farmers when they hold less, fewer
+    /// when they hold more (see `farm_staffing_gain`), accounting for the
+    /// tools they own. Full Serre waste the harvest.
+    pub verdura_target_fill: f32,
+    /// Farm quota multiplier per unit of fill below the target (clamped to `0.6..=1.5`).
+    pub farm_staffing_gain: f32,
 
     // --- Durable goods ---
     /// Output multiplier for Contadini and Operai who own an Attrezzo.
@@ -94,12 +123,30 @@ pub struct SimParams {
     /// Fraction of stored Razioni that spoils every midnight.
     pub razioni_spoilage_per_day: f32,
 
-    // --- Money ---
-    /// Tokens paid per full hour of work.
+    // --- Money (closed loop, see [`crate::Economy`]) ---
+    /// Tokens earned per hour of work at pay level 1 (paid at midnight, from
+    /// the treasury).
     pub wage_per_hour: u32,
     /// Tokens given every midnight to NPCs without a job (children, elderly,
-    /// unemployed), so they can afford clothes too.
+    /// unemployed) at pay level 1, so they can afford clothes too.
     pub stipend_per_day: u32,
+    /// Generation: the treasury starts with this many days of payroll, and
+    /// the administration aims to keep it there.
+    pub treasury_reserve_days: f32,
+    /// Pay level change per day while the treasury is more than
+    /// `pay_band` away (as a fraction) from its target...
+    pub pay_adjust_per_day: f32,
+    pub pay_band: f32,
+    /// ...within these bounds.
+    pub pay_level_min: f32,
+    pub pay_level_max: f32,
+    /// Every midnight NPCs holding more than `savings_tax_threshold` tokens
+    /// pay `savings_tax_rate` of the excess to the treasury, so that savings
+    /// nobody spends go back into circulation.
+    pub savings_tax_threshold: u32,
+    pub savings_tax_rate: f32,
+    /// At most one austerity / pay change event every this many days.
+    pub economy_log_days: u64,
     /// Mercato price = base value × (1 + markup × scarcity), where scarcity
     /// is `1 - stock / market_goods_cap` in that Mercato.
     pub scarcity_markup: f32,
@@ -242,6 +289,15 @@ impl Default for SimParams {
             night_start_hour: 22,
             long_sleep_from_hour: 20,
 
+            meal_hours: [6, 12, 19],
+            meal_shifts: 3,
+            meal_shift_minutes: 40,
+            meal_window_minutes: 60,
+            mensa_seats_per_person: 0.35,
+            queue_patience_minutes: 30,
+            mensa_queue_max: 10,
+            mensa_crowd: 8,
+
             verdura_per_farm_minute: 0.030,
             razioni_per_cook_minute: 0.10,
             razioni_per_verdura: 1.0,
@@ -252,9 +308,11 @@ impl Default for SimParams {
             rottame_per_attrezzo: 2.0,
             rottame_per_vestito: 1.0,
             goods_per_trade_minute: 0.05,
+            verdura_target_fill: 0.3,
+            farm_staffing_gain: 1.5,
 
             tool_output_bonus: 1.5,
-            tool_wear_per_work_minute: 1.0 / (5.0 * 420.0),
+            tool_wear_per_work_minute: 1.0 / (12.0 * 420.0),
             clothes_wear_per_day: 0.125,
             clothes_energy_factor: 0.85,
 
@@ -267,7 +325,15 @@ impl Default for SimParams {
             razioni_spoilage_per_day: 0.05,
 
             wage_per_hour: 1,
-            stipend_per_day: 1,
+            stipend_per_day: 2,
+            treasury_reserve_days: 15.0,
+            pay_adjust_per_day: 0.01,
+            pay_band: 0.25,
+            pay_level_min: 0.5,
+            pay_level_max: 2.0,
+            savings_tax_threshold: 60,
+            savings_tax_rate: 0.1,
+            economy_log_days: 3,
             scarcity_markup: 0.5,
             buy_minutes: 15,
 
@@ -362,6 +428,39 @@ impl SimParams {
     /// Whether a sleep started at `hour` lasts until morning.
     pub fn is_long_sleep(&self, hour: u32) -> bool {
         hour >= self.long_sleep_from_hour || hour < self.wake_hour
+    }
+
+    /// Meal shift of `npc`, in `0..meal_shifts`: its own, or one derived from
+    /// its id (worlds saved before meal shifts existed).
+    pub fn meal_shift(&self, npc: &crate::Npc) -> u8 {
+        let shifts = self.meal_shifts.max(1);
+        let own = npc
+            .meal_shift
+            .unwrap_or((npc.id.0 % u32::from(shifts)) as u8);
+        own % shifts
+    }
+
+    /// Meal `meal` (0 breakfast, 1 lunch, 2 dinner) of `shift`, as
+    /// `[start, end)` minutes of the day.
+    pub fn meal_window(&self, meal: usize, shift: u8) -> (u32, u32) {
+        let hour = self.meal_hours[meal.min(self.meal_hours.len() - 1)];
+        let start = hour * 60 + u32::from(shift) * self.meal_shift_minutes;
+        (start, start + self.meal_window_minutes)
+    }
+
+    /// Whether `time` is meal time for `shift`.
+    pub fn is_meal_time(&self, shift: u8, time: crate::GameTime) -> bool {
+        let now = time.minute_of_day();
+        (0..self.meal_hours.len()).any(|meal| {
+            let (start, end) = self.meal_window(meal, shift);
+            (start..end).contains(&now)
+        })
+    }
+
+    /// Lunch break of the workers of `shift` (their lunch time), as
+    /// `[start, end)` minutes of the day.
+    pub fn lunch_break(&self, shift: u8) -> (u32, u32) {
+        self.meal_window(1, shift)
     }
 
     /// How much of `item` a carriage of `kind` can store (0 = not stored there).

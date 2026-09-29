@@ -36,6 +36,10 @@ use crate::npc::{
     Inventory, Job, LifeStage, MAX_RELATIONS, Needs, Npc, Relation, RelationKind, Sex, Traits,
 };
 
+/// A job is overstaffed (Contadini, Cuochi, Mercanti sent back to the
+/// Officine) above its quota plus a tenth of it.
+const SURPLUS_SLACK: usize = 10;
+
 /// Life-cycle counters since the world was generated. "Today" means since
 /// the last midnight.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,7 +205,7 @@ impl World {
     // ------------------------------------------------------------------
 
     /// Removes NPC `i` (index): frees its station, passes its tokens on
-    /// (partner, else children in equal shares, else they vanish), removes
+    /// (partner, else children in equal shares, else to the treasury), removes
     /// every tie to it, and logs the death (and widowhood).
     pub(super) fn kill(&mut self, i: usize, cause: DeathCause) {
         let now = self.clock;
@@ -224,7 +228,11 @@ impl World {
         let tokens = npc.inventory.tokens;
         if let Some(p) = npc.partner().and_then(|p| self.npc_index(p)) {
             let partner = &mut self.npcs[p];
-            partner.inventory.tokens = partner.inventory.tokens.saturating_add(tokens);
+            let kept = tokens.min(u32::MAX - partner.inventory.tokens);
+            partner.inventory.tokens += kept;
+            self.economy.treasury += u64::from(tokens - kept);
+            self.economy.counters.inherited += u64::from(kept);
+            let partner = &self.npcs[p];
             let kind = EventKind::Widowed {
                 npc: partner.id,
                 name: partner.name.clone(),
@@ -235,12 +243,18 @@ impl World {
             self.push_event(kind);
         } else {
             let heirs: Vec<usize> = npc.children().filter_map(|c| self.npc_index(c)).collect();
-            if !heirs.is_empty() {
+            if heirs.is_empty() {
+                self.economy.treasury += u64::from(tokens);
+                self.economy.counters.estates += u64::from(tokens);
+            } else {
                 let n = heirs.len() as u32;
                 for (k, &h) in heirs.iter().enumerate() {
                     let share = tokens / n + u32::from((k as u32) < tokens % n);
                     let heir = &mut self.npcs[h].inventory;
-                    heir.tokens = heir.tokens.saturating_add(share);
+                    let kept = share.min(u32::MAX - heir.tokens);
+                    heir.tokens += kept;
+                    self.economy.treasury += u64::from(share - kept);
+                    self.economy.counters.inherited += u64::from(kept);
                 }
             }
         }
@@ -518,6 +532,7 @@ impl World {
             &mut self.rng,
         );
         let (m, f) = (&self.npcs[mother], &self.npcs[father]);
+        let meal_shift = self.params.meal_shift(m);
         let name = format!("{first} {}", f.surname());
         let id = NpcId(self.next_npc_id);
         self.next_npc_id += 1;
@@ -569,6 +584,8 @@ impl World {
             starving_minutes: 0,
             relations,
             traits,
+            // The family eats together.
+            meal_shift: Some(meal_shift),
         };
         for &parent in &[mother, father] {
             self.npcs[parent].relations.push(Relation {
@@ -595,9 +612,12 @@ impl World {
 
     /// Gives jobless adults (e.g. who just turned 18) the most needed job,
     /// then moves Operai to food/trade jobs lacking staff, and back when those
-    /// are clearly overstaffed. Quotas follow the current population.
+    /// are clearly overstaffed. Quotas follow the current population (and,
+    /// for the Contadini, their tools and the Serre: see [`World::farm_quota`]).
     fn staff_workforce(&mut self) {
-        let quotas = job_quotas(&self.params, &self.carriages, self.npcs.len());
+        let mut quotas = job_quotas(&self.params, &self.carriages, self.npcs.len());
+        let farm = Job::Contadino.index();
+        quotas[farm] = self.farm_quota(quotas[farm]);
         let mut counts = [0usize; 4];
         let mut staff = vec![0usize; self.carriages.len()];
         for npc in &self.npcs {
@@ -641,7 +661,7 @@ impl World {
         if has_operai {
             for job in NEEDED_JOBS {
                 let quota = quotas[job.index()];
-                let slack = (quota / 5).max(2);
+                let slack = (quota / SURPLUS_SLACK).max(2);
                 while counts[job.index()] > quota + slack {
                     let Some(i) = self.npcs.iter().rposition(|n| n.job == Some(job)) else {
                         break;

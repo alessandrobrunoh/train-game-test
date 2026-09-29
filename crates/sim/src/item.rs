@@ -79,7 +79,7 @@ impl ItemKind {
             ItemKind::Verdura => 1,
             ItemKind::Razione => 2,
             ItemKind::Rottame => 1,
-            ItemKind::Attrezzo => 25,
+            ItemKind::Attrezzo => 40,
             ItemKind::Vestito => 12,
         }
     }

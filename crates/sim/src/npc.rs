@@ -100,30 +100,48 @@ impl Job {
         }
     }
 
-    /// Lunch break `[start, end)` hours: no work, everyone gets a chance to eat.
+    /// Default lunch break `[start, end)` hours: no work, everyone gets a
+    /// chance to eat. Each worker actually breaks at its meal shift's lunch
+    /// ([`crate::SimParams::lunch_break`], see [`Job::works_at`]).
     pub const LUNCH_BREAK: (u32, u32) = (12, 13);
 
-    /// Whether `time` falls in working hours (shift minus lunch break).
+    /// Whether `time` falls in working hours (shift minus the default lunch break).
     pub fn in_shift(self, time: GameTime) -> bool {
-        let (start, end) = self.shift();
-        let (break_start, break_end) = Self::LUNCH_BREAK;
-        let hour = time.hour();
-        (start..end).contains(&hour) && !(break_start..break_end).contains(&hour)
+        self.works_at(time, Self::default_lunch())
     }
 
-    /// Minutes until the current stretch of work ends (lunch break or end of
-    /// shift); 0 outside working hours.
+    /// Minutes until the current stretch of work ends (default lunch break or
+    /// end of shift); 0 outside working hours.
     pub fn shift_minutes_left(self, time: GameTime) -> u64 {
-        if !self.in_shift(time) {
+        self.minutes_left_at(time, Self::default_lunch())
+    }
+
+    fn default_lunch() -> (u32, u32) {
+        (Self::LUNCH_BREAK.0 * 60, Self::LUNCH_BREAK.1 * 60)
+    }
+
+    /// Whether `time` falls in working hours with a lunch break of
+    /// `[start, end)` minutes of the day.
+    pub fn works_at(self, time: GameTime, lunch: (u32, u32)) -> bool {
+        let (start, end) = self.shift();
+        let now = time.minute_of_day();
+        (start * 60..end * 60).contains(&now) && !(lunch.0..lunch.1).contains(&now)
+    }
+
+    /// Minutes until the current stretch of work ends (the lunch break
+    /// `[start, end)` in minutes of the day, or the end of the shift); 0
+    /// outside working hours.
+    pub fn minutes_left_at(self, time: GameTime, lunch: (u32, u32)) -> u64 {
+        if !self.works_at(time, lunch) {
             return 0;
         }
-        let (break_start, _) = Self::LUNCH_BREAK;
-        let end = if time.hour() < break_start {
-            break_start
+        let now = time.minute_of_day();
+        let end = if now < lunch.0 {
+            lunch.0.min(self.shift().1 * 60)
         } else {
-            self.shift().1
+            self.shift().1 * 60
         };
-        u64::from(end * 60 - time.minute_of_day())
+        u64::from(end - now)
     }
 }
 
@@ -205,6 +223,12 @@ pub struct Npc {
     /// Persistent character, drawn at birth (partly inherited).
     #[serde(default)]
     pub traits: Traits,
+    /// Meal shift (turno mensa): when this NPC has breakfast, lunch (and its
+    /// lunch break, if it works) and dinner. Households share one, balanced
+    /// in each Dormitorio; newborns take their mother's. None: derived from
+    /// the id (see [`crate::SimParams::meal_shift`]).
+    #[serde(default)]
+    pub meal_shift: Option<u8>,
 }
 
 /// Character traits in `0..=1`, drawn at birth and never changed. They weigh

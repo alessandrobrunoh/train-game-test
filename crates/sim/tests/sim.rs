@@ -187,7 +187,7 @@ fn generated_options_are_valid() {
                     }
                     Action::Work(s) => {
                         let job = npc.job.expect("only workers work");
-                        assert!(job.in_shift(w.clock));
+                        assert!(w.works_now(npc));
                         assert_eq!(npc.workplace, Some(here.id));
                         assert_eq!(station(s).kind, job.station_kind());
                         assert!(station(s).has_room());
@@ -209,6 +209,11 @@ fn generated_options_are_valid() {
                         assert!(w.price(here.id, item).unwrap() <= npc.inventory.tokens);
                     }
                     Action::Idle => {}
+                    Action::Wait => {
+                        assert_eq!(here.kind, CarriageKind::Mensa);
+                        assert!(!here.has_free(StationKind::Table));
+                        assert!(here.stock.get(ItemKind::Razione) >= w.params.razioni_per_meal);
+                    }
                 }
             }
         }

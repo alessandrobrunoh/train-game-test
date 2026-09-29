@@ -25,6 +25,19 @@ pub struct Stats {
     pub owned: [u32; ItemKind::COUNT],
     /// Tokens held by all NPCs.
     pub tokens: u64,
+    /// All tokens in the sim: the treasury plus the NPCs' ([`World::money_supply`]).
+    pub money_supply: u64,
+    /// Tokens held by the train administration ([`crate::Economy::treasury`]).
+    pub treasury: u64,
+    /// Tokens per adult (18-64): mean and median (0 without adults).
+    pub tokens_per_adult: f32,
+    pub median_tokens_per_adult: u32,
+    /// Gini index of the NPCs' tokens: 0 all equal, towards 1 one holds all.
+    pub tokens_gini: f32,
+    /// Pay level ([`crate::Economy::pay_level`]) and the wage it gives, in
+    /// tokens per hour of work.
+    pub pay_level: f32,
+    pub wage_per_hour: f32,
     /// NPC count per action, indexed like [`ActionKind::ALL`].
     pub actions: [usize; ActionKind::ALL.len()],
     /// Population per life stage, indexed by [`LifeStage::index`].
@@ -65,7 +78,13 @@ impl Stats {
         let mut partnered = 0;
         let mut ages = 0u64;
         let mut founders = 0;
+        let mut all_tokens = Vec::with_capacity(population);
+        let mut adult_tokens = Vec::new();
         for npc in &world.npcs {
+            all_tokens.push(npc.inventory.tokens);
+            if npc.stage() == LifeStage::Adulto {
+                adult_tokens.push(npc.inventory.tokens);
+            }
             stages[npc.stage().index()] += 1;
             partnered += usize::from(npc.partner().is_some());
             ages += u64::from(npc.age);
@@ -82,6 +101,8 @@ impl Stats {
             }
         }
         let n = population.max(1) as f32;
+        adult_tokens.sort_unstable();
+        let adult_sum: u64 = adult_tokens.iter().map(|&t| u64::from(t)).sum();
         Stats {
             time: world.clock,
             population,
@@ -94,6 +115,16 @@ impl Stats {
             on_sale: world.stock_in(CarriageKind::Mercato),
             owned,
             tokens,
+            money_supply: world.money_supply(),
+            treasury: world.economy.treasury,
+            tokens_per_adult: adult_sum as f32 / adult_tokens.len().max(1) as f32,
+            median_tokens_per_adult: adult_tokens
+                .get(adult_tokens.len() / 2)
+                .copied()
+                .unwrap_or(0),
+            tokens_gini: gini(&mut all_tokens),
+            pay_level: world.economy.pay_level,
+            wage_per_hour: world.economy.wage_per_hour(&world.params),
             actions,
             stages,
             couples: partnered / 2,
@@ -149,6 +180,17 @@ impl fmt::Display for Stats {
         )?;
         write!(
             f,
+            " tesoro {} (moneta {}) | gettoni per adulto {:.0} (mediana {}) gini {:.2} | paga {:.2}/h ({:.0}%) |",
+            self.treasury,
+            self.money_supply,
+            self.tokens_per_adult,
+            self.median_tokens_per_adult,
+            self.tokens_gini,
+            self.wage_per_hour,
+            self.pay_level * 100.0,
+        )?;
+        write!(
+            f,
             " bambini {} giovani {} adulti {} anziani {} coppie {} età media {:.1} | nati {} morti {} |",
             self.stage(LifeStage::Bambino),
             self.stage(LifeStage::Giovane),
@@ -163,5 +205,35 @@ impl fmt::Display for Stats {
             write!(f, " {} {}", kind.name(), self.count(kind))?;
         }
         Ok(())
+    }
+}
+
+/// Gini index of `values` (sorted in place): 0 when all are equal (or all 0).
+fn gini(values: &mut [u32]) -> f32 {
+    values.sort_unstable();
+    let n = values.len() as f64;
+    let sum: f64 = values.iter().map(|&v| f64::from(v)).sum();
+    if sum <= 0.0 {
+        return 0.0;
+    }
+    let weighted: f64 = values
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (i as f64 + 1.0) * f64::from(v))
+        .sum();
+    (2.0 * weighted / (n * sum) - (n + 1.0) / n) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gini;
+
+    #[test]
+    fn gini_of_equal_and_concentrated_tokens() {
+        assert_eq!(gini(&mut []), 0.0);
+        assert_eq!(gini(&mut [0, 0, 0]), 0.0);
+        assert!(gini(&mut [5, 5, 5, 5]).abs() < 1e-6);
+        // One of four holds everything: (n - 1) / n.
+        assert!((gini(&mut [0, 0, 12, 0]) - 0.75).abs() < 1e-6);
     }
 }

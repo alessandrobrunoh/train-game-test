@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use sim::{
     Action, ActionKind, Choice, DeathCause, DeliberationCounters, DeliberationKind, EventKind,
-    ItemKind, LifeStage, MINUTES_PER_DAY, Needs, Stats, UtilityBrain, World,
+    ItemKind, LifeStage, MINUTES_PER_DAY, Needs, Stats, Tally, UtilityBrain, World,
 };
 
 fn main() {
@@ -170,7 +170,9 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
     );
     println!(
         "Per anno: popolazione (% delle cuccette), bambini/giovani/adulti/anziani, coppie, nati/morti (di fame)/nascite negate nell'anno, \
-         età media, nati sul treno, scorte a fine anno (verdura, razioni), attrezzi e vestiti posseduti, gettoni totali"
+         età media, nati sul treno, scorte a fine anno (verdura, razioni), attrezzi e vestiti posseduti, gettoni degli NPC\n\
+         Economia per anno: moneta totale e tesoreria, gettoni per adulto (media, mediana), indice di Gini, livello di paghe e prezzi, \
+         spreco di verdura (marcita o persa a magazzino pieno) e giorni di austerità nell'anno"
     );
     println!(
         "Deliberazioni per anno: aperte per tipo (coppia/figlio/furto/protesta), proposte accettate/rifiutate/rinviate, \
@@ -181,6 +183,7 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
     let mut max_pop = s.population;
     for year in 1..=years {
         let before = world.life.clone();
+        let econ_before = world.economy.counters.clone();
         let delib_before = world.deliberation_counters.clone();
         for _ in 0..world.params.days_per_year {
             run_day(world, brain);
@@ -212,6 +215,22 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
             s.owned(ItemKind::Attrezzo),
             s.owned(ItemKind::Vestito),
             s.tokens,
+        );
+        let c = &world.economy.counters;
+        let since = |now: Tally, then: Tally| now.get() - then.get();
+        let capped = since(c.verdura_capped, econ_before.verdura_capped);
+        let lost = capped + since(c.verdura_spoiled, econ_before.verdura_spoiled);
+        let grown = capped + since(c.verdura_grown, econ_before.verdura_grown);
+        println!(
+            "      moneta {} tesoro {:6} | gettoni per adulto {:5.1} (mediana {:3}) gini {:.2} | paga {:3.0}% | verdura sprecata {:4.1}% | austerità {} giorni",
+            s.money_supply,
+            s.treasury,
+            s.tokens_per_adult,
+            s.median_tokens_per_adult,
+            s.tokens_gini,
+            s.pay_level * 100.0,
+            100.0 * lost / grown.max(1.0),
+            c.austerity_days - econ_before.austerity_days,
         );
         print_deliberations(&delib_before, &world.deliberation_counters);
         if s.population == 0 {

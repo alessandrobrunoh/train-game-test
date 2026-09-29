@@ -120,6 +120,16 @@ impl Carriage {
             .map(|s| s.id)
     }
 
+    /// Station of `kind` with the most free places (the first one on ties):
+    /// diners spread over the tables instead of crowding the first ones.
+    pub fn roomiest_station(&self, kind: StationKind) -> Option<StationId> {
+        self.stations
+            .iter()
+            .filter(|s| s.kind == kind && s.has_room())
+            .max_by_key(|s| (s.capacity - s.occupancy, std::cmp::Reverse(s.id.0)))
+            .map(|s| s.id)
+    }
+
     pub fn has_free(&self, kind: StationKind) -> bool {
         self.free_station(kind).is_some()
     }

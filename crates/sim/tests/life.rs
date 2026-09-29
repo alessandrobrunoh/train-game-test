@@ -570,6 +570,8 @@ fn fifty_years_stay_balanced_with_turnover() {
     let mut w = World::generate(42, 20, 400);
     let mut brain = UtilityBrain::new(42);
     let beds = w.total_beds();
+    let money = w.money_supply();
+    let mut tokens_per_adult = Vec::new();
     for _ in 0..50 {
         w.run(&mut brain, 12 * DAY);
         let pop = w.npcs.len();
@@ -578,8 +580,55 @@ fn fifty_years_stay_balanced_with_turnover() {
             "population {pop} of {beds} beds at {}",
             w.clock
         );
+        // Closed-loop money: nothing minted, nothing destroyed, and no
+        // runaway savings nor destitution.
+        let s = Stats::of(&w);
+        assert_eq!(s.money_supply, money, "at {}", w.clock);
+        assert!(
+            (20.0..=100.0).contains(&s.tokens_per_adult) && s.tokens_gini < 0.5,
+            "{s}"
+        );
+        assert!((0.8..=1.25).contains(&s.pay_level), "{s}");
+        tokens_per_adult.push(s.tokens_per_adult);
     }
+    let decade = |d: &[f32]| d.iter().sum::<f32>() / d.len() as f32;
+    let (first, last) = (
+        decade(&tokens_per_adult[..10]),
+        decade(&tokens_per_adult[40..]),
+    );
+    assert!(
+        (last / first - 1.0).abs() < 0.3,
+        "tokens per adult drift from {first} to {last}"
+    );
+    let c = &w.economy.counters;
+    assert_eq!(c.austerity_days, 0, "{c:?}");
+    let (grown, capped) = (c.verdura_grown.get(), c.verdura_capped.get());
+    let wasted = (capped + c.verdura_spoiled.get()) / (grown + capped);
+    assert!(
+        wasted < 0.12,
+        "{:.0}% of the Verdura wasted",
+        wasted * 100.0
+    );
     let s = Stats::of(&w);
+    let tool_users = w
+        .npcs
+        .iter()
+        .filter(|n| n.job.is_some_and(sim::Job::uses_tool))
+        .count();
+    let equipped = w
+        .npcs
+        .iter()
+        .filter(|n| n.job.is_some_and(sim::Job::uses_tool) && n.inventory.tool.is_some())
+        .count();
+    assert!(
+        equipped * 10 >= tool_users * 9,
+        "{equipped} of {tool_users} have a tool"
+    );
+    // At 06:00: the Vestiti worn out at midnight are not bought again yet.
+    assert!(
+        s.owned(ItemKind::Vestito) as usize * 10 >= s.population * 8,
+        "{s}"
+    );
     assert_eq!(w.life.deaths_by_cause[DeathCause::Starvation.index()], 0);
     assert!(w.life.births_total > 200, "{:?}", w.life);
     assert!(w.life.births_denied_total > 0, "never throttled");

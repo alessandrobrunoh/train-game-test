@@ -662,7 +662,7 @@ impl World {
                         .filter(|m| {
                             let c = &self.carriages[m.index()];
                             c.stock.count(item) >= 1
-                                && price_at(&self.params, c, item)
+                                && price_at(&self.params, self.economy.pay_level, c, item)
                                     .is_some_and(|price| price > npc.inventory.tokens)
                         })
                         .min_by_key(|m| (m.distance(npc.carriage), m.0))
@@ -1036,7 +1036,8 @@ impl World {
         if c.stock.count(item) < 1 {
             return;
         }
-        let price = price_at(&self.params, c, item).unwrap_or(item.base_value());
+        let level = self.economy.pay_level;
+        let price = price_at(&self.params, level, c, item).unwrap_or(item.base_value());
         let thief = self.npcs[i].id;
         let guard = self.merchant_on_duty(market).is_some();
         let witnesses = self
@@ -1057,6 +1058,8 @@ impl World {
             let tokens = &mut self.npcs[i].inventory.tokens;
             fine = price.min(*tokens);
             *tokens -= fine;
+            self.economy.treasury += u64::from(fine);
+            self.economy.counters.fines += u64::from(fine);
             let drop = self.params.theft_caught_affinity;
             let known: Vec<usize> = self.npcs[i]
                 .relations
@@ -1106,6 +1109,7 @@ impl World {
         if gift > 0 {
             self.npcs[h].inventory.tokens -= gift;
             self.npcs[i].inventory.tokens += gift;
+            self.economy.counters.help += u64::from(gift);
             self.add_affinity(i, h, self.params.affinity_per_chat);
             self.deliberation_counters.help_given += 1;
         } else {

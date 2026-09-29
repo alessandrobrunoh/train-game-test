@@ -15,6 +15,9 @@ use crate::item::ItemKind;
 /// - `Travel`: moves the NPC to `to` when it completes.
 /// - `Socialize`: restores social while running; the partner gets a bonus at the end.
 /// - `Idle`: nothing, short filler.
+/// - `Wait`: queues for a seat in a Mensa whose tables are full ("aspetta un
+///   posto in mensa"): seated (`Eat`) as soon as one frees up, first come
+///   first served, or decides again after `queue_patience_minutes`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
     Eat(StationId),
@@ -24,6 +27,7 @@ pub enum Action {
     Socialize(NpcId),
     Buy(ItemKind),
     Idle,
+    Wait,
 }
 
 /// Coarse action category, for stats and rendering.
@@ -36,10 +40,11 @@ pub enum ActionKind {
     Socialize,
     Buy,
     Idle,
+    Wait,
 }
 
 impl ActionKind {
-    pub const ALL: [ActionKind; 7] = [
+    pub const ALL: [ActionKind; 8] = [
         ActionKind::Eat,
         ActionKind::Sleep,
         ActionKind::Work,
@@ -47,6 +52,7 @@ impl ActionKind {
         ActionKind::Socialize,
         ActionKind::Buy,
         ActionKind::Idle,
+        ActionKind::Wait,
     ];
 
     pub fn name(self) -> &'static str {
@@ -58,6 +64,7 @@ impl ActionKind {
             ActionKind::Socialize => "socializza",
             ActionKind::Buy => "compra",
             ActionKind::Idle => "ozia",
+            ActionKind::Wait => "aspetta",
         }
     }
 }
@@ -72,6 +79,7 @@ impl Action {
             Action::Socialize(_) => ActionKind::Socialize,
             Action::Buy(_) => ActionKind::Buy,
             Action::Idle => ActionKind::Idle,
+            Action::Wait => ActionKind::Wait,
         }
     }
 
