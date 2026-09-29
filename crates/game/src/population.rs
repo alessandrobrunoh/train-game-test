@@ -339,11 +339,13 @@ fn totals(ui: &mut egui::Ui, world: &World, history: &PopulationHistory) {
             }
             ui.weak("In totale");
             ui.label(format!(
-                "{} nati · {} morti ({} di vecchiaia, {} di fame)",
+                "{} nati · {} morti ({} di vecchiaia, {} di fame, {} di violenza)",
                 life.births_total,
                 life.deaths_total,
                 life.deaths_by_cause[DeathCause::OldAge.index()],
                 life.deaths_by_cause[DeathCause::Starvation.index()],
+                life.deaths_by_cause[DeathCause::Violence.index()]
+                    + life.deaths_by_cause[DeathCause::Wounds.index()],
             ));
             ui.end_row();
             ui.weak("");

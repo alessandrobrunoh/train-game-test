@@ -153,11 +153,13 @@ fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
     follow: Res<FollowNpc>,
     chat: Option<Res<ChatWindow>>,
+    sim: Option<Res<crate::state::Sim>>,
     mut input: Single<&mut PlayerInput>,
 ) {
     // Mentre la camera segue un NPC, o si parla con qualcuno, il giocatore
-    // resta fermo.
-    if follow.0 || chat.is_some_and(|c| c.is_open()) {
+    // resta fermo; e anche svenuto o morto (vedi `combat.rs`).
+    let down = sim.is_some_and(|s| s.world.player.is_down());
+    if follow.0 || chat.is_some_and(|c| c.is_open()) || down {
         input.axis = 0.0;
         input.vertical = 0.0;
         input.jump_held = false;

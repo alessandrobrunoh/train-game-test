@@ -13,8 +13,10 @@
 //! neri). Anche le finestre egui finiscono nell'immagine: l'ultima scena ha
 //! inventario e baule aperti.
 //!
-//! Le ultime scene mostrano il Narratore: la cronaca (N) con i pannelli
-//! aperti, le statistiche (K) e tutte le icone procedurali. La cronaca è
+//! Le scene 8–10 mostrano il Narratore: la cronaca (N) con i pannelli
+//! aperti, le statistiche (K) e tutte le icone procedurali. L'ultima è una
+//! rissa: barre della salute, numeri del danno, grida e l'ispettore sulla
+//! vittima (vedi `combat.rs`). La cronaca è
 //! finta e fissa ([`FIXTURES`], alcune sono risposte vere di un modello),
 //! quindi gli screenshot sono uguali a ogni giro e non usano la rete. Con
 //! `TRAINGAME_SHOTS_LLM=1` invece il Narratore è quello di `.env`: chiede la
@@ -38,7 +40,7 @@ use crate::inventory::InventoryWindow;
 use crate::item_icons::{ItemIcons, icon_canvas, shape_canvas, show_icon};
 use crate::narrator_bridge::{ChronicleEntry, EntryStatus, NarratorState};
 use crate::player::{Body, Player, start_position};
-use crate::state::Sim;
+use crate::state::{SelectedNpc, Sim};
 use crate::stations::StationLayout;
 use crate::train::{FLOOR_Y, STAIRS_WIDTH, TrainLayout, floor_y};
 
@@ -212,6 +214,8 @@ enum Spot {
     Narrator(NarratorView),
     /// Nel primo Mercato, con la scheda "Banchi" aperta.
     Market,
+    /// Una rissa nella prima carrozza a più piani, con l'ispettore aperto.
+    Fight,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -222,7 +226,7 @@ enum NarratorView {
 }
 
 /// Nome del file, posto del giocatore, vista allargata.
-const SCENES: [(&str, Spot, bool); 11] = [
+const SCENES: [(&str, Spot, bool); 12] = [
     ("1-piano-terra", Spot::Floor(0, Some(160.0)), false),
     ("2-piano-sopra", Spot::Floor(1, Some(160.0)), false),
     ("3-sulla-scala", Spot::Floor(0, None), false),
@@ -234,7 +238,49 @@ const SCENES: [(&str, Spot, bool); 11] = [
     ("9-statistiche", Spot::Narrator(NarratorView::Stats), false),
     ("10-icone", Spot::Narrator(NarratorView::Icons), false),
     ("11-banchi", Spot::Market, false),
+    ("12-rissa", Spot::Fight, false),
 ];
+
+/// Una rissa attorno al giocatore nella carrozza `index`, al piano terra:
+/// uno lo picchia, due si picchiano tra loro (la vittima già ferita), e
+/// una quarta persona, ferita, guarda. Restituisce la vittima, da mostrare
+/// nell'ispettore.
+fn stage_fight(world: &mut sim::World, index: usize) -> Option<sim::NpcId> {
+    let place = sim::Place {
+        carriage: sim::CarriageId(index as u16),
+        floor: 0,
+    };
+    world.set_player_place(place);
+    world.player.health = 72.0;
+    let people: Vec<usize> = (0..world.npcs.len())
+        .filter(|&i| (20..=55).contains(&world.npcs[i].age))
+        .take(4)
+        .collect();
+    let now = world.clock;
+    for &i in &people {
+        let npc = &mut world.npcs[i];
+        if let Some(s) = npc.action.station() {
+            let station = &mut world.carriages[npc.carriage.index()].stations[s.index()];
+            station.occupancy = station.occupancy.saturating_sub(1);
+        }
+        npc.carriage = place.carriage;
+        npc.floor = 0;
+        npc.action = sim::Action::Idle;
+        npc.action_since = now;
+        npc.action_until = now + 60;
+    }
+    let &[a, b, c, d] = people.as_slice() else {
+        return None;
+    };
+    let ids = [a, b, c, d].map(|i| world.npcs[i].id);
+    world.npcs[c].health = 45.0;
+    world.npcs[c].injury = 30.0;
+    world.npcs[d].health = 20.0;
+    world.npcs[d].injury = 50.0;
+    world.npc_attack(ids[0], sim::Fighter::Player, sim::Motive::Grudge);
+    world.npc_attack(ids[1], sim::Fighter::Npc(ids[2]), sim::Motive::Quarrel);
+    Some(ids[2])
+}
 
 /// Un amico del giocatore sveglio nella cabina, e qualcosa nell'inventario
 /// e nel baule: la scena mostra il saluto e le finestre piene. Restituisce l'amico.
@@ -336,6 +382,7 @@ fn run_script(
         ResMut<StatsWindow>,
         ResMut<IconGallery>,
     ),
+    mut selected: ResMut<SelectedNpc>,
 ) {
     script.wait -= time.delta_secs();
     if script.wait > 0.0 {
@@ -445,6 +492,14 @@ fn run_script(
                 }
                 None => start_position(),
             }
+        }
+        (Spot::Fight, _) => {
+            ui_windows.2.0.push(ChatCommand::Close);
+            narrator.1.open = false;
+            narrator.2.open = false;
+            narrator.3.0 = false;
+            selected.0 = stage_fight(&mut sim.world, index);
+            Vec2::new(left + 150.0, floor_y(0) + half_height)
         }
         (Spot::Narrator(view), _) => {
             ui_windows.2.0.push(ChatCommand::Close);

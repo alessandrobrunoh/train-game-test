@@ -33,13 +33,18 @@
 //!
 //! I neonati (sotto i 3 anni) che oziano stanno accanto alla mamma, se è
 //! nella stessa carrozza. Chi dorme è disegnato più scuro. Chi muore sotto
-//! gli occhi del giocatore svanisce (vedi `life_fx.rs`). L'NPC selezionato ha
-//! un contorno ciano e un marcatore sopra la testa.
+//! gli occhi del giocatore svanisce (vedi `life_fx.rs`); chi è stato ucciso
+//! prima cade a terra. L'NPC selezionato ha un contorno ciano e un
+//! marcatore sopra la testa.
+//!
+//! Risse (vedi `combat.rs`): chi aggredisce va addosso alla vittima (o al
+//! giocatore) e mena le braccia; chi è ferito cammina più piano,
+//! zoppicando; chi è grave sta a letto (dorme, come vuole la sim).
 
 use std::collections::{HashMap, HashSet};
 
 use bevy::{prelude::*, sprite::Anchor, window::PrimaryWindow};
-use sim::{Action, CarriageId, Npc, NpcId, Sex, StationKind, World};
+use sim::{Action, CarriageId, Fighter, Npc, NpcId, Sex, StationKind, World};
 
 use crate::camera::follow_target;
 use crate::characters::{
@@ -80,6 +85,12 @@ const TELEPORT_DISTANCE: f32 = CARRIAGE_PITCH * 1.5;
 const CHAT_DISTANCE: f32 = 10.0;
 /// Distanza dal giocatore di chi lo saluta.
 const GREET_DISTANCE: f32 = 14.0;
+/// Distanza tra due che si picchiano (o dal giocatore).
+const FIGHT_DISTANCE: f32 = 9.0;
+/// Chi è ferito cammina a questa frazione della velocità, e zoppica
+/// inclinandosi di al più questo angolo (radianti) a ogni passo.
+const HURT_WALK: f32 = 0.6;
+const LIMP_TILT: f32 = 0.1;
 /// Distanza tra due persone in coda, e tra la prima e le cucine.
 const QUEUE_SPACING: f32 = 6.0;
 const QUEUE_HEAD_GAP: f32 = 2.0;
@@ -185,6 +196,8 @@ pub(crate) struct NpcVisual {
     /// Azione corrente e attrezzo posseduto: decidono l'animazione.
     action: Action,
     has_tool: bool,
+    /// Ferito (sotto la soglia della sim): cammina piano e zoppica.
+    hurt: bool,
     face: Face,
     facing_left: bool,
     /// Profondità dello sprite (vedi [`sprite_z`]).
@@ -399,7 +412,7 @@ fn anchor_x(world: &World, stations: &StationLayout, npc: &Npc) -> f32 {
         Action::Socialize(other) => chat_spot(stations, npc.carriage, npc.id, other),
         Action::Travel { to } => travel_x(world, npc, to),
         Action::Buy(_) => counter_x(world, stations, npc).unwrap_or_else(|| idle_x(stations, npc)),
-        Action::Idle => idle_x(stations, npc),
+        Action::Idle | Action::Attack(_) => idle_x(stations, npc),
         Action::Wait => queue_spot(stations, npc, 0).map_or_else(|| idle_x(stations, npc), |q| q.0),
     }
 }
@@ -648,16 +661,46 @@ fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Po
             Some((x, mother_x)) => standing(x, Face::Toward(mother_x)),
             None => standing(idle_x(stations, npc), Face::Keep),
         },
+        // Addosso alla vittima (al giocatore ci pensa `approach_player`).
+        Action::Attack(Fighter::Npc(other)) => {
+            let side = if npc.id < other { -1.0 } else { 1.0 };
+            let x = match world.npc(other) {
+                // Si picchiano a vicenda: ai due lati di un punto d'incontro.
+                Some(p) if p.carriage == c && p.action == Action::Attack(Fighter::Npc(npc.id)) => {
+                    Some(chat_spot(stations, c, npc.id, other) + side * FIGHT_DISTANCE / 2.0)
+                }
+                Some(p) if p.carriage == c && p.floor == npc.floor => {
+                    Some(anchor_x(world, stations, p) + side * FIGHT_DISTANCE)
+                }
+                _ => None,
+            };
+            let (left, right) = interior_range();
+            match x {
+                Some(x) => standing(
+                    x.clamp(carriage_x(c, left), carriage_x(c, right)),
+                    if side < 0.0 { Face::Right } else { Face::Left },
+                ),
+                None => standing(idle_x(stations, npc), Face::Keep),
+            }
+        }
+        Action::Attack(Fighter::Player) => standing(idle_x(stations, npc), Face::Keep),
     }
 }
 
 /// Chi sta salutando il giocatore (`World::greeting_of`) e ozia nel suo
 /// stesso posto gli si avvicina, dalla parte da cui arriva, e lo guarda.
 fn approach_player(world: &World, npc: &Npc, player: Vec2, pose: &mut Pose) {
-    if npc.action != Action::Idle || world.greeting_of(npc.id).is_none() || !world.with_player(npc)
-    {
+    let greets = npc.action == Action::Idle && world.greeting_of(npc.id).is_some();
+    // Chi picchia il giocatore gli va addosso.
+    let fights = npc.action == Action::Attack(Fighter::Player);
+    if !(greets || fights) || !world.with_player(npc) {
         return;
     }
+    let distance = if fights {
+        FIGHT_DISTANCE
+    } else {
+        GREET_DISTANCE
+    };
     let side = if pose.position.x < player.x {
         -1.0
     } else {
@@ -665,8 +708,7 @@ fn approach_player(world: &World, npc: &Npc, player: Vec2, pose: &mut Pose) {
     };
     let (left, right) = interior_range();
     let c = npc.carriage;
-    pose.position.x =
-        (player.x + side * GREET_DISTANCE).clamp(carriage_x(c, left), carriage_x(c, right));
+    pose.position.x = (player.x + side * distance).clamp(carriage_x(c, left), carriage_x(c, right));
     pose.face = Face::Toward(player.x);
 }
 
@@ -879,6 +921,7 @@ fn sync_npc_sprites(
         let key = appearance(npc);
         let tint = npc_tint(npc);
         let has_tool = npc.inventory.tool.is_some();
+        let hurt = npc.health < world.params.hurt_below;
 
         let existing = index.entities.get(&npc.id).map(|&(e, _)| e);
         if let Some(entity) = existing
@@ -908,6 +951,7 @@ fn sync_npc_sprites(
             visual.wants_lying = pose.lying;
             visual.action = npc.action;
             visual.has_tool = has_tool;
+            visual.hurt = hurt;
             visual.face = pose.face;
             visual.z = z;
             if visual.key != key {
@@ -938,6 +982,7 @@ fn sync_npc_sprites(
             half_extents: Vec2::ZERO,
             action: npc.action,
             has_tool,
+            hurt,
             face: pose.face,
             facing_left: facing_left(
                 hash01(u64::from(npc.id.0) ^ 0xFACE) < 0.5,
@@ -999,20 +1044,33 @@ fn sync_npc_sprites(
         index.entities.insert(npc.id, (entity, frame));
     }
 
-    // Via chi è uscito dalla finestra; chi è morto svanisce piano.
+    // Via chi è uscito dalla finestra; chi è morto svanisce piano (chi è
+    // stato ucciso prima cade a terra).
     index.entities.retain(|&id, &mut (entity, seen)| {
         if seen != frame {
             if world.npc(id).is_none() {
+                let fade = if killed_recently(world, id) {
+                    FadingOut::fallen()
+                } else {
+                    FadingOut::default()
+                };
                 commands
                     .entity(entity)
                     .remove::<(NpcSprite, NpcVisual)>()
-                    .insert(FadingOut::default());
+                    .insert(fade);
             } else {
                 commands.entity(entity).despawn();
             }
         }
         seen == frame
     });
+}
+
+/// Se `id` è stato appena ucciso (un `Killed` tra gli ultimi eventi).
+fn killed_recently(world: &World, id: NpcId) -> bool {
+    world.events.iter().rev().take(64).any(
+        |e| matches!(e.kind, sim::EventKind::Killed { victim: Fighter::Npc(v), .. } if v == id),
+    )
 }
 
 /// Muove gli sprite verso la loro posizione obiettivo, li fa sdraiare solo
@@ -1055,7 +1113,12 @@ fn move_npc_sprites(
                 visual.standing_half_height(),
                 floors,
             );
-            let step = (WALK_SPEED + distance * CATCH_UP) * dt;
+            let speed = if visual.hurt {
+                WALK_SPEED * HURT_WALK
+            } else {
+                WALK_SPEED
+            };
+            let step = (speed + distance * CATCH_UP) * dt;
             current + (stop - current).clamp_length_max(step)
         };
         if next != current {
@@ -1086,7 +1149,12 @@ fn move_npc_sprites(
         if visual.half_extents != half_extents {
             visual.half_extents = half_extents;
         }
-        let rotation = visual.rotation();
+        let mut rotation = visual.rotation();
+        // Ferito: zoppica, inclinandosi a ogni passo.
+        if visual.hurt && lie <= 0.0 && next.distance(visual.target) > ARRIVE_DISTANCE {
+            let limp = (visual.walked * 0.35).sin() * LIMP_TILT;
+            rotation *= Quat::from_rotation_z(limp);
+        }
         if transform.rotation != rotation {
             transform.rotation = rotation;
         }

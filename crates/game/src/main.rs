@@ -11,6 +11,7 @@ mod camera;
 mod characters;
 mod chat;
 mod chronicle_ui;
+mod combat;
 mod crafting;
 mod env_art;
 mod fonts;
@@ -96,6 +97,8 @@ fn main() {
             cabin::CabinPlugin,
             // Chat con gli NPC (tasto T).
             chat::ChatPlugin,
+            // Salute e risse (tasto X), barre, danni, svenimento.
+            combat::CombatPlugin,
         ))
         // Il Narratore (da `.env`, spento senza): una novità al giorno, la
         // cronaca (tasto N), i pannelli e le statistiche inventati (tasto K).

@@ -6,7 +6,9 @@
 //!   sole regole le deliberazioni si chiudono nello stesso minuto e non si vede);
 //! - **fumetto** con la risposta per ~3 s reali quando si chiude ("Sì!",
 //!   "Non ancora...", "Ruba!", "Protesto!"), in blu se ha deciso Laya;
-//! - **cartello** sopra la Mensa dove si protesta ("Protesta: nascite!").
+//! - **cartello** sopra la Mensa dove si protesta ("Protesta: nascite!");
+//! - **grida** di chi si picchia, in rosso ("Te la faccio pagare!",
+//!   "Aiuto!", "Lasciami stare!", vedi `combat.rs`).
 //!
 //! L'arte è pixel art generata con `Canvas` una volta sola (fumetti a nove
 //! fette, così si allargano col testo); il testo usa il font del gioco.
@@ -61,6 +63,8 @@ const BOARD: Rgba = rgb(236, 226, 196);
 const TEXT_COLOR: Color = Color::srgb(0.16, 0.14, 0.2);
 /// Il testo delle risposte di Laya.
 const BRAIN_COLOR: Color = Color::srgb(0.12, 0.3, 0.75);
+/// Le grida di chi si picchia.
+const FIGHT_COLOR: Color = Color::srgb(0.7, 0.08, 0.08);
 const SIGN_TEXT: Color = Color::srgb(0.6, 0.1, 0.1);
 
 pub struct BubblesPlugin;
@@ -265,6 +269,9 @@ struct SpeechBubble {
     elapsed: f32,
     /// Ultima posizione della testa (se lo sprite sparisce il fumetto resta lì).
     head: Vec2,
+    /// Più in alto della testa di tanto (la vittima di una rissa grida
+    /// sopra chi la aggredisce, così i fumetti non si coprono).
+    lift: f32,
 }
 
 /// Cartello di una protesta in corso.
@@ -383,13 +390,33 @@ fn speech_bubbles(
     let start = world.events.len().saturating_sub(fresh);
     let mut count = existing.iter().count();
     let mut gone: Vec<Entity> = Vec::new();
+    // Chi ha deciso dice la sua risposta; chi si picchia grida (`combat.rs`).
+    let mut lines: Vec<(NpcId, &'static str, Color, f32)> = Vec::new();
     for event in &world.events[start..] {
-        let EventKind::DeliberationResolved {
-            npc, choice, by, ..
-        } = event.kind
-        else {
-            continue;
-        };
+        match event.kind {
+            EventKind::DeliberationResolved {
+                npc, choice, by, ..
+            } => {
+                let color = if by == Resolver::Brain {
+                    BRAIN_COLOR
+                } else {
+                    TEXT_COLOR
+                };
+                lines.push((npc, speech_text(choice), color, 0.0));
+            }
+            EventKind::Attacked { first: true, .. } => {
+                for (k, (npc, text)) in crate::combat::fight_shouts(world, event)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let lift = k as f32 * (SPEECH_HEIGHT + 2.0);
+                    lines.push((npc, text, FIGHT_COLOR, lift));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (npc, text, color, lift) in lines {
         let Some(head) = head_of(&index, &sprites, npc) else {
             continue;
         };
@@ -405,13 +432,7 @@ fn speech_bubbles(
             continue;
         }
         count += 1;
-        let text = speech_text(choice);
         let width = text.chars().count() as f32 * CHAR_WIDTH + 2.0 * SPEECH_PAD;
-        let color = if by == Resolver::Brain {
-            BRAIN_COLOR
-        } else {
-            TEXT_COLOR
-        };
         commands
             .spawn((
                 Name::new("Fumetto"),
@@ -420,6 +441,7 @@ fn speech_bubbles(
                     npc,
                     elapsed: 0.0,
                     head,
+                    lift,
                 },
                 sliced(art.speech.clone(), Vec2::new(width, SPEECH_HEIGHT)),
                 Anchor::BOTTOM_LEFT,
@@ -502,7 +524,7 @@ fn move_bubbles(
         }
         busy.insert(bubble.npc);
         transform.translation.x = bubble.head.x - 1.0;
-        transform.translation.y = bubble.head.y + BUBBLE_GAP + 2.0;
+        transform.translation.y = bubble.head.y + BUBBLE_GAP + 2.0 + bubble.lift;
         let alpha = ((SPEECH_SECS - bubble.elapsed) / SPEECH_FADE).min(1.0);
         sprite.color.set_alpha(alpha);
         for &child in children {

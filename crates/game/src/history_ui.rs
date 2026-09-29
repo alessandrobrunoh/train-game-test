@@ -484,6 +484,8 @@ fn biography(
                 let cause = match p.death_cause {
                     Some(DeathCause::OldAge) => ", di vecchiaia",
                     Some(DeathCause::Starvation) => ", di fame",
+                    Some(DeathCause::Violence) => p.sex.pick(", uccisa", ", ucciso"),
+                    Some(DeathCause::Wounds) => ", per le ferite",
                     None => "",
                 };
                 let age = p
@@ -721,6 +723,8 @@ fn records(ui: &mut egui::Ui, world: &World, view: &View, db: &HistoryDb, clicks
                     let cause = match cause {
                         DeathCause::OldAge => "di vecchiaia",
                         DeathCause::Starvation => "di fame",
+                        DeathCause::Violence => "uccisi",
+                        DeathCause::Wounds => "per le ferite",
                     };
                     ui.label(format!("{n} {cause}"));
                 }

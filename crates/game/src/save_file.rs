@@ -50,7 +50,11 @@ use sim::{GameTime, UtilityBrain, World};
 /// oggetto e per lavoro diventano liste, il mondo tiene il catalogo
 /// aggiunto (`World::catalog`) e il Custode (proposte in attesa, decisioni,
 /// statistiche con lo storico).
-pub const SAVE_VERSION: u32 = 10;
+/// 11: salute e combattimento
+/// (`Npc::health`/`injury`/`grudges`/`violence`/`last_attacker`, lo stesso
+/// per `PlayerCharacter` con `fainted` e `dead`, `Action::Attack`, le risse
+/// in `World`, le nuove cause di morte e i parametri di `SimParams`).
+pub const SAVE_VERSION: u32 = 11;
 const MAGIC: [u8; 8] = *b"TRAINSAV";
 /// Byte fissi prima dell'intestazione: magic, versione, lunghezza.
 const PREFIX_LEN: usize = MAGIC.len() + 4 + 4;

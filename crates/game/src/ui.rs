@@ -369,6 +369,12 @@ fn npc_details(
     field(ui, "Si trova in", &place);
     player_regard(ui, npc);
 
+    // Salute, ferite, rancori e reputazione (vedi `combat.rs`).
+    ui.separator();
+    if let Some(id) = crate::combat::health_section(ui, world, npc) {
+        clicked = Some(id);
+    }
+
     ui.separator();
     field(ui, "Azione", &action_text(world, npc));
     let until = npc.action_until;
@@ -627,6 +633,7 @@ fn action_text(world: &World, npc: &Npc) -> String {
         Action::Buy(item) => format!("{verb} {}", item.with_article()),
         Action::Idle => verb.to_string(),
         Action::Wait => format!("{verb} un posto a tavola"),
+        Action::Attack(target) => format!("{verb} con {}", world.fighter_name(target)),
     }
 }
 
@@ -644,6 +651,8 @@ pub(crate) enum EventCategory {
     Eta,
     /// Litigi e pettegolezzi tra NPC.
     Chiacchiere,
+    /// Aggressioni, uccisioni, svenimenti.
+    Violenza,
     /// Acquisti degli NPC e oggetti consumati.
     Acquisti,
     Scarsita,
@@ -651,12 +660,13 @@ pub(crate) enum EventCategory {
 }
 
 impl EventCategory {
-    const ALL: [EventCategory; 8] = [
+    const ALL: [EventCategory; 9] = [
         EventCategory::Nascite,
         EventCategory::Morti,
         EventCategory::Coppie,
         EventCategory::Eta,
         EventCategory::Chiacchiere,
+        EventCategory::Violenza,
         EventCategory::Acquisti,
         EventCategory::Scarsita,
         EventCategory::Giocatore,
@@ -688,6 +698,9 @@ impl EventCategory {
             EventKind::Austerity { .. } => EventCategory::Scarsita,
             EventKind::PayChanged { .. } => EventCategory::Acquisti,
             EventKind::Chat { .. } => EventCategory::Chiacchiere,
+            EventKind::Attacked { .. } | EventKind::Killed { .. } | EventKind::Fainted { .. } => {
+                EventCategory::Violenza
+            }
         }
     }
 
@@ -698,6 +711,7 @@ impl EventCategory {
             EventCategory::Coppie => "coppie",
             EventCategory::Eta => "età",
             EventCategory::Chiacchiere => "chiacchiere",
+            EventCategory::Violenza => "violenza",
             EventCategory::Acquisti => "acquisti",
             EventCategory::Scarsita => "scarsità",
             EventCategory::Giocatore => "giocatore",
@@ -711,6 +725,7 @@ impl EventCategory {
             EventCategory::Coppie => "Nuove coppie e vedovanze",
             EventCategory::Eta => "Maggiore età e pensione",
             EventCategory::Chiacchiere => "Litigi e pettegolezzi tra NPC",
+            EventCategory::Violenza => "Aggressioni, uccisioni e svenimenti",
             EventCategory::Acquisti => "Acquisti degli NPC e oggetti consumati",
             EventCategory::Scarsita => "Scarsità e nuove scorte",
             EventCategory::Giocatore => "Quello che fai tu",
@@ -830,8 +845,13 @@ pub(crate) fn event_color(kind: &EventKind) -> Color32 {
             ..
         } => WARNING,
         EventKind::Chat { .. } => Color32::GRAY,
+        EventKind::Attacked { .. } => VIOLENCE,
+        EventKind::Killed { .. } | EventKind::Fainted { .. } => DANGER,
     }
 }
+
+/// Colore delle aggressioni nel registro.
+const VIOLENCE: Color32 = Color32::from_rgb(235, 120, 90);
 
 // ----------------------------------------------------------------------
 // Elenco carrozze (in alto a sinistra, chiuso di default)

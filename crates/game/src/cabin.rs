@@ -203,6 +203,7 @@ fn sleep_overlay(mut contexts: EguiContexts, mut sim: ResMut<Sim>, watch: Res<Sl
         return;
     };
     let now = sim.world.clock;
+    let fainted = sim.world.player.is_down();
     let since = watch.since.unwrap_or(now);
     let total = until.since(since).max(1);
     let done = now.since(since).min(total);
@@ -223,18 +224,30 @@ fn sleep_overlay(mut contexts: EguiContexts, mut sim: ResMut<Sim>, watch: Res<Sl
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_width(260.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("Zzz…").size(22.0).strong());
-                    ui.label(format!(
-                        "{} dorme nella sua cabina · {:02}:{:02}",
-                        sim.world.player.name,
-                        now.hour(),
-                        now.minute()
-                    ));
+                    // Svenuto dopo una rissa (vedi `combat.rs`): non ci si
+                    // sveglia prima del mattino.
+                    if fainted {
+                        ui.label(RichText::new("Svenuto…").size(22.0).strong());
+                        ui.label(format!(
+                            "{} è stato riportato nella sua cabina · {:02}:{:02}",
+                            sim.world.player.name,
+                            now.hour(),
+                            now.minute()
+                        ));
+                    } else {
+                        ui.label(RichText::new("Zzz…").size(22.0).strong());
+                        ui.label(format!(
+                            "{} dorme nella sua cabina · {:02}:{:02}",
+                            sim.world.player.name,
+                            now.hour(),
+                            now.minute()
+                        ));
+                    }
                     ui.add(
                         egui::ProgressBar::new(done as f32 / total as f32)
                             .text(format!("sveglia alle {:02}:00", until.hour())),
                     );
-                    if ui.button("Svegliati").clicked() {
+                    if !fainted && ui.button("Svegliati").clicked() {
                         wake = true;
                     }
                 });

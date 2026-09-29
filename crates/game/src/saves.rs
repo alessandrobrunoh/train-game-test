@@ -205,6 +205,9 @@ pub(crate) struct SavesWindow {
     npcs: usize,
     /// Nome del giocatore della nuova partita.
     player_name: String,
+    /// "Morte permanente" per la nuova partita: a 0 di salute il giocatore
+    /// muore invece di svenire (`SimParams::permadeath`).
+    permadeath: bool,
     /// Eliminazione in attesa di conferma (file o cartella).
     confirm: Option<PathBuf>,
     listing: Vec<RunEntry>,
@@ -229,6 +232,7 @@ impl Default for SavesWindow {
             carriages: SIM_CARRIAGES,
             npcs: SIM_NPCS,
             player_name: sim::DEFAULT_PLAYER_NAME.to_string(),
+            permadeath: false,
             confirm: None,
             listing: Vec::new(),
             dirty: true,
@@ -449,7 +453,8 @@ fn process_commands(
                 name,
             } => {
                 let run = new_run_info(&config.data_dir, seed);
-                let loaded = LoadedGame::new_game(seed, carriages, npcs, &name, run);
+                let mut loaded = LoadedGame::new_game(seed, carriages, npcs, &name, run);
+                loaded.world.params.permadeath = window.permadeath;
                 let (c, n) = (loaded.world.carriages.len(), loaded.world.npcs.len());
                 game.replace(loaded);
                 notice.show(
@@ -887,6 +892,10 @@ fn new_game(ui: &mut egui::Ui, window: &mut SavesWindow, queue: &mut SaveQueue) 
                     .range(1..=MAX_NPCS)
                     .speed(5.0),
             );
+            ui.end_row();
+            ui.label("Morte permanente");
+            ui.checkbox(&mut window.permadeath, "")
+                .on_hover_text("Senza: a 0 di salute svieni e ti risvegli in cabina. Con: muori e la partita finisce.");
             ui.end_row();
         });
     ui.horizontal(|ui| {

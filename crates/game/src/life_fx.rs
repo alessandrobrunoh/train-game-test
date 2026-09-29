@@ -111,6 +111,13 @@ fn toast_npc(kind: &EventKind) -> Option<Option<NpcId>> {
             npc, caught: true, ..
         } => Some(Some(*npc)),
         EventKind::ProtestCalled { .. } | EventKind::AdminConceded { .. } => Some(None),
+        // Risse: l'aggressore (il giocatore non si seleziona), uccisioni, svenimenti.
+        EventKind::Attacked {
+            attacker,
+            first: true,
+            ..
+        } => Some(attacker.npc()),
+        EventKind::Killed { .. } | EventKind::Fainted { .. } => Some(None),
         _ => None,
     }
 }
@@ -169,7 +176,24 @@ fn toast_opacity(age: f64) -> f32 {
 #[derive(Component, Default)]
 pub(crate) struct FadingOut {
     elapsed: f32,
+    /// Ucciso: prima cade e resta a terra un attimo, poi svanisce.
+    fallen: bool,
 }
+
+impl FadingOut {
+    /// Chi è stato ucciso: cade, resta a terra, poi svanisce.
+    pub(crate) fn fallen() -> Self {
+        Self {
+            elapsed: 0.0,
+            fallen: true,
+        }
+    }
+}
+
+/// Chi è ucciso: quanto dura la caduta e quanto resta a terra (secondi)
+/// prima di svanire.
+const FALL_SECS: f32 = 0.3;
+const LIE_SECS: f32 = 1.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IconKind {
@@ -453,6 +477,28 @@ fn fade_out_dead(
     let dt = time.delta_secs();
     for (entity, mut fade, mut transform, mut sprite, children) in &mut fading {
         fade.elapsed += dt;
+        if fade.fallen {
+            // Cade su un fianco, resta a terra, poi svanisce senza salire.
+            let fall = (fade.elapsed / FALL_SECS).min(1.0);
+            transform.rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2 * fall);
+            let fading = fade.elapsed - FALL_SECS - LIE_SECS;
+            if fading <= 0.0 {
+                continue;
+            }
+            let t = fading / FADE_SECS;
+            if t >= 1.0 {
+                commands.entity(entity).despawn();
+                continue;
+            }
+            let alpha = 1.0 - t;
+            sprite.color.set_alpha(alpha);
+            for &child in children {
+                if let Ok(mut part) = parts.get_mut(child) {
+                    part.color.set_alpha(alpha);
+                }
+            }
+            continue;
+        }
         let t = fade.elapsed / FADE_SECS;
         if t >= 1.0 {
             commands.entity(entity).despawn();

@@ -1366,6 +1366,9 @@ pub fn anim_for(action: &Action, moving: bool, lying: bool, has_tool: bool) -> A
         // Chi viaggia resta a metà passo mentre aspetta di muoversi ancora.
         Action::Travel { .. } => Anim::Walk,
         Action::Sleep(_) | Action::Idle | Action::Wait => Anim::Idle,
+        // Si mena: le braccia del lavoro, più svelte con un attrezzo in mano.
+        Action::Attack(_) if has_tool => Anim::WorkTool,
+        Action::Attack(_) => Anim::Work,
     }
 }
 
