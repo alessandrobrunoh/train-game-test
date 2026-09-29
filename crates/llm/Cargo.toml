@@ -1,0 +1,12 @@
+[package]
+name = "llm"
+edition.workspace = true
+version.workspace = true
+
+# Client for the "big" LLMs (OpenAI-compatible APIs), configured from `.env`.
+# It stays out of `sim`: the simulation never touches the network.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Already in the lockfile (hf-hub uses it in sim-laya): rustls + ring, no system libraries.
+ureq = "3.4"

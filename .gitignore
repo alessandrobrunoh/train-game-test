@@ -2,3 +2,5 @@
 *.db
 *.sqlite
 .DS_Store
+# LLM configuration with the API key: never in the repo (see .env.example)
+.env
