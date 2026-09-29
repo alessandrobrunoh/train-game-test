@@ -578,6 +578,7 @@ fn action_text(world: &World, npc: &Npc) -> String {
         },
         Action::Buy(item) => format!("{verb} {}", item.with_article()),
         Action::Idle => verb.to_string(),
+        Action::Wait => format!("{verb} un posto a tavola"),
     }
 }
 
@@ -632,6 +633,8 @@ impl EventCategory {
             EventKind::ProtestCalled { .. } | EventKind::AdminConceded { .. } => {
                 EventCategory::Scarsita
             }
+            EventKind::Austerity { .. } => EventCategory::Scarsita,
+            EventKind::PayChanged { .. } => EventCategory::Acquisti,
         }
     }
 
@@ -764,6 +767,8 @@ pub(crate) fn event_color(kind: &EventKind) -> Color32 {
         }
         EventKind::Theft { .. } | EventKind::ProtestCalled { .. } => WARNING,
         EventKind::HelpAsked { .. } | EventKind::AdminConceded { .. } => GOOD,
+        EventKind::Austerity { .. } => WARNING,
+        EventKind::PayChanged { .. } => Color32::GRAY,
     }
 }
 

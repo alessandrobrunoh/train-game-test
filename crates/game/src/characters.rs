@@ -1351,7 +1351,7 @@ pub fn anim_for(action: &Action, moving: bool, lying: bool, has_tool: bool) -> A
         Action::Buy(_) => Anim::Buy,
         // Chi viaggia resta a metà passo mentre aspetta di muoversi ancora.
         Action::Travel { .. } => Anim::Walk,
-        Action::Sleep(_) | Action::Idle => Anim::Idle,
+        Action::Sleep(_) | Action::Idle | Action::Wait => Anim::Idle,
     }
 }
 

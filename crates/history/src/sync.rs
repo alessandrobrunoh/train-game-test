@@ -319,6 +319,8 @@ pub(crate) fn columns(kind: &EventKind) -> Columns {
         }
         EventKind::ProtestCalled { place, .. } => c.carriage = Some(place.0),
         EventKind::AdminConceded { protesters, .. } => c.amount = Some(protesters),
+        EventKind::Austerity { paid_percent } => c.amount = Some(paid_percent),
+        EventKind::PayChanged { level_percent, .. } => c.amount = Some(level_percent),
     }
     c
 }
@@ -347,6 +349,8 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::HelpAsked { .. } => "HelpAsked",
         EventKind::ProtestCalled { .. } => "ProtestCalled",
         EventKind::AdminConceded { .. } => "AdminConceded",
+        EventKind::Austerity { .. } => "Austerity",
+        EventKind::PayChanged { .. } => "PayChanged",
     }
 }
 

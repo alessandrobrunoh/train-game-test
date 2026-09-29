@@ -5,10 +5,14 @@
 //! Ogni NPC visibile ha un'entità `NpcSprite`; esce dalla finestra o muore e
 //! l'entità viene rimossa. La posizione deriva dall'azione corrente:
 //! - mangia/dorme/lavora: alla sua postazione (vedi `stations.rs`), con un
-//!   posto diverso per ognuno di chi la condivide;
+//!   posto diverso per ognuno di chi la condivide, che tiene finché resta lì
+//!   (a tavola: tre dietro e tre davanti al tavolo, vedi `seat_offset`);
+//! - aspetta un posto in Mensa: in fila nella zona della coda, tra i tavoli e
+//!   le cucine, nell'ordine d'arrivo e rivolto alle cucine;
 //! - socializza: accanto al compagno;
 //! - compra: al bancone del Mercato, davanti a un mercante al lavoro;
-//! - ozia: in un punto deterministico della carrozza, diverso a ogni pausa;
+//! - ozia: in un punto deterministico della carrozza, diverso a ogni pausa
+//!   (in Mensa lontano dai tavoli, davanti al magazzino; lì si chiacchiera);
 //! - viaggia: da dove si trovava lo sprite quando è partito al centro della
 //!   carrozza di arrivo, attraversando porte e soffietti, in base
 //!   all'avanzamento dell'azione misurato anche tra un tick e l'altro.
@@ -44,7 +48,7 @@ use crate::characters::{
 use crate::life_fx::FadingOut;
 use crate::saves::WorldRebuildSet;
 use crate::state::{NpcSprite, PointerOverUi, SelectedNpc, Sim, SimClock, WorldReplaced};
-use crate::stations::{BED_TOP, StationLayout, interior_range};
+use crate::stations::{BED_TOP, FAR_ROW_RISE, StationLayout, interior_range, seat_offset};
 use crate::train::{CARRIAGE_PITCH, FLOOR_Y, TrainLayout};
 
 /// Larghezza di un NPC adulto: margine dei punti di pausa dalle pareti.
@@ -57,6 +61,9 @@ const ARRIVE_DISTANCE: f32 = 0.5;
 const LIE_DOWN_TIME: f32 = 0.15;
 
 const NPC_Z: f32 = 3.0;
+/// La fila lontana (a tavola, in coda) è disegnata dietro a quella vicina,
+/// ma sempre davanti alle postazioni (`Z_STATION` = -3).
+const FAR_Z: f32 = -0.6;
 /// Scarto di profondità tra un NPC e l'altro (1000 NPC stanno in 0.5).
 const Z_STEP: f32 = 0.0005;
 const MARKER_Z: f32 = 6.0;
@@ -70,6 +77,10 @@ const CATCH_UP: f32 = 3.0;
 const TELEPORT_DISTANCE: f32 = CARRIAGE_PITCH * 1.5;
 /// Distanza tra due NPC che chiacchierano.
 const CHAT_DISTANCE: f32 = 10.0;
+/// Distanza tra due persone in coda, e tra la prima e le cucine.
+const QUEUE_SPACING: f32 = 6.0;
+const QUEUE_HEAD_GAP: f32 = 2.0;
+
 /// Tolleranza del click attorno al rettangolo di un NPC.
 const PICK_MARGIN: f32 = 3.0;
 /// Sotto questo scarto orizzontale (unità) non ci si gira verso la postazione.
@@ -173,6 +184,8 @@ pub(crate) struct NpcVisual {
     has_tool: bool,
     face: Face,
     facing_left: bool,
+    /// Profondità dello sprite (vedi [`sprite_z`]).
+    z: f32,
     /// Secondi reali dall'inizio dell'animazione corrente (con uno sfasamento
     /// per NPC, così non respirano tutti insieme).
     clock: f32,
@@ -260,6 +273,8 @@ struct Pose {
     lying: bool,
     /// Dove guarda da fermo.
     face: Face,
+    /// Nella fila lontana (a tavola, in coda): disegnato dietro agli altri.
+    far: bool,
 }
 
 // --- Calcolo della posa (dati puri) ----------------------------------------
@@ -277,23 +292,49 @@ fn carriage_x(carriage: CarriageId, local_x: f32) -> f32 {
     TrainLayout::carriage_left(carriage.index()) + local_x
 }
 
-/// Punto casuale ma deterministico del pavimento di una carrozza (x mondo).
-fn floor_spot(carriage: CarriageId, key: u64) -> f32 {
-    let (left, right) = interior_range();
-    let margin = ADULT_WIDTH;
+/// Punto casuale ma deterministico del pavimento di una carrozza (x mondo):
+/// in Mensa nella zona per oziare, lontano dai tavoli.
+fn floor_spot(stations: &StationLayout, carriage: CarriageId, key: u64) -> f32 {
+    let (left, right) = stations.lounge(carriage).unwrap_or_else(interior_range);
+    let margin = ADULT_WIDTH.min((right - left) / 2.0);
     carriage_x(
         carriage,
-        left + margin + hash01(key) * (right - left - 2.0 * margin),
+        left + margin + hash01(key) * (right - left - 2.0 * margin).max(0.0),
     )
 }
 
 /// Dove due NPC si incontrano per chiacchierare (uguale per entrambi).
-fn chat_spot(carriage: CarriageId, a: NpcId, b: NpcId) -> f32 {
+fn chat_spot(stations: &StationLayout, carriage: CarriageId, a: NpcId, b: NpcId) -> f32 {
     let (lo, hi) = if a < b { (a, b) } else { (b, a) };
     floor_spot(
+        stations,
         carriage,
         (u64::from(lo.0) << 32) | u64::from(hi.0) | 1 << 63,
     )
+}
+
+/// Posto numero `slot` della coda di una Mensa (0 = il primo, accanto alle
+/// cucine): x mondo, scarto verticale e se sta nella fila lontana. Una fila
+/// riempie la zona della coda, poi si comincia la seconda (più in alto e
+/// dietro, sfalsata di mezzo posto).
+fn queue_spot(stations: &StationLayout, npc: &Npc, slot: u16) -> Option<(f32, f32, bool)> {
+    let (left, right) = stations.queue(npc.carriage)?;
+    let body = body_size(npc).x;
+    let usable = (right - left - QUEUE_HEAD_GAP - body).max(0.0);
+    let per_row = (usable / QUEUE_SPACING) as u16 + 1;
+    // Oltre la seconda fila si torna alla prima (una coda più lunga del previsto).
+    let (row, i) = ((slot / per_row) % 2, slot % per_row);
+    let x = right
+        - QUEUE_HEAD_GAP
+        - body / 2.0
+        - f32::from(i) * QUEUE_SPACING
+        - f32::from(row) * QUEUE_SPACING / 2.0;
+    let x = x.max(left + body / 2.0);
+    Some((
+        carriage_x(npc.carriage, x),
+        f32::from(row) * FAR_ROW_RISE,
+        row == 1,
+    ))
 }
 
 /// Ingombro del corpo in piedi (larghezza, altezza), dalla fascia d'età.
@@ -342,13 +383,14 @@ fn anchor_x(world: &World, stations: &StationLayout, npc: &Npc) -> f32 {
         Action::Eat(s) | Action::Sleep(s) | Action::Work(s) => {
             match stations.spot(npc.carriage, s) {
                 Some(spot) => carriage_x(npc.carriage, spot.x),
-                None => idle_x(npc),
+                None => idle_x(stations, npc),
             }
         }
-        Action::Socialize(other) => chat_spot(npc.carriage, npc.id, other),
+        Action::Socialize(other) => chat_spot(stations, npc.carriage, npc.id, other),
         Action::Travel { to } => travel_x(world, npc, to),
-        Action::Buy(_) => counter_x(world, stations, npc).unwrap_or_else(|| idle_x(npc)),
-        Action::Idle => idle_x(npc),
+        Action::Buy(_) => counter_x(world, stations, npc).unwrap_or_else(|| idle_x(stations, npc)),
+        Action::Idle => idle_x(stations, npc),
+        Action::Wait => queue_spot(stations, npc, 0).map_or_else(|| idle_x(stations, npc), |q| q.0),
     }
 }
 
@@ -383,8 +425,9 @@ fn counter_x(world: &World, stations: &StationLayout, npc: &Npc) -> Option<f32> 
     Some(carriage_x(c, x.min(right - size.x / 2.0)))
 }
 
-fn idle_x(npc: &Npc) -> f32 {
+fn idle_x(stations: &StationLayout, npc: &Npc) -> f32 {
     floor_spot(
+        stations,
         npc.carriage,
         (u64::from(npc.id.0) << 32) ^ npc.action_since.minutes(),
     )
@@ -419,13 +462,21 @@ fn travel_path_x(from_x: f32, to: CarriageId, progress: f32) -> f32 {
     from_x + (dest - from_x) * progress
 }
 
-/// Posa dell'NPC. `seat` è il suo indice tra chi usa la stessa postazione.
+/// Posa dell'NPC. `seat` è il suo posto tra chi usa la stessa postazione,
+/// o in coda (0 = il primo).
 fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Pose {
     let size = body_size(npc);
     let standing = |x: f32, face: Face| Pose {
         position: Vec2::new(x, FLOOR_Y + size.y / 2.0),
         lying: false,
         face,
+        far: false,
+    };
+    // Più in alto di `rise` e dietro agli altri se sta nella fila lontana.
+    let in_row = |mut pose: Pose, rise: f32, far: bool| {
+        pose.position.y += rise;
+        pose.far = far;
+        pose
     };
     let c = npc.carriage;
     match npc.action {
@@ -441,18 +492,26 @@ fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Po
                     ),
                     lying: true,
                     face: Face::Right,
+                    far: false,
                 }
             }
-            None => standing(idle_x(npc), Face::Keep),
+            None => standing(idle_x(stations, npc), Face::Keep),
         },
         Action::Eat(s) | Action::Work(s) => {
             let Some(spot) = stations.spot(c, s) else {
-                return standing(idle_x(npc), Face::Keep);
+                return standing(idle_x(stations, npc), Face::Keep);
             };
             let capacity = world
                 .carriage(c)
                 .and_then(|carriage| carriage.station(s))
                 .map_or(1, |st| st.capacity.max(1));
+            let center = carriage_x(c, spot.x);
+            if spot.kind == StationKind::Table {
+                // Ognuno al suo posto, dietro o davanti al tavolo.
+                let (dx, rise, far) = seat_offset(capacity, seat, spot.width);
+                let pose = standing(center + dx, Face::Toward(center));
+                return in_row(pose, rise, far);
+            }
             // Chi condivide la postazione si distribuisce sulla sua larghezza.
             let offset = if capacity > 1 {
                 let t = f32::from(seat % capacity) / f32::from(capacity - 1);
@@ -472,10 +531,11 @@ fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Po
             let x = match world.npc(other) {
                 // Si parlano a vicenda: ai due lati del punto d'incontro.
                 Some(p) if p.carriage == c && p.action == Action::Socialize(npc.id) => {
-                    Some(chat_spot(c, npc.id, other) + side * CHAT_DISTANCE / 2.0)
+                    Some(chat_spot(stations, c, npc.id, other) + side * CHAT_DISTANCE / 2.0)
                 }
-                // Il compagno fa altro (es. mangia): gli si mette accanto.
-                Some(p) if p.carriage == c => {
+                // Il compagno fa altro (es. mangia): gli si mette accanto,
+                // tranne in Mensa (non si sta addosso ai tavoli).
+                Some(p) if p.carriage == c && stations.lounge(c).is_none() => {
                     Some(anchor_x(world, stations, p) + side * CHAT_DISTANCE)
                 }
                 _ => None,
@@ -487,15 +547,20 @@ fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Po
                     x.clamp(carriage_x(c, left), carriage_x(c, right)),
                     if side < 0.0 { Face::Right } else { Face::Left },
                 ),
-                None => standing(idle_x(npc), Face::Keep),
+                None => standing(idle_x(stations, npc), Face::Keep),
             }
         }
+        // In fila, rivolto alle cucine.
+        Action::Wait => match queue_spot(stations, npc, seat) {
+            Some((x, rise, far)) => in_row(standing(x, Face::Right), rise, far),
+            None => standing(idle_x(stations, npc), Face::Keep),
+        },
         Action::Travel { to } => standing(travel_x(world, npc, to), Face::Keep),
         // Il cliente sta a destra del bancone.
         Action::Buy(_) => standing(anchor_x(world, stations, npc), Face::Left),
         Action::Idle => match baby_x(world, stations, npc) {
             Some((x, mother_x)) => standing(x, Face::Toward(mother_x)),
-            None => standing(idle_x(npc), Face::Keep),
+            None => standing(idle_x(stations, npc), Face::Keep),
         },
     }
 }
@@ -584,6 +649,75 @@ type SyncedSprite = (
     &'static Transform,
 );
 
+/// Postazione (carrozza, id) e posto che un NPC occupa, tra un fotogramma e l'altro.
+type SeatKey = (CarriageId, u16, u16);
+
+/// Profondità dello sprite: ogni NPC ha la sua (niente sfarfallio tra sprite
+/// sovrapposti); la fila lontana sta dietro a quella vicina.
+fn sprite_z(id: NpcId, far: bool) -> f32 {
+    let base = if far { NPC_Z + FAR_Z } else { NPC_Z };
+    base + (id.0 % 1000) as f32 * Z_STEP
+}
+
+/// Posti degli NPC della finestra visibile. A una postazione chi c'era già
+/// tiene il suo posto (ricordato in `seats`) e chi arriva prende il primo
+/// libero, così nessuno scivola quando un vicino se ne va; in coda conta
+/// l'ordine d'arrivo nella propria Mensa (come la sim serve la coda).
+fn assign_slots(
+    world: &World,
+    lo: usize,
+    hi: usize,
+    seats: &mut HashMap<NpcId, SeatKey>,
+) -> HashMap<NpcId, u16> {
+    let mut used: HashMap<(CarriageId, u16), u64> = HashMap::new();
+    let mut kept: Vec<(NpcId, SeatKey)> = Vec::new();
+    let mut newcomers: Vec<(NpcId, (CarriageId, u16))> = Vec::new();
+    let mut queue: Vec<&Npc> = Vec::new();
+    for npc in world.npcs.iter().filter(|n| in_window(n, lo, hi)) {
+        if npc.action == Action::Wait {
+            queue.push(npc);
+            continue;
+        }
+        let Some(station) = npc.action.station() else {
+            continue;
+        };
+        let key = (npc.carriage, station.0);
+        match seats.get(&npc.id) {
+            Some(&(c, s, seat))
+                if (c, s) == key
+                    && seat < 64
+                    && used.get(&key).is_none_or(|m| m & (1u64 << seat) == 0) =>
+            {
+                *used.entry(key).or_default() |= 1u64 << seat;
+                kept.push((npc.id, (c, s, seat)));
+            }
+            _ => newcomers.push((npc.id, key)),
+        }
+    }
+    for (id, key) in newcomers {
+        let mask = used.entry(key).or_default();
+        let seat = (!*mask).trailing_zeros().min(63) as u16;
+        *mask |= 1u64 << seat;
+        kept.push((id, (key.0, key.1, seat)));
+    }
+    seats.clear();
+    let mut slots = HashMap::with_capacity(kept.len() + queue.len());
+    for (id, key) in kept {
+        seats.insert(id, key);
+        slots.insert(id, key.2);
+    }
+    queue.sort_by_key(|n| (n.carriage, n.action_since, n.id));
+    let mut place = (None, 0u16);
+    for n in queue {
+        if place.0 != Some(n.carriage) {
+            place = (Some(n.carriage), 0);
+        }
+        slots.insert(n.id, place.1);
+        place.1 += 1;
+    }
+    slots
+}
+
 /// Crea, aggiorna e rimuove gli sprite degli NPC della finestra visibile.
 #[allow(clippy::too_many_arguments)]
 fn sync_npc_sprites(
@@ -596,7 +730,7 @@ fn sync_npc_sprites(
     mut art: ResMut<CharacterArt>,
     mut images: ResMut<Assets<Image>>,
     mut sprites: Query<SyncedSprite, With<NpcSprite>>,
-    mut seats: Local<HashMap<(CarriageId, u16), u16>>,
+    mut seats: Local<HashMap<NpcId, SeatKey>>,
 ) {
     let world = &sim.world;
     // Frazione di minuto già trascorsa verso il prossimo tick.
@@ -613,21 +747,15 @@ fn sync_npc_sprites(
 
     index.frame = index.frame.wrapping_add(1);
     let frame = index.frame;
-    seats.clear();
+    let slots = assign_slots(world, lo, hi, &mut seats);
 
     for npc in &world.npcs {
         if !in_window(npc, lo, hi) {
             continue;
         }
-        let seat = match npc.action.station() {
-            Some(s) => {
-                let next = seats.entry((npc.carriage, s.0)).or_insert(0);
-                *next += 1;
-                *next - 1
-            }
-            None => 0,
-        };
+        let seat = slots.get(&npc.id).copied().unwrap_or(0);
         let mut pose = npc_pose(world, &stations, npc, seat);
+        let z = sprite_z(npc.id, pose.far);
         if let Action::Travel { to } = npc.action {
             // Posizione continua tra un tick e l'altro (usata se nasce ora).
             let origin = TrainLayout::carriage_center_x(npc.carriage.index());
@@ -665,6 +793,7 @@ fn sync_npc_sprites(
             visual.action = npc.action;
             visual.has_tool = has_tool;
             visual.face = pose.face;
+            visual.z = z;
             if visual.key != key {
                 // Cresciuto, cambiato lavoro, vestiti consumati o comprati.
                 visual.key = key;
@@ -700,6 +829,7 @@ fn sync_npc_sprites(
                 pose.position.x,
                 pose.face,
             ),
+            z,
             clock: phase,
             walked: 0.0,
             phase,
@@ -733,8 +863,6 @@ fn sync_npc_sprites(
             ))
             .id();
         visual.highlight = highlight;
-        // Ogni NPC ha una profondità propria: niente sfarfallio tra sprite sovrapposti.
-        let z = NPC_Z + (npc.id.0 % 1000) as f32 * Z_STEP;
         let sprite = Sprite {
             color: tint,
             flip_x: visual.facing_left && lie < 1.0,
@@ -802,6 +930,9 @@ fn move_npc_sprites(
         if next != current {
             transform.translation.x = next.x;
             transform.translation.y = next.y;
+        }
+        if transform.translation.z != visual.z {
+            transform.translation.z = visual.z;
         }
         let step = if teleport { Vec2::ZERO } else { next - current };
 
@@ -1206,23 +1337,168 @@ mod tests {
         assert!(dark.red < 1.0 && dark.green < 1.0);
     }
 
+    /// Prima Mensa del treno di default, con i posti delle sue postazioni.
+    fn mensa(world: &World) -> CarriageId {
+        world
+            .carriages
+            .iter()
+            .find(|c| c.kind == sim::CarriageKind::Mensa)
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn diners_sit_in_distinct_seats_behind_their_table() {
+        let mut world = World::generate(42, 20, 400);
+        let stations = StationLayout::from_world(&world);
+        let m = mensa(&world);
+        let (table, capacity) = world.carriages[m.index()]
+            .stations
+            .iter()
+            .find(|s| s.kind == StationKind::Table)
+            .map(|s| (s.id, s.capacity))
+            .unwrap();
+        let spot = *stations.spot(m, table).unwrap();
+        let center = carriage_x(m, spot.x);
+        world.npcs[0].carriage = m;
+        world.npcs[0].age = 30;
+        world.npcs[0].action = Action::Eat(table);
+        let npc = &world.npcs[0];
+        let poses: Vec<Pose> = (0..capacity)
+            .map(|seat| npc_pose(&world, &stations, npc, seat))
+            .collect();
+        let floor = FLOOR_Y + body_size(npc).y / 2.0;
+        for (seat, pose) in poses.iter().enumerate() {
+            let x = pose.position.x;
+            // Al tavolo (al più mezzo corpo oltre il bordo), rivolto al centro.
+            assert!((x - center).abs() <= spot.width / 2.0 + body_size(npc).x / 2.0);
+            assert_eq!(pose.face, Face::Toward(center));
+            // Metà nella fila vicina, metà in quella lontana (più in alto, dietro).
+            let far = seat >= usize::from(capacity.div_ceil(2));
+            assert_eq!(pose.far, far, "{seat}");
+            let rise = if far { FAR_ROW_RISE } else { 0.0 };
+            assert!((pose.position.y - floor - rise).abs() < 1e-4);
+            // Nessuno si siede esattamente dove sta un altro.
+            for other in &poses[..seat] {
+                assert!(other.position.distance(pose.position) > 1.0, "{seat}");
+            }
+        }
+        // I posti oltre la capienza non esistono: si ricomincia.
+        assert_eq!(npc_pose(&world, &stations, npc, capacity), poses[0]);
+    }
+
+    #[test]
+    fn the_queue_lines_up_between_tables_and_stoves_facing_the_kitchen() {
+        let mut world = World::generate(42, 20, 400);
+        let stations = StationLayout::from_world(&world);
+        let m = mensa(&world);
+        let (left, right) = stations.queue(m).expect("a Mensa has a queue zone");
+        let tables = stations.carriages[m.index()]
+            .iter()
+            .filter(|s| s.kind == StationKind::Table);
+        assert!(tables.clone().all(|s| s.x + s.width / 2.0 <= left + 1e-3));
+        world.npcs[0].carriage = m;
+        world.npcs[0].age = 30;
+        world.npcs[0].action = Action::Wait;
+        let npc = &world.npcs[0];
+        let half = body_size(npc).x / 2.0;
+        let max = world.params.mensa_queue_max;
+        let poses: Vec<Pose> = (0..max)
+            .map(|k| npc_pose(&world, &stations, npc, k))
+            .collect();
+        for (k, pose) in poses.iter().enumerate() {
+            let x = pose.position.x;
+            assert!(x - half >= carriage_x(m, left) - 1e-3, "{k}: {x}");
+            assert!(x + half <= carriage_x(m, right) + 1e-3, "{k}: {x}");
+            assert_eq!(pose.face, Face::Right);
+            for other in &poses[..k] {
+                assert!(other.position.distance(pose.position) > 1.0, "{k}");
+            }
+        }
+        // Il primo è il più vicino alle cucine, il secondo subito dietro.
+        assert!(poses[0].position.x > poses[1].position.x);
+        assert!(!poses[0].far);
+    }
+
+    #[test]
+    fn idlers_in_a_mensa_stay_off_the_tables() {
+        let mut world = World::generate(42, 20, 400);
+        let stations = StationLayout::from_world(&world);
+        let m = mensa(&world);
+        let (left, right) = stations.lounge(m).expect("a Mensa has a lounge");
+        let partner = world.npcs[1].id;
+        for i in 0..40 {
+            let npc = &mut world.npcs[i];
+            npc.carriage = m;
+            npc.age = 30;
+            npc.action_since = sim::GameTime(i as u64 * 17);
+            npc.action = if i % 2 == 0 {
+                Action::Idle
+            } else {
+                Action::Socialize(partner)
+            };
+        }
+        // Chi chiacchiera con chi mangia non gli sta addosso.
+        world.npcs[1].action = Action::Eat(sim::StationId(0));
+        for npc in world.npcs.iter().take(40).filter(|n| n.id != partner) {
+            let x = npc_pose(&world, &stations, npc, 0).position.x;
+            assert!(
+                (carriage_x(m, left)..=carriage_x(m, right)).contains(&x),
+                "{} fa {:?} a {x}",
+                npc.name,
+                npc.action
+            );
+        }
+    }
+
+    #[test]
+    fn diners_keep_their_seat_when_a_neighbour_leaves() {
+        let mut world = World::generate(42, 20, 400);
+        let m = mensa(&world);
+        let table = sim::StationId(0);
+        for i in 0..3 {
+            world.npcs[i].carriage = m;
+            world.npcs[i].action = Action::Eat(table);
+        }
+        let (lo, hi) = (0, world.carriages.len() - 1);
+        let mut seats = HashMap::new();
+        let first = assign_slots(&world, lo, hi, &mut seats);
+        let ids: Vec<NpcId> = world.npcs[..3].iter().map(|n| n.id).collect();
+        let taken: HashSet<u16> = ids.iter().map(|id| first[id]).collect();
+        assert_eq!(taken.len(), 3);
+        // Il primo se ne va, poi arriva un altro: prende il posto libero.
+        world.npcs[0].action = Action::Idle;
+        let second = assign_slots(&world, lo, hi, &mut seats);
+        assert_eq!(second[&ids[1]], first[&ids[1]]);
+        assert_eq!(second[&ids[2]], first[&ids[2]]);
+        world.npcs[3].carriage = m;
+        world.npcs[3].action = Action::Eat(table);
+        let third = assign_slots(&world, lo, hi, &mut seats);
+        assert_eq!(third[&world.npcs[3].id], first[&ids[0]]);
+    }
+
     #[test]
     fn poses_stay_inside_the_train_over_a_day() {
         let mut sim = crate::sim_bridge::new_sim();
         let stations = StationLayout::from_world(&sim.world);
         let layout = TrainLayout::from_world(&sim.world);
         let (min_x, max_x) = layout.inner_bounds();
+        let mut seats = HashMap::new();
         for _ in 0..24 * 60 / 5 {
             for _ in 0..5 {
                 sim.world.tick(&mut sim.brain);
             }
-            let mut seats: HashMap<(CarriageId, u16), u16> = HashMap::new();
+            let last = sim.world.carriages.len() - 1;
+            let slots = assign_slots(&sim.world, 0, last, &mut seats);
+            // Mai due persone sullo stesso posto di una postazione.
+            let mut taken = HashSet::new();
             for npc in &sim.world.npcs {
-                let seat = npc.action.station().map_or(0, |s| {
-                    let n = seats.entry((npc.carriage, s.0)).or_insert(0);
-                    *n += 1;
-                    *n - 1
-                });
+                if let Some(s) = npc.action.station() {
+                    assert!(taken.insert((npc.carriage, s, slots[&npc.id])), "{npc:?}");
+                }
+            }
+            for npc in &sim.world.npcs {
+                let seat = slots.get(&npc.id).copied().unwrap_or(0);
                 let pose = npc_pose(&sim.world, &stations, npc, seat);
                 assert!(
                     (min_x..=max_x).contains(&pose.position.x),

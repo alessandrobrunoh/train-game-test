@@ -565,7 +565,7 @@ mod tests {
             perform(&mut f.world, &mut inv, &t.kind, 0),
             "Nessun mercante al bancone"
         );
-        assert_eq!(inv.tokens, 50);
+        assert_eq!(inv.tokens, crate::state::PLAYER_START_TOKENS);
 
         // Un mercante al primo bancone.
         let counter = f.world.carriages[market.index()]
@@ -590,9 +590,11 @@ mod tests {
             prompt_text(&t.kind, 1, 50),
             format!("E: compra un attrezzo ({price} gettoni, ne hai 50)   Q: altro")
         );
+        // Un attrezzo costa più dei gettoni iniziali del giocatore.
+        inv.tokens = 100;
         perform(&mut f.world, &mut inv, &t.kind, 1);
         assert_eq!(inv.count(ItemKind::Attrezzo), 1);
-        assert_eq!(inv.tokens, 50 - price);
+        assert_eq!(inv.tokens, 100 - price);
         // Troppo povero per un altro attrezzo.
         inv.tokens = 1;
         let message = perform(&mut f.world, &mut inv, &t.kind, 1);

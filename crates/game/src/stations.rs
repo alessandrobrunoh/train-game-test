@@ -10,6 +10,11 @@
 //! cuccette si impilano a castello (finché c'è spazio sotto il soffitto) e poi
 //! tutte le larghezze si riducono in proporzione, così niente si sovrappone
 //! ed esce dalle pareti.
+//!
+//! In Mensa tra i tavoli e le cucine resta libera la zona della coda
+//! ([`queue_zone`]): chi aspetta un posto (`Action::Wait`) si mette in fila lì,
+//! rivolto alle cucine. A ogni tavolo si siede in due file, entrambe dietro
+//! al tavolo (vedi [`seat_offset`]).
 
 use bevy::prelude::*;
 use sim::{CarriageId, Station, StationId, StationKind, World};
@@ -31,6 +36,10 @@ const EDGE_MARGIN: f32 = 4.0;
 const GROUP_GAP: f32 = 10.0;
 /// Spazio tra due postazioni vicine dello stesso gruppo.
 const SLOT_GAP: f32 = 2.0;
+/// Larghezza della zona della coda in Mensa, tra i tavoli e le cucine.
+pub const QUEUE_ZONE: f32 = 34.0;
+/// La fila lontana (dei commensali, della coda) sta più in alto di tanto.
+pub const FAR_ROW_RISE: f32 = 3.0;
 
 /// Altezza del materasso: chi dorme ci si sdraia sopra.
 pub const BED_TOP: f32 = 5.0;
@@ -96,13 +105,15 @@ fn style(kind: StationKind) -> Style {
             height: BED_TOP,
             stackable: true,
         },
+        // Tre posti per fila (due file dietro al tavolo).
         StationKind::Table => Style {
-            width: 36.0,
+            width: 22.0,
             height: 12.0,
             stackable: false,
         },
+        // I cuochi lavorano spalla a spalla.
         StationKind::Stove => Style {
-            width: 14.0,
+            width: 9.0,
             height: 16.0,
             stackable: false,
         },
@@ -171,7 +182,16 @@ pub fn layout_carriage(stations: &[Station], range: (f32, f32)) -> Vec<StationSp
 
     let (left, right) = range;
     let usable = right - left;
-    let gaps = GROUP_GAP * groups.len().saturating_sub(1) as f32;
+    // Tra i tavoli e le cucine (Mensa) resta la zona della coda.
+    let gap_list: Vec<f32> = groups
+        .windows(2)
+        .map(|w| match (w[0].kind, w[1].kind) {
+            (StationKind::Table, StationKind::Stove) => QUEUE_ZONE,
+            _ => GROUP_GAP,
+        })
+        .collect();
+    let gap_after = |k: usize| gap_list.get(k).copied().unwrap_or(0.0);
+    let gaps: f32 = gap_list.iter().sum();
     let wanted = |groups: &[Group]| groups.iter().map(|g| g.cols as f32 * g.pref).sum::<f32>();
 
     // Impila i letti finché non ci stanno (o si arriva al massimo dei piani),
@@ -207,7 +227,7 @@ pub fn layout_carriage(stations: &[Station], range: (f32, f32)) -> Vec<StationSp
         };
         stations.len()
     ];
-    for g in &groups {
+    for (k, g) in groups.iter().enumerate() {
         let slot = g.pref * scale;
         // Con slot minuscoli (treni affollatissimi) anche lo spazio si riduce.
         let gap = SLOT_GAP.min(slot * 0.25);
@@ -222,9 +242,40 @@ pub fn layout_carriage(stations: &[Station], range: (f32, f32)) -> Vec<StationSp
                 level: level as u8,
             };
         }
-        cursor += g.cols as f32 * slot + GROUP_GAP;
+        cursor += g.cols as f32 * slot + gap_after(k);
     }
     spots
+}
+
+/// Zona della coda di una Mensa (x locali `[sinistra, destra]`): tra
+/// l'ultimo tavolo e la prima cucina. None se la carrozza non ha entrambi.
+pub fn queue_zone(spots: &[StationSpot]) -> Option<(f32, f32)> {
+    let edge = |kind: StationKind| spots.iter().filter(move |s| s.kind == kind);
+    let tables = edge(StationKind::Table).map(|s| s.x + s.width / 2.0);
+    let left = tables.fold(None, |m: Option<f32>, x| Some(m.map_or(x, |m| m.max(x))))?;
+    let stoves = edge(StationKind::Stove).map(|s| s.x - s.width / 2.0);
+    let right = stoves.fold(None, |m: Option<f32>, x| Some(m.map_or(x, |m| m.min(x))))?;
+    (right > left).then_some((left, right))
+}
+
+/// Dove si siede il commensale `seat` (0..`capacity`) di un tavolo largo
+/// `width`: scarto orizzontale dal centro, scarto verticale e se sta nella
+/// fila lontana. Tutti siedono dietro al tavolo (che resta davanti a loro):
+/// la prima metà dei posti nella fila vicina, la seconda in quella lontana,
+/// più in alto di [`FAR_ROW_RISE`], disegnata dietro e sfalsata di mezzo
+/// posto, così le teste non si coprono.
+pub fn seat_offset(capacity: u16, seat: u16, width: f32) -> (f32, f32, bool) {
+    let capacity = capacity.max(1);
+    let seat = seat % capacity;
+    let per_row = capacity.div_ceil(2);
+    let (row, i) = (seat / per_row, seat % per_row);
+    let step = width / f32::from(per_row);
+    let x = -width / 2.0 + step * (f32::from(i) + 0.5);
+    if row == 0 {
+        (x, 0.0, false)
+    } else {
+        (x - step / 2.0, FAR_ROW_RISE, true)
+    }
 }
 
 /// Posti di tutte le postazioni del treno, calcolati una volta all'avvio
@@ -232,20 +283,50 @@ pub fn layout_carriage(stations: &[Station], range: (f32, f32)) -> Vec<StationSp
 #[derive(Resource, Debug, Default)]
 pub struct StationLayout {
     pub carriages: Vec<Vec<StationSpot>>,
+    /// Per carrozza: zona della coda (Mensa, vedi [`queue_zone`]).
+    queues: Vec<Option<(f32, f32)>>,
+    /// Per carrozza con una coda: dove sta chi ozia o chiacchiera, lontano
+    /// dai tavoli (davanti al magazzino, oltre le cucine).
+    lounges: Vec<Option<(f32, f32)>>,
 }
 
 impl StationLayout {
     pub fn from_world(world: &World) -> Self {
-        Self {
-            carriages: world
-                .carriages
-                .iter()
-                .map(|c| {
-                    let range = station_range(has_storage(&world.params, c.kind));
-                    layout_carriage(&c.stations, range)
+        let carriages: Vec<Vec<StationSpot>> = world
+            .carriages
+            .iter()
+            .map(|c| {
+                let range = station_range(has_storage(&world.params, c.kind));
+                layout_carriage(&c.stations, range)
+            })
+            .collect();
+        let queues: Vec<_> = carriages.iter().map(|spots| queue_zone(spots)).collect();
+        let lounges = world
+            .carriages
+            .iter()
+            .zip(&queues)
+            .map(|(c, queue)| {
+                queue.map(|_| {
+                    let (_, right) = interior_range();
+                    (station_range(has_storage(&world.params, c.kind)).1, right)
                 })
-                .collect(),
+            })
+            .collect();
+        Self {
+            carriages,
+            queues,
+            lounges,
         }
+    }
+
+    /// Zona della coda della carrozza (x locali), se è una Mensa.
+    pub fn queue(&self, carriage: CarriageId) -> Option<(f32, f32)> {
+        self.queues.get(carriage.index()).copied().flatten()
+    }
+
+    /// Dove oziare in una Mensa senza stare addosso ai tavoli (x locali).
+    pub fn lounge(&self, carriage: CarriageId) -> Option<(f32, f32)> {
+        self.lounges.get(carriage.index()).copied().flatten()
     }
 
     pub fn spot(&self, carriage: CarriageId, station: StationId) -> Option<&StationSpot> {
@@ -643,6 +724,53 @@ mod tests {
         assert_eq!(columns.len(), spots.len().div_ceil(usize::from(levels) + 1));
         assert!(columns.windows(2).all(|w| w[0].x < w[1].x));
         assert!(columns.iter().all(|c| c.kind == StationKind::Bed));
+    }
+
+    #[test]
+    fn mense_keep_a_queue_zone_between_tables_and_stoves() {
+        let world = World::generate(42, 20, 400);
+        let layout = StationLayout::from_world(&world);
+        for c in &world.carriages {
+            let queue = layout.queue(c.id);
+            if c.kind != sim::CarriageKind::Mensa {
+                assert_eq!(queue, None);
+                assert_eq!(layout.lounge(c.id), None);
+                continue;
+            }
+            let (left, right) = queue.unwrap();
+            // La zona più i mezzi spazi tra le postazioni ai due lati.
+            let width = right - left;
+            assert!(
+                (QUEUE_ZONE..=QUEUE_ZONE + SLOT_GAP).contains(&width),
+                "{left}..{right}"
+            );
+            // Chi ozia sta oltre le cucine, lontano dai tavoli.
+            let (lounge, _) = layout.lounge(c.id).unwrap();
+            let spots = &layout.carriages[c.id.index()];
+            assert!(spots.iter().all(|s| s.right() <= lounge + 1e-3));
+            // Tavoli abbastanza larghi per tre commensali per fila.
+            let tables = spots.iter().filter(|s| s.kind == StationKind::Table);
+            assert!(tables.clone().all(|s| s.width >= 15.0), "{spots:?}");
+        }
+    }
+
+    #[test]
+    fn seats_fill_two_rows_behind_the_table() {
+        let width = 18.0;
+        let seats: Vec<_> = (0..6).map(|k| seat_offset(6, k, width)).collect();
+        for (k, &(x, rise, far)) in seats.iter().enumerate() {
+            assert_eq!(far, k >= 3);
+            assert_eq!(rise, if far { FAR_ROW_RISE } else { 0.0 });
+            assert!(x.abs() <= width / 2.0, "{k}: {x}");
+        }
+        // Le file sono sfalsate: nessuna testa esattamente sopra un'altra.
+        for (k, a) in seats.iter().enumerate() {
+            for b in &seats[..k] {
+                assert!((a.0 - b.0).abs() > 1.0, "{a:?} {b:?}");
+            }
+        }
+        assert_eq!(seat_offset(1, 0, width), (0.0, 0.0, false));
+        assert_eq!(seat_offset(6, 6, width), seats[0]);
     }
 
     #[test]

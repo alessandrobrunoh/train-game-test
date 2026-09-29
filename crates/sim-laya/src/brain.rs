@@ -278,6 +278,8 @@ pub enum ModelStatus {
 pub enum OptionSig {
     Idle,
     Eat,
+    /// In coda per un posto in mensa.
+    Wait,
     Sleep,
     Work,
     Buy(ItemKind),
@@ -306,6 +308,7 @@ impl OptionSig {
         match option.action {
             Action::Idle => OptionSig::Idle,
             Action::Eat(_) => OptionSig::Eat,
+            Action::Wait => OptionSig::Wait,
             Action::Sleep(_) => OptionSig::Sleep,
             Action::Work(_) => OptionSig::Work,
             Action::Buy(item) => OptionSig::Buy(item),

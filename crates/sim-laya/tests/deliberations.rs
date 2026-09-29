@@ -12,10 +12,16 @@ use sim_laya::{
     ReplayBrain,
 };
 
-/// Un mondo piccolo dove le deliberazioni sono frequenti.
+/// Un mondo piccolo dove le deliberazioni sono frequenti: quasi tutti i
+/// gettoni sono nella tesoreria, così molti sono tentati di rubare.
 fn busy_world(seed: u64) -> World {
     let mut w = World::generate(seed, 10, 160);
     w.params.deliberation_rate = 6.0;
+    for npc in &mut w.npcs {
+        let taken = npc.inventory.tokens.saturating_sub(3);
+        npc.inventory.tokens -= taken;
+        w.economy.treasury += u64::from(taken);
+    }
     w
 }
 

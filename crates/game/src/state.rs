@@ -11,7 +11,7 @@ use sim::{ItemKind, NpcId, Stock, UtilityBrain, World};
 use sim_laya::{LayaBrain, LayaConfig};
 
 /// Gettoni con cui il giocatore comincia la partita.
-pub const PLAYER_START_TOKENS: u32 = 50;
+pub const PLAYER_START_TOKENS: u32 = 100;
 
 pub struct StatePlugin;
 
