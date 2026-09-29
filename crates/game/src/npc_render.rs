@@ -49,7 +49,7 @@ use crate::life_fx::FadingOut;
 use crate::saves::WorldRebuildSet;
 use crate::state::{NpcSprite, PointerOverUi, SelectedNpc, Sim, SimClock, WorldReplaced};
 use crate::stations::{BED_TOP, FAR_ROW_RISE, StationLayout, interior_range, seat_offset};
-use crate::train::{CARRIAGE_PITCH, FLOOR_Y, TrainLayout};
+use crate::train::{CARRIAGE_PITCH, FLOOR_Y, STOREY, TrainLayout, floor_y};
 
 /// Larghezza di un NPC adulto: margine dei punti di pausa dalle pareti.
 const ADULT_WIDTH: f32 = 8.0;
@@ -203,11 +203,18 @@ pub(crate) struct NpcVisual {
 struct TravelPath {
     /// Inizio dell'azione di viaggio (minuti di gioco): identifica il viaggio.
     since: u64,
-    /// Dove si trovava lo sprite alla partenza.
+    /// Dove si trovava lo sprite alla partenza...
     from_x: f32,
+    /// ...e a che piano: da un piano alto prima si scende la scala.
+    from_floor: u8,
 }
 
 impl NpcVisual {
+    /// Metà altezza del corpo in piedi (la quota a cui cammina).
+    fn standing_half_height(&self) -> f32 {
+        self.stage().size().y / 2.0
+    }
+
     /// Metà altezza dell'ingombro attuale (per mettere qualcosa sopra la testa).
     pub(crate) fn half_height(&self) -> f32 {
         self.half_extents.y
@@ -462,12 +469,88 @@ fn travel_path_x(from_x: f32, to: CarriageId, progress: f32) -> f32 {
     from_x + (dest - from_x) * progress
 }
 
+/// Centro (x) della scala della carrozza `index`.
+fn stairs_center_x(index: usize) -> f32 {
+    let (x0, x1) = TrainLayout::stairs_x(index);
+    (x0 + x1) / 2.0
+}
+
+/// Dove sta (centro del corpo) chi viaggia verso `to` con avanzamento
+/// `progress`. Chi parte da un piano alto usa i primi
+/// `SimParams::stairs_minutes` del viaggio per andare alla scala (metà) e
+/// scenderla (l'altra metà); poi cammina al piano terra, come chi parte da lì.
+fn travel_target(
+    world: &World,
+    npc: &Npc,
+    path: TravelPath,
+    to: CarriageId,
+    progress: f32,
+) -> Vec2 {
+    let half = body_size(npc).y / 2.0;
+    let ground = FLOOR_Y + half;
+    let total = npc.action_until.since(npc.action_since).max(1) as f32;
+    let stairs = (world.params.stairs_minutes as f32 / total).clamp(0.0, 0.5);
+    if path.from_floor == 0 || stairs <= 0.0 {
+        return Vec2::new(travel_path_x(path.from_x, to, progress), ground);
+    }
+    let ladder = stairs_center_x(npc.carriage.index());
+    let upper = floor_y(usize::from(path.from_floor)) + half;
+    let half_stairs = stairs / 2.0;
+    if progress < half_stairs {
+        let t = progress / half_stairs;
+        Vec2::new(path.from_x + (ladder - path.from_x) * t, upper)
+    } else if progress < stairs {
+        let t = (progress - half_stairs) / half_stairs;
+        Vec2::new(ladder, upper + (ground - upper) * t)
+    } else {
+        let t = (progress - stairs) / (1.0 - stairs);
+        Vec2::new(travel_path_x(ladder, to, t), ground)
+    }
+}
+
+/// Piano (0 = terra) a cui sta un corpo con il centro a quota `y`.
+fn floor_of(y: f32) -> usize {
+    ((y - FLOOR_Y) / STOREY).floor().max(0.0) as usize
+}
+
+/// Prossima tappa di uno sprite in `current` diretto a `target` dentro una
+/// carrozza con `floors` piani: se il bersaglio è a un altro piano si va alla
+/// scala, la si sale o scende, e solo dopo si raggiunge il posto. `half` è la
+/// metà altezza del corpo in piedi.
+fn waypoint(current: Vec2, target: Vec2, half: f32, floors: usize) -> Vec2 {
+    if floors <= 1 {
+        return target;
+    }
+    let (from, to) = (floor_of(current.y), floor_of(target.y));
+    let ladder = stairs_center_x((current.x / CARRIAGE_PITCH).floor().max(0.0) as usize);
+    let level = |f: usize| floor_y(f) + half;
+    let on_ladder = (current.x - ladder).abs() <= 0.5;
+    let between_floors = (0..floors).all(|f| (current.y - level(f)).abs() > 1.0);
+    if on_ladder && between_floors {
+        // A metà scala: si finisce di salire o scendere.
+        return Vec2::new(ladder, level(to));
+    }
+    if from == to {
+        target
+    } else if on_ladder {
+        Vec2::new(ladder, level(to))
+    } else {
+        Vec2::new(ladder, level(from))
+    }
+}
+
 /// Posa dell'NPC. `seat` è il suo posto tra chi usa la stessa postazione,
 /// o in coda (0 = il primo).
 fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Pose {
     let size = body_size(npc);
+    let floor = if matches!(npc.action, Action::Travel { .. }) {
+        // I passaggi tra carrozze sono al piano terra (vedi `travel_target`).
+        FLOOR_Y
+    } else {
+        floor_y(usize::from(npc.floor))
+    };
     let standing = |x: f32, face: Face| Pose {
-        position: Vec2::new(x, FLOOR_Y + size.y / 2.0),
+        position: Vec2::new(x, floor + size.y / 2.0),
         lying: false,
         face,
         far: false,
@@ -758,8 +841,13 @@ fn sync_npc_sprites(
         let z = sprite_z(npc.id, pose.far);
         if let Action::Travel { to } = npc.action {
             // Posizione continua tra un tick e l'altro (usata se nasce ora).
-            let origin = TrainLayout::carriage_center_x(npc.carriage.index());
-            pose.position.x = travel_path_x(origin, to, smooth_progress(world, npc, fraction));
+            let path = TravelPath {
+                since: npc.action_since.minutes(),
+                from_x: TrainLayout::carriage_center_x(npc.carriage.index()),
+                from_floor: npc.floor,
+            };
+            let progress = smooth_progress(world, npc, fraction);
+            pose.position = travel_target(world, npc, path, to, progress);
         }
         let key = appearance(npc);
         let tint = npc_tint(npc);
@@ -781,10 +869,11 @@ fn sync_npc_sprites(
                     _ => TravelPath {
                         since,
                         from_x: transform.translation.x,
+                        from_floor: npc.floor,
                     },
                 };
                 visual.travel = Some(path);
-                target.x = travel_path_x(path.from_x, to, smooth_progress(world, npc, fraction));
+                target = travel_target(world, npc, path, to, smooth_progress(world, npc, fraction));
             } else if visual.travel.is_some() {
                 visual.travel = None;
             }
@@ -840,6 +929,7 @@ fn sync_npc_sprites(
             travel: matches!(npc.action, Action::Travel { .. }).then(|| TravelPath {
                 since: npc.action_since.minutes(),
                 from_x: TrainLayout::carriage_center_x(npc.carriage.index()),
+                from_floor: npc.floor,
             }),
         };
         visual.half_extents = visual.current_half_extents();
@@ -905,6 +995,7 @@ fn move_npc_sprites(
     time: Res<Time<Real>>,
     clock: Res<SimClock>,
     art: Res<CharacterArt>,
+    layout: Res<TrainLayout>,
     mut sprites: Query<(&mut Transform, &mut Sprite, &mut NpcVisual), With<NpcSprite>>,
 ) {
     let dt = time.delta_secs();
@@ -920,12 +1011,25 @@ fn move_npc_sprites(
             visual.target
         } else if traveling {
             // Il tragitto è già continuo: lo si segue esattamente in x
-            // (a velocità alte è una corsa); in y si scende dal letto camminando.
-            let dy = delta.y.clamp(-WALK_SPEED * dt, WALK_SPEED * dt);
-            Vec2::new(visual.target.x, current.y + dy)
+            // (a velocità alte è una corsa); in y si scende dal letto
+            // camminando, o si segue la scala se si parte da un piano alto.
+            if visual.travel.is_some_and(|path| path.from_floor > 0) {
+                visual.target
+            } else {
+                let dy = delta.y.clamp(-WALK_SPEED * dt, WALK_SPEED * dt);
+                Vec2::new(visual.target.x, current.y + dy)
+            }
         } else {
+            // Per cambiare piano si passa dalla scala.
+            let floors = layout.floors((current.x / CARRIAGE_PITCH).floor().max(0.0) as usize);
+            let stop = waypoint(
+                current,
+                visual.target,
+                visual.standing_half_height(),
+                floors,
+            );
             let step = (WALK_SPEED + distance * CATCH_UP) * dt;
-            current + delta.clamp_length_max(step)
+            current + (stop - current).clamp_length_max(step)
         };
         if next != current {
             transform.translation.x = next.x;
@@ -1107,6 +1211,80 @@ fn evict_unused_sheets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changing_floor_goes_through_the_stairs() {
+        let half = 12.0;
+        let ladder = stairs_center_x(1);
+        let left = TrainLayout::carriage_left(1);
+        let ground = FLOOR_Y + half;
+        let upper = floor_y(1) + half;
+        let bed = Vec2::new(left + 200.0, upper + 8.0);
+        // Al piano terra, lontano dalla scala: prima la scala, allo stesso piano.
+        let start = Vec2::new(left + 150.0, ground);
+        assert_eq!(waypoint(start, bed, half, 2), Vec2::new(ladder, ground));
+        // Ai piedi della scala: su fino al piano del letto.
+        let foot = Vec2::new(ladder, ground);
+        assert_eq!(waypoint(foot, bed, half, 2), Vec2::new(ladder, upper));
+        // A metà scala si continua a salire anche se "sembra" già sopra.
+        let mid = Vec2::new(ladder, floor_y(1) + 2.0);
+        assert_eq!(waypoint(mid, bed, half, 2), Vec2::new(ladder, upper));
+        // In cima: dritti al letto.
+        assert_eq!(waypoint(Vec2::new(ladder, upper), bed, half, 2), bed);
+        // Stesso piano, o carrozza a un piano solo: nessuna deviazione.
+        assert_eq!(
+            waypoint(start, Vec2::new(left + 20.0, ground), half, 2).x,
+            left + 20.0
+        );
+        assert_eq!(waypoint(start, bed, half, 1), bed);
+    }
+
+    #[test]
+    fn travel_from_upstairs_comes_down_the_ladder_first() {
+        let mut world = World::generate(3, 8, 40);
+        let dorm = world
+            .carriages
+            .iter()
+            .find(|c| c.floors() > 1)
+            .map(|c| c.id)
+            .unwrap();
+        let to = CarriageId(dorm.0 + 3);
+        let npc = &mut world.npcs[0];
+        npc.carriage = dorm;
+        npc.floor = 1;
+        npc.action = Action::Travel { to };
+        npc.action_since = world.clock;
+        npc.action_until = world.clock
+            + 3 * world.params.travel_minutes_per_carriage
+            + world.params.stairs_minutes;
+        let npc = world.npcs[0].clone();
+        let from_x = TrainLayout::carriage_left(dorm.index()) + 200.0;
+        let path = TravelPath {
+            since: npc.action_since.minutes(),
+            from_x,
+            from_floor: 1,
+        };
+        let at = |p: f32| travel_target(&world, &npc, path, to, p);
+        let half = body_size(&npc).y / 2.0;
+        let ladder = stairs_center_x(dorm.index());
+        assert_eq!(at(0.0), Vec2::new(from_x, floor_y(1) + half));
+        let total = npc.action_until.since(npc.action_since) as f32;
+        let stairs = world.params.stairs_minutes as f32 / total;
+        let top = at(stairs / 2.0);
+        assert!((top.x - ladder).abs() < 1e-3 && (top.y - (floor_y(1) + half)).abs() < 1e-3);
+        let bottom = at(stairs);
+        assert!((bottom.x - ladder).abs() < 1e-3 && (bottom.y - (FLOOR_Y + half)).abs() < 1e-3);
+        let end = at(1.0);
+        assert_eq!(
+            end,
+            Vec2::new(TrainLayout::carriage_center_x(to.index()), FLOOR_Y + half)
+        );
+        // Mai sotto il piano terra né oltre il piano di partenza.
+        for k in 0..=100 {
+            let p = at(k as f32 / 100.0);
+            assert!(p.y >= FLOOR_Y + half - 1e-3 && p.y <= floor_y(1) + half + 1e-3);
+        }
+    }
 
     #[test]
     fn travel_path_is_continuous_and_crosses_every_carriage() {

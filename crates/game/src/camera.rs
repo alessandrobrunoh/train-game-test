@@ -23,7 +23,7 @@ use crate::player::Player;
 use crate::sim_bridge::SimTickSet;
 use crate::state::{FollowNpc, NpcSprite, SelectedNpc, Sim};
 use crate::stations::StationLayout;
-use crate::train::{FLOOR_Y, TrainLayout, WALL};
+use crate::train::{FLOOR_Y, STOREY, TrainLayout, WALL};
 
 /// Altezza visibile in unità mondo: con una finestra alta 720 px ogni unità
 /// diventa esattamente 3 pixel, adatto alla pixel art.
@@ -231,7 +231,9 @@ pub(crate) fn follow_target(
             match position {
                 Some(p) => {
                     *last_npc = Some((id, p));
-                    Vec2::new(p.x, FLOOR_Y + NPC_EYE_HEIGHT + LOOK_UP)
+                    // All'altezza del suo piano, qualunque cosa faccia.
+                    let floor = ((p.y - FLOOR_Y) / STOREY).floor().max(0.0);
+                    Vec2::new(p.x, FLOOR_Y + floor * STOREY + NPC_EYE_HEIGHT + LOOK_UP)
                 }
                 None => Vec2::new(player.translation.x, player.translation.y + LOOK_UP),
             }

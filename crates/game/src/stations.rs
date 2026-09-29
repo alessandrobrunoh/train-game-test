@@ -26,6 +26,7 @@ use crate::state::{Sim, WorldReplaced};
 use crate::storage::{has_storage, storage_range};
 use crate::train::{
     CARRIAGE_LENGTH, FLOOR_Y, INTERIOR_HEIGHT, STAIRS_LEFT, STAIRS_WIDTH, TrainLayout, WALL,
+    floor_y,
 };
 
 /// Distanza verticale tra i piani di un letto a castello.
@@ -62,12 +63,14 @@ pub struct StationSpot {
     pub width: f32,
     /// Piano del letto a castello (0 = a terra).
     pub level: u8,
+    /// Piano della carrozza (0 = piano terra).
+    pub floor: u8,
 }
 
 impl StationSpot {
     /// Quota della base della postazione.
     pub fn base_y(&self) -> f32 {
-        FLOOR_Y + f32::from(self.level) * LEVEL_HEIGHT
+        floor_y(usize::from(self.floor)) + f32::from(self.level) * LEVEL_HEIGHT
     }
 
     #[cfg(test)]
@@ -153,6 +156,26 @@ pub fn station_range(with_storage: bool) -> (f32, f32) {
     }
 }
 
+/// Come [`layout_carriage`], ma ogni piano della carrozza è disposto per
+/// conto suo con le postazioni che ci stanno.
+pub fn layout_floors(stations: &[Station], range: (f32, f32)) -> Vec<StationSpot> {
+    let top = stations.iter().map(|s| s.floor).max().unwrap_or(0);
+    if top == 0 {
+        return layout_carriage(stations, range);
+    }
+    let mut spots = layout_carriage(stations, range);
+    for floor in 0..=top {
+        let ids: Vec<usize> = (0..stations.len())
+            .filter(|&i| stations[i].floor == floor)
+            .collect();
+        let here: Vec<Station> = ids.iter().map(|&i| stations[i].clone()).collect();
+        for (spot, &i) in layout_carriage(&here, range).into_iter().zip(&ids) {
+            spots[i] = StationSpot { floor, ..spot };
+        }
+    }
+    spots
+}
+
 /// Posti delle postazioni di una carrozza dentro `range` (vedi
 /// [`station_range`]); l'indice è lo `StationId`.
 pub fn layout_carriage(stations: &[Station], range: (f32, f32)) -> Vec<StationSpot> {
@@ -226,6 +249,7 @@ pub fn layout_carriage(stations: &[Station], range: (f32, f32)) -> Vec<StationSp
             x: 0.0,
             width: 0.0,
             level: 0,
+            floor: 0,
         };
         stations.len()
     ];
@@ -242,6 +266,7 @@ pub fn layout_carriage(stations: &[Station], range: (f32, f32)) -> Vec<StationSp
                 x: cursor + (col as f32 + 0.5) * slot,
                 width: slot - gap,
                 level: level as u8,
+                floor: 0,
             };
         }
         cursor += g.cols as f32 * slot + gap_after(k);
@@ -303,7 +328,7 @@ impl StationLayout {
                     // La scala per il piano di sopra occupa l'inizio della carrozza.
                     range.0 = range.0.max(STAIRS_LEFT + STAIRS_WIDTH + GROUP_GAP);
                 }
-                layout_carriage(&c.stations, range)
+                layout_floors(&c.stations, range)
             })
             .collect();
         let queues: Vec<_> = carriages.iter().map(|spots| queue_zone(spots)).collect();
@@ -611,13 +636,16 @@ fn spawn_station_entities(
 fn bunk_columns(spots: &[StationSpot]) -> Vec<StationSpot> {
     let mut tops: Vec<StationSpot> = Vec::new();
     for spot in spots.iter().filter(|s| s.kind == StationKind::Bed) {
-        match tops.iter_mut().find(|t| (t.x - spot.x).abs() < 0.5) {
+        match tops
+            .iter_mut()
+            .find(|t| t.floor == spot.floor && (t.x - spot.x).abs() < 0.5)
+        {
             Some(top) if spot.level > top.level => *top = *spot,
             Some(_) => {}
             None => tops.push(*spot),
         }
     }
-    tops.sort_by(|a, b| a.x.total_cmp(&b.x));
+    tops.sort_by(|a, b| a.floor.cmp(&b.floor).then(a.x.total_cmp(&b.x)));
     tops
 }
 
@@ -675,6 +703,22 @@ fn animate_stations(
 mod tests {
     use super::*;
 
+    #[test]
+    fn upper_floor_stations_are_laid_out_upstairs() {
+        let world = World::generate(42, 20, 400);
+        let layout = StationLayout::from_world(&world);
+        let mut upstairs = 0;
+        for (c, spots) in world.carriages.iter().zip(&layout.carriages) {
+            for (station, spot) in c.stations.iter().zip(spots) {
+                assert_eq!(spot.floor, station.floor, "{}", c.label());
+                let base = floor_y(usize::from(station.floor));
+                assert!(spot.base_y() >= base && spot.base_y() < base + INTERIOR_HEIGHT);
+                upstairs += usize::from(station.floor > 0);
+            }
+        }
+        assert!(upstairs > 0);
+    }
+
     fn check(world: &World) {
         let layout = StationLayout::from_world(world);
         for (c, spots) in world.carriages.iter().zip(&layout.carriages) {
@@ -694,12 +738,13 @@ mod tests {
                 if spot.kind == StationKind::Bed {
                     top += BUNK_HEADROOM;
                 }
-                assert!(top <= FLOOR_Y + INTERIOR_HEIGHT, "{spot:?}");
+                let floor = floor_y(usize::from(spot.floor));
+                assert!(top <= floor + INTERIOR_HEIGHT, "{spot:?}");
             }
             // Nessuna sovrapposizione tra postazioni dello stesso piano.
             for (i, a) in spots.iter().enumerate() {
                 for b in &spots[i + 1..] {
-                    if a.level == b.level {
+                    if a.level == b.level && a.floor == b.floor {
                         let apart = a.right() <= b.left() + 1e-3 || b.right() <= a.left() + 1e-3;
                         assert!(apart, "{a:?} si sovrappone a {b:?}");
                     }
@@ -726,9 +771,21 @@ mod tests {
         let layout = StationLayout::from_world(&world);
         let spots = &layout.carriages[0];
         let columns = bunk_columns(spots);
-        let levels = spots.iter().map(|s| s.level).max().unwrap();
-        assert_eq!(columns.len(), spots.len().div_ceil(usize::from(levels) + 1));
-        assert!(columns.windows(2).all(|w| w[0].x < w[1].x));
+        // Piano per piano: colonne piene dal basso, numerate da sinistra.
+        let mut expected = 0;
+        for floor in 0..=spots.iter().map(|s| s.floor).max().unwrap() {
+            let here: Vec<_> = spots.iter().filter(|s| s.floor == floor).collect();
+            let levels = here.iter().map(|s| s.level).max().unwrap();
+            expected += here.len().div_ceil(usize::from(levels) + 1);
+            let xs: Vec<f32> = columns
+                .iter()
+                .filter(|c| c.floor == floor)
+                .map(|c| c.x)
+                .collect();
+            assert!(xs.windows(2).all(|w| w[0] < w[1]));
+        }
+        assert_eq!(columns.len(), expected);
+        assert!(columns.windows(2).all(|w| w[0].floor <= w[1].floor));
         assert!(columns.iter().all(|c| c.kind == StationKind::Bed));
     }
 

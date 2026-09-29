@@ -360,7 +360,13 @@ fn npc_details(
     };
     field(ui, "Lavoro", &job);
     field(ui, "Casa", &world.carriage_label(npc.home));
-    field(ui, "Si trova in", &world.carriage_label(npc.carriage));
+    let place = world.carriage_label(npc.carriage);
+    let place = if npc.floor > 0 {
+        format!("{place}, piano di sopra")
+    } else {
+        place.to_string()
+    };
+    field(ui, "Si trova in", &place);
 
     ui.separator();
     field(ui, "Azione", &action_text(world, npc));
