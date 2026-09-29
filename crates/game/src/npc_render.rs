@@ -9,11 +9,14 @@
 //! - socializza: accanto al compagno;
 //! - compra: al bancone del Mercato, davanti a un mercante al lavoro;
 //! - ozia: in un punto deterministico della carrozza, diverso a ogni pausa;
-//! - viaggia: interpolato tra il centro della carrozza di partenza e quello
-//!   di arrivo in base all'avanzamento dell'azione.
+//! - viaggia: da dove si trovava lo sprite quando è partito al centro della
+//!   carrozza di arrivo, attraversando porte e soffietti, in base
+//!   all'avanzamento dell'azione misurato anche tra un tick e l'altro.
 //!
-//! Gli sprite camminano verso la posizione obiettivo e si teletrasportano se
-//! è troppo lontana (es. a velocità di gioco alte).
+//! Chi viaggia segue esattamente il suo tragitto (a velocità di gioco alte
+//! corre, ma non salta mai carrozze). Gli altri sprite camminano verso la
+//! posizione obiettivo e si teletrasportano solo per salti molto lunghi
+//! (es. dopo un caricamento).
 //!
 //! Aspetto: ogni NPC è uno sprite in pixel art generato da `characters.rs`
 //! (fascia d'età, sesso, look, divisa del lavoro, stracci se non ha vestiti)
@@ -62,8 +65,9 @@ const MARKER_Z: f32 = 6.0;
 const WALK_SPEED: f32 = 40.0;
 /// ...che aumenta con la distanza, per non restare indietro a lungo (1/s).
 const CATCH_UP: f32 = 3.0;
-/// Oltre questa distanza lo sprite si teletrasporta.
-const TELEPORT_DISTANCE: f32 = 120.0;
+/// Oltre questa distanza lo sprite si teletrasporta invece di camminare.
+/// Dentro una carrozza non succede mai; chi viaggia non si teletrasporta.
+const TELEPORT_DISTANCE: f32 = CARRIAGE_PITCH * 1.5;
 /// Distanza tra due NPC che chiacchierano.
 const CHAT_DISTANCE: f32 = 10.0;
 /// Tolleranza del click attorno al rettangolo di un NPC.
@@ -177,6 +181,17 @@ pub(crate) struct NpcVisual {
     phase: f32,
     frame: Frame,
     anim: crate::characters::Anim,
+    /// Viaggio in corso: da dove è partito lo sprite.
+    travel: Option<TravelPath>,
+}
+
+/// Tragitto di un NPC che viaggia tra carrozze.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TravelPath {
+    /// Inizio dell'azione di viaggio (minuti di gioco): identifica il viaggio.
+    since: u64,
+    /// Dove si trovava lo sprite alla partenza.
+    from_x: f32,
 }
 
 impl NpcVisual {
@@ -381,6 +396,29 @@ fn travel_x(world: &World, npc: &Npc, to: CarriageId) -> f32 {
     from + (dest - from) * npc.action_progress(world.clock)
 }
 
+/// Avanzamento (0..=1) dell'azione corrente contando anche la frazione di
+/// minuto già trascorsa verso il prossimo tick (`fraction`, 0..1): tra un tick
+/// e l'altro chi viaggia continua a muoversi invece di avanzare a scatti.
+///
+/// Il tick del minuto `t` fa partire le azioni con `action_since = t` e poi
+/// porta l'orologio a `t + 1`; l'azione finisce nel tick del minuto
+/// `action_until`. Tra quei due tick l'avanzamento va quindi da 0 a 1 contando
+/// un minuto in meno rispetto a `Npc::action_progress`.
+fn smooth_progress(world: &World, npc: &Npc, fraction: f32) -> f32 {
+    let total = npc.action_until.since(npc.action_since);
+    if total == 0 {
+        return 1.0;
+    }
+    let elapsed = world.clock.since(npc.action_since) as f32 - 1.0 + fraction.clamp(0.0, 1.0);
+    (elapsed / total as f32).clamp(0.0, 1.0)
+}
+
+/// Posizione lungo il tragitto da `from_x` al centro della carrozza `to`.
+fn travel_path_x(from_x: f32, to: CarriageId, progress: f32) -> f32 {
+    let dest = TrainLayout::carriage_center_x(to.index());
+    from_x + (dest - from_x) * progress
+}
+
 /// Posa dell'NPC. `seat` è il suo indice tra chi usa la stessa postazione.
 fn npc_pose(world: &World, stations: &StationLayout, npc: &Npc, seat: u16) -> Pose {
     let size = body_size(npc);
@@ -538,20 +576,31 @@ fn reset_npc_sprites(
     index.entities.clear();
 }
 
+/// Componenti di uno sprite NPC aggiornati da `sync_npc_sprites`.
+type SyncedSprite = (
+    &'static mut Sprite,
+    &'static mut Anchor,
+    &'static mut NpcVisual,
+    &'static Transform,
+);
+
 /// Crea, aggiorna e rimuove gli sprite degli NPC della finestra visibile.
 #[allow(clippy::too_many_arguments)]
 fn sync_npc_sprites(
     mut commands: Commands,
     sim: Res<Sim>,
+    clock: Res<SimClock>,
     stations: Res<StationLayout>,
     camera: Single<(&Transform, &Projection), With<Camera2d>>,
     mut index: ResMut<NpcSpriteIndex>,
     mut art: ResMut<CharacterArt>,
     mut images: ResMut<Assets<Image>>,
-    mut sprites: Query<(&mut Sprite, &mut Anchor, &mut NpcVisual), With<NpcSprite>>,
+    mut sprites: Query<SyncedSprite, With<NpcSprite>>,
     mut seats: Local<HashMap<(CarriageId, u16), u16>>,
 ) {
     let world = &sim.world;
+    // Frazione di minuto già trascorsa verso il prossimo tick.
+    let fraction = clock.accumulator;
     let (camera_transform, projection) = *camera;
     let Projection::Orthographic(ortho) = projection else {
         return;
@@ -578,18 +627,40 @@ fn sync_npc_sprites(
             }
             None => 0,
         };
-        let pose = npc_pose(world, &stations, npc, seat);
+        let mut pose = npc_pose(world, &stations, npc, seat);
+        if let Action::Travel { to } = npc.action {
+            // Posizione continua tra un tick e l'altro (usata se nasce ora).
+            let origin = TrainLayout::carriage_center_x(npc.carriage.index());
+            pose.position.x = travel_path_x(origin, to, smooth_progress(world, npc, fraction));
+        }
         let key = appearance(npc);
         let tint = npc_tint(npc);
         let has_tool = npc.inventory.tool.is_some();
 
         let existing = index.entities.get(&npc.id).map(|&(e, _)| e);
         if let Some(entity) = existing
-            && let Ok((mut sprite, mut anchor, mut visual)) = sprites.get_mut(entity)
+            && let Ok((mut sprite, mut anchor, mut visual, transform)) = sprites.get_mut(entity)
         {
             // Posizione, animazione e rotazione le aggiorna `move_npc_sprites`,
             // in base a dove si trova davvero lo sprite.
-            visual.target = pose.position;
+            let mut target = pose.position;
+            if let Action::Travel { to } = npc.action {
+                // Il viaggio parte da dove era lo sprite, non dal centro della
+                // carrozza, e avanza in modo continuo tra un tick e l'altro.
+                let since = npc.action_since.minutes();
+                let path = match visual.travel {
+                    Some(path) if path.since == since => path,
+                    _ => TravelPath {
+                        since,
+                        from_x: transform.translation.x,
+                    },
+                };
+                visual.travel = Some(path);
+                target.x = travel_path_x(path.from_x, to, smooth_progress(world, npc, fraction));
+            } else if visual.travel.is_some() {
+                visual.travel = None;
+            }
+            visual.target = target;
             visual.wants_lying = pose.lying;
             visual.action = npc.action;
             visual.has_tool = has_tool;
@@ -634,6 +705,12 @@ fn sync_npc_sprites(
             phase,
             frame: first,
             anim,
+            // Entra in vista già in viaggio: il tragitto è quello di `travel_x`,
+            // dal centro della carrozza di partenza.
+            travel: matches!(npc.action, Action::Travel { .. }).then(|| TravelPath {
+                since: npc.action_since.minutes(),
+                from_x: TrainLayout::carriage_center_x(npc.carriage.index()),
+            }),
         };
         visual.half_extents = visual.current_half_extents();
 
@@ -709,9 +786,15 @@ fn move_npc_sprites(
         let current = transform.translation.truncate();
         let delta = visual.target - current;
         let distance = delta.length();
-        let teleport = distance > TELEPORT_DISTANCE;
+        let traveling = visual.travel.is_some();
+        let teleport = !traveling && distance > TELEPORT_DISTANCE;
         let next = if teleport {
             visual.target
+        } else if traveling {
+            // Il tragitto è già continuo: lo si segue esattamente in x
+            // (a velocità alte è una corsa); in y si scende dal letto camminando.
+            let dy = delta.y.clamp(-WALK_SPEED * dt, WALK_SPEED * dt);
+            Vec2::new(visual.target.x, current.y + dy)
         } else {
             let step = (WALK_SPEED + distance * CATCH_UP) * dt;
             current + delta.clamp_length_max(step)
@@ -893,6 +976,65 @@ fn evict_unused_sheets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn travel_path_is_continuous_and_crosses_every_carriage() {
+        // Un viaggio lungo tre carrozze, seguito fotogramma per fotogramma
+        // a 60 fps e velocità ×1 (1 minuto di gioco al secondo).
+        let mut world = World::generate(3, 8, 40);
+        let mut brain = sim::UtilityBrain::new(3);
+        let npc = loop {
+            world.tick(&mut brain);
+            if let Some(n) = world.npcs.iter().find(|n| match n.action {
+                Action::Travel { to } => to.distance(n.carriage) >= 3,
+                _ => false,
+            }) {
+                break n.id;
+            }
+            assert!(world.clock.minutes() < 5 * 1440, "nessun viaggio lungo");
+        };
+        let Action::Travel { to } = world.npc(npc).unwrap().action else {
+            unreachable!()
+        };
+        let from_x = TrainLayout::carriage_center_x(world.npc(npc).unwrap().carriage.index());
+        let dest_x = TrainLayout::carriage_center_x(to.index());
+        let mut last = from_x;
+        let mut fraction = 0.0_f32;
+        let mut largest_step = 0.0_f32;
+        while let Some(n) = world.npc(npc)
+            && n.action == (Action::Travel { to })
+        {
+            let x = travel_path_x(from_x, to, smooth_progress(&world, n, fraction));
+            largest_step = largest_step.max((x - last).abs());
+            last = x;
+            fraction += 1.0 / 60.0;
+            if fraction >= 1.0 {
+                fraction -= 1.0;
+                world.tick(&mut brain);
+            }
+        }
+        // Arriva al centro della carrozza di destinazione...
+        assert!(
+            (last - dest_x).abs() < 1.0,
+            "fermo a {last}, atteso {dest_x}"
+        );
+        // ...senza mai saltare più di pochi pixel per fotogramma.
+        let per_frame = CARRIAGE_PITCH / world.params.travel_minutes_per_carriage as f32 / 60.0;
+        assert!(
+            largest_step <= per_frame * 1.5,
+            "passo massimo {largest_step}, atteso ≈ {per_frame}"
+        );
+    }
+
+    #[test]
+    fn travel_starts_where_the_sprite_was() {
+        let to = CarriageId(4);
+        assert_eq!(travel_path_x(123.0, to, 0.0), 123.0);
+        assert_eq!(
+            travel_path_x(123.0, to, 1.0),
+            TrainLayout::carriage_center_x(4)
+        );
+    }
 
     #[test]
     fn hash_is_in_unit_range_and_deterministic() {
