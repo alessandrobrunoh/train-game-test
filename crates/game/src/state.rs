@@ -36,11 +36,14 @@ pub type GameBrain = LayaBrain<UtilityBrain>;
 pub const GAME_PRIOR_WEIGHT: f32 = 0.5;
 
 /// Cervello del gioco sopra `utility`, con Laya spento finché non lo si sceglie.
+/// Chi è in vista non aspetta Laya (`think`): con risposte lente gli NPC
+/// resterebbero fermi; si riattiva dal pannello del cervello (B).
 pub fn new_brain(utility: UtilityBrain) -> GameBrain {
     LayaBrain::new(
         utility,
         LayaConfig {
             enabled: false,
+            think: false,
             prior_weight: GAME_PRIOR_WEIGHT,
             ..LayaConfig::default()
         },
@@ -118,3 +121,15 @@ pub struct RunInfo {
 /// sprite, selezione) deve ricostruirlo. `RunInfo` è già aggiornato.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct WorldReplaced;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn game_brain_does_not_make_npcs_wait_for_laya() {
+        let brain = new_brain(UtilityBrain::new(1));
+        assert!(!brain.config().enabled);
+        assert!(!brain.config().think);
+    }
+}
