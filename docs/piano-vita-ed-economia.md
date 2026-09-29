@@ -160,6 +160,13 @@ Proposta, coerente con l'ambientazione (treno-mondo, rottame, ribelli della coda
 
 ## Fase 4: il giocatore come personaggio
 
+> **Fatte 4.1 e 4.2 (2026-09-29).** `World.player: PlayerCharacter` (`sim/src/player.rs`, API in `world/player.rs`) con nome, posto (carrozza + piano, sincronizzato dal game ogni frame con `set_player_place`), cabina, inventario a slot, baule, gettoni, ricette imparate; `job` e `needs` sono riservati (sopravvivenza spenta).
+> - **Gettoni nella sim:** la moneta si conserva sempre, anche con acquisti, vendite, prelievi, crafting e regali del giocatore (`money_supply` include il giocatore). `player_buy/sell/take/give/craft` usano `world.player`; il game non ha più `PlayerInventory`.
+> - **`SlotInventory`:** 12 scomparti (baule 24), una pila per scomparto; il limite di pila viene dal catalogo (`ItemDef::stack_limit`, default `DEFAULT_STACK_LIMIT` = 10; 5 per cibo e bevande, 1 per i beni durevoli). Nessun `match` sugli oggetti né array per `ItemKind`: pronto per un catalogo che cresce.
+> - **Relazioni:** `Npc::player: Option<PlayerTie>` (affinità, ultimo saluto, "ha qualcosa da dirti"), separato dalle relazioni tra NPC per non toccare conversazioni e deliberazioni. Regali +, acquisti al suo bancone + poco, furti visti −. Effetti: ±10% sul prezzo al bancone, chi diffida rifiuta i regali, chi ti vuole bene ti saluta (fumetto) e si avvicina; un amico che ti ha salutato mostra un "!" (aggancio per la chat 5.4).
+> - **Cabina:** un letto privato (`Station::owner = Player`, mai usato né contato dagli NPC) al piano di sopra del primo Dormitorio, con paravento e baule. E sul letto dalle 20:00: il tempo corre fino alle 06:00 e la partita si salva; E sul baule apre la finestra di trasferimento. Non ci sono ancora stanze vere, la carrozza Cabine, la mensola, l'arredamento né le visite degli amici.
+> - Salvataggi: `SAVE_VERSION` 8, il corpo contiene solo la posizione fisica del giocatore. Il nome si sceglie in "Nuova partita".
+
 ### 4.1 Il giocatore nella sim [S]
 - Nuovo `World.player: PlayerCharacter`, salvato con il mondo:
   ```rust
