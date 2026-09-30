@@ -15,6 +15,7 @@ mod combat;
 mod crafting;
 mod env_art;
 mod fonts;
+mod gang_ui;
 mod history_sync;
 mod history_ui;
 mod hud;
@@ -106,6 +107,8 @@ fn main() {
             narrator_bridge::NarratorBridgePlugin,
             ai_ui::AiUiPlugin,
             chronicle_ui::ChronicleUiPlugin,
+            // Le bande (tasto J): finestra, fasce sul braccio, ispettore.
+            gang_ui::GangUiPlugin,
         ))
         // Screenshot automatici (solo con `TRAINGAME_SHOTS`).
         .add_plugins(shot::ShotPlugin)

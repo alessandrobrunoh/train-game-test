@@ -17,6 +17,11 @@
 //! compaiono anche come fumetti sopra l'NPC e sopra il giocatore
 //! (`speech::ChatSays`). "Regala" apre la scelta del regalo nella finestra,
 //! "Scambia" con un mercante al banco apre la finestra del Mercato.
+//!
+//! Le bande (`gang_ui.rs`): un amico che è in una banda può invitarti (il
+//! "!"; "Entra nella banda" / "Rifiuta"), la vittima di un incarico della tua
+//! banda ha "Riscuoti il pizzo", e un membro che ti chiede il pizzo sulle
+//! tue vendite "Paga" / "Rifiuta".
 
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, RichText};
@@ -29,6 +34,7 @@ use sim::{
 
 use crate::art::Canvas;
 use crate::characters::{Frame, appearance, frame_canvas};
+use crate::gang_ui::{GangCommand, GangQueue, gang_color, swatch};
 use crate::market_ui::MarketWindow;
 use crate::saves::WorldRebuildSet;
 use crate::sim_bridge::SimTickSet;
@@ -94,6 +100,7 @@ impl Plugin for ChatPlugin {
             .init_resource::<ChatQueue>()
             .init_resource::<ChatSays>()
             .init_resource::<MarketWindow>()
+            .init_resource::<GangQueue>()
             .add_systems(
                 PreUpdate,
                 reset_chat
@@ -376,8 +383,10 @@ fn history_line(ui: &mut egui::Ui, speaker: Speaker, name: &str, text: &str) {
 fn chat_window(
     mut contexts: EguiContexts,
     sim: Res<Sim>,
+    time: Res<Time<Real>>,
     mut window: ResMut<ChatWindow>,
     mut queue: ResMut<ChatQueue>,
+    mut gangs: ResMut<GangQueue>,
 ) {
     let Some(id) = window.npc else {
         return;
@@ -396,6 +405,7 @@ fn chat_window(
     let mut open = true;
     let center = ctx.content_rect().center();
     let mut commands: Vec<ChatCommand> = Vec::new();
+    let mut gang_commands: Vec<GangCommand> = Vec::new();
     egui::Window::new(format!("Chat con {}", npc.first_name()))
         .id(egui::Id::new("chat_window"))
         .default_pos(center + egui::vec2(260.0, -260.0))
@@ -445,6 +455,10 @@ fn chat_window(
                     ))
                     .color(FAVOUR_INK),
                 );
+            }
+            gang_offers(ui, world, npc, &mut gang_commands);
+            if let Some(note) = gangs.note(time.elapsed_secs_f64()) {
+                ui.label(RichText::new(note).color(FAVOUR_INK));
             }
             ui.separator();
             // Storico.
@@ -531,6 +545,67 @@ fn chat_window(
         commands.push(ChatCommand::Close);
     }
     queue.0.extend(commands);
+    gangs.commands.extend(gang_commands);
+}
+
+/// Le offerte delle bande in chat: l'invito di un membro amico, il pizzo
+/// da riscuotere per la tua banda, quello che un membro ti chiede.
+fn gang_offers(ui: &mut egui::Ui, world: &World, npc: &Npc, commands: &mut Vec<GangCommand>) {
+    let id = npc.id;
+    if let Some(g) = world.gang_invite_from(id) {
+        ui.horizontal_wrapped(|ui| {
+            swatch(ui, gang_color(g));
+            ui.label(
+                RichText::new(format!("Ti invita nella banda «{}».", g.name)).color(FAVOUR_INK),
+            );
+            if ui
+                .button("Entra nella banda")
+                .on_hover_text("Protezione, una parte del tesoro e qualche incarico.")
+                .clicked()
+            {
+                commands.push(GangCommand::Join(id));
+            }
+            if ui.button("Rifiuta").clicked() {
+                commands.push(GangCommand::Refuse(id));
+            }
+        });
+    }
+    if let Some(t) = world.gang_task().filter(|t| t.victim == id) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Incarico della banda: {} gettoni di pizzo.",
+                    t.tokens
+                ))
+                .color(FAVOUR_INK),
+            );
+            if ui.button("Riscuoti il pizzo").clicked() {
+                commands.push(GangCommand::Collect(id));
+            }
+        });
+    }
+    if let Some(g) = world.gang_of(id)
+        && g.player_due > 0
+        && g.demanded.is_some()
+    {
+        ui.horizontal_wrapped(|ui| {
+            swatch(ui, gang_color(g));
+            ui.label(
+                RichText::new(format!(
+                    "Chiede {} gettoni di pizzo per «{}».",
+                    g.player_due, g.name
+                ))
+                .color(FAVOUR_INK),
+            );
+            let can = world.player.tokens >= g.player_due;
+            if ui.add_enabled(can, egui::Button::new("Paga")).clicked() {
+                commands.push(GangCommand::Pay(g.id));
+            }
+            if ui.button("Rifiuta").clicked() {
+                commands.push(GangCommand::RefusePizzo(g.id));
+            }
+        });
+    }
 }
 
 #[cfg(test)]

@@ -54,7 +54,10 @@ use sim::{GameTime, UtilityBrain, World};
 /// (`Npc::health`/`injury`/`grudges`/`violence`/`last_attacker`, lo stesso
 /// per `PlayerCharacter` con `fainted` e `dead`, `Action::Attack`, le risse
 /// in `World`, le nuove cause di morte e i parametri di `SimParams`).
-pub const SAVE_VERSION: u32 = 11;
+/// 12: le bande (`World::gangs` con il giocatore, `gang_rng`,
+/// `SimParams::gangs`/`gang`, i nuovi moventi delle risse e motivi dei
+/// rancori, gli eventi delle bande).
+pub const SAVE_VERSION: u32 = 12;
 const MAGIC: [u8; 8] = *b"TRAINSAV";
 /// Byte fissi prima dell'intestazione: magic, versione, lunghezza.
 const PREFIX_LEN: usize = MAGIC.len() + 4 + 4;
@@ -617,6 +620,22 @@ pub(crate) mod tests {
         world.player.inventory.add(ItemKind::Razione, 3);
         world.player.chest.add(ItemKind::Coperta, 2);
         world.player.known_recipes.push("lampada".to_string());
+        // Una banda con un colpo ordinato.
+        let members: Vec<sim::NpcId> = world
+            .npcs
+            .iter()
+            .filter(|n| (20..=50).contains(&n.age))
+            .take(3)
+            .map(|n| n.id)
+            .collect();
+        let gang = world.found_gang(&members).expect("a gang");
+        let target = world
+            .npcs
+            .iter()
+            .find(|n| n.age >= 20 && world.gang_of(n.id).is_none())
+            .map(|n| n.id)
+            .unwrap();
+        assert!(world.order_hit(gang, sim::Fighter::Npc(target)));
         let bytes = sample(&world, &brain, "prova");
         let file = decode(&bytes).unwrap();
         assert_eq!(file.header.slot, "prova");
@@ -640,6 +659,8 @@ pub(crate) mod tests {
         assert_eq!(file.body.narrator, r#"{"paused":true}"#);
         // Anche l'evento più vecchio e i contatori interni.
         assert_eq!(file.body.world.events_total(), world.events_total());
+        assert_eq!(file.body.world.gang_state(), world.gang_state());
+        assert!(file.body.world.gang(gang).is_some_and(|g| g.hit.is_some()));
     }
 
     #[test]

@@ -236,6 +236,9 @@ pub(crate) fn fight_shouts(world: &World, event: &Event) -> Vec<(NpcId, &'static
             },
             Motive::Robbery => "Dammi da mangiare!",
             Motive::Defense | Motive::Player => "Stai indietro!",
+            Motive::Pizzo => "Paga, se sai cosa è bene!",
+            Motive::Gang => "Questa è zona nostra!",
+            Motive::Hit => "Ti manda i saluti il capo.",
         };
         shouts.push((a, line));
     }
@@ -269,6 +272,12 @@ fn grudge_reason(world: &World, reason: GrudgeReason) -> String {
         GrudgeReason::HurtLovedOne(who) => format!("ha picchiato {}", name(who)),
         GrudgeReason::KilledLovedOne(who) => format!("ha ucciso {}", name(who)),
         GrudgeReason::Theft => "l'ha sorpreso a rubare".to_string(),
+        GrudgeReason::Extorted => "gli ha preso il pizzo".to_string(),
+        GrudgeReason::GangMate(Fighter::Npc(who)) => {
+            format!("ha colpito {}, della sua banda", name(who))
+        }
+        GrudgeReason::GangMate(Fighter::Player) => "ha colpito te, della sua banda".to_string(),
+        GrudgeReason::Defied => "ha sfidato la sua banda".to_string(),
     }
 }
 

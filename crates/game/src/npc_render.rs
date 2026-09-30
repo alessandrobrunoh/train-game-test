@@ -236,6 +236,16 @@ impl NpcVisual {
         self.half_extents.y
     }
 
+    /// In piedi (né sdraiato né mentre si sdraia): per la fascia della banda.
+    pub(crate) fn upright(&self) -> bool {
+        self.lie <= 0.0
+    }
+
+    /// Altezza del corpo in piedi.
+    pub(crate) fn body_height(&self) -> f32 {
+        2.0 * self.standing_half_height()
+    }
+
     fn stage(&self) -> Stage {
         self.key.stage
     }

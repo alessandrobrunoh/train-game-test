@@ -368,6 +368,8 @@ fn npc_details(
     };
     field(ui, "Si trova in", &place);
     player_regard(ui, npc);
+    // La banda, se ne fa parte (vedi `gang_ui.rs`).
+    crate::gang_ui::inspector_section(ui, world, npc);
 
     // Salute, ferite, rancori e reputazione (vedi `combat.rs`).
     ui.separator();
@@ -657,16 +659,19 @@ pub(crate) enum EventCategory {
     Acquisti,
     Scarsita,
     Giocatore,
+    /// Bande: nascite, membri, pizzo, risse tra bande, regolamenti di conti.
+    Bande,
 }
 
 impl EventCategory {
-    const ALL: [EventCategory; 9] = [
+    const ALL: [EventCategory; 10] = [
         EventCategory::Nascite,
         EventCategory::Morti,
         EventCategory::Coppie,
         EventCategory::Eta,
         EventCategory::Chiacchiere,
         EventCategory::Violenza,
+        EventCategory::Bande,
         EventCategory::Acquisti,
         EventCategory::Scarsita,
         EventCategory::Giocatore,
@@ -698,9 +703,19 @@ impl EventCategory {
             EventKind::Austerity { .. } => EventCategory::Scarsita,
             EventKind::PayChanged { .. } => EventCategory::Acquisti,
             EventKind::Chat { .. } => EventCategory::Chiacchiere,
+            // Le risse per conto di una banda vanno con le bande.
+            EventKind::Attacked { motive, .. } if motive.is_gang() => EventCategory::Bande,
             EventKind::Attacked { .. } | EventKind::Killed { .. } | EventKind::Fainted { .. } => {
                 EventCategory::Violenza
             }
+            EventKind::GangFounded { .. }
+            | EventKind::GangJoined { .. }
+            | EventKind::GangLeft { .. }
+            | EventKind::GangExtortion { .. }
+            | EventKind::GangHit { .. }
+            | EventKind::GangLeader { .. }
+            | EventKind::GangDisbanded { .. }
+            | EventKind::PlayerJoinedGang { .. } => EventCategory::Bande,
         }
     }
 
@@ -715,6 +730,7 @@ impl EventCategory {
             EventCategory::Acquisti => "acquisti",
             EventCategory::Scarsita => "scarsità",
             EventCategory::Giocatore => "giocatore",
+            EventCategory::Bande => "bande",
         }
     }
 
@@ -729,6 +745,9 @@ impl EventCategory {
             EventCategory::Acquisti => "Acquisti degli NPC e oggetti consumati",
             EventCategory::Scarsita => "Scarsità e nuove scorte",
             EventCategory::Giocatore => "Quello che fai tu",
+            EventCategory::Bande => {
+                "Bande: nascite e scioglimenti, chi entra e chi esce, pizzo, risse tra bande e regolamenti di conti"
+            }
         }
     }
 }
@@ -845,13 +864,25 @@ pub(crate) fn event_color(kind: &EventKind) -> Color32 {
             ..
         } => WARNING,
         EventKind::Chat { .. } => Color32::GRAY,
+        EventKind::Attacked { motive, .. } if motive.is_gang() => GANG,
         EventKind::Attacked { .. } => VIOLENCE,
         EventKind::Killed { .. } | EventKind::Fainted { .. } => DANGER,
+        EventKind::GangHit { .. } => DANGER,
+        EventKind::GangExtortion { paid: false, .. } => VIOLENCE,
+        EventKind::PlayerJoinedGang { .. } => PLAYER,
+        EventKind::GangFounded { .. }
+        | EventKind::GangJoined { .. }
+        | EventKind::GangLeft { .. }
+        | EventKind::GangExtortion { .. }
+        | EventKind::GangLeader { .. }
+        | EventKind::GangDisbanded { .. } => GANG,
     }
 }
 
 /// Colore delle aggressioni nel registro.
 const VIOLENCE: Color32 = Color32::from_rgb(235, 120, 90);
+/// Colore delle bande nel registro.
+pub(crate) const GANG: Color32 = Color32::from_rgb(190, 130, 235);
 
 // ----------------------------------------------------------------------
 // Elenco carrozze (in alto a sinistra, chiuso di default)
@@ -913,7 +944,31 @@ fn carriage_overview(
                                     .copied()
                                     .unwrap_or(0);
                                 ui.label(text(carriage.id.to_string()));
-                                ui.label(text(carriage.name.clone()));
+                                // Territorio delle bande: un quadratino del
+                                // loro colore davanti al nome.
+                                let holders = world.gangs_holding(carriage.id);
+                                if holders.is_empty() {
+                                    ui.label(text(carriage.name.clone()));
+                                } else {
+                                    let names: Vec<String> =
+                                        holders.iter().map(|g| format!("«{}»", g.name)).collect();
+                                    let hint = if holders.len() > 1 {
+                                        format!("Contesa tra {}", names.join(" e "))
+                                    } else {
+                                        format!("Territorio di {}", names.join(""))
+                                    };
+                                    ui.horizontal(|ui| {
+                                        for g in &holders {
+                                            crate::gang_ui::swatch(
+                                                ui,
+                                                crate::gang_ui::gang_color(g),
+                                            );
+                                        }
+                                        ui.label(text(carriage.name.clone()));
+                                    })
+                                    .response
+                                    .on_hover_text(hint);
+                                }
                                 let kind = ui.label(text(carriage.kind.to_string()));
                                 let specialties = world.specialties(carriage.id);
                                 if !specialties.is_empty() {

@@ -16,7 +16,9 @@
 //! Le scene 8–10 mostrano il Narratore: la cronaca (N) con i pannelli
 //! aperti, le statistiche (K) e tutte le icone procedurali. L'ultima è una
 //! rissa: barre della salute, numeri del danno, grida e l'ispettore sulla
-//! vittima (vedi `combat.rs`). La cronaca è
+//! vittima (vedi `combat.rs`). Poi le bande: la finestra (J) con due bande,
+//! le fasce sul braccio dei membri e l'ispettore su uno di loro; infine la
+//! chat con un amico che invita il giocatore nella sua banda. La cronaca è
 //! finta e fissa ([`FIXTURES`], alcune sono risposte vere di un modello),
 //! quindi gli screenshot sono uguali a ogni giro e non usano la rete. Con
 //! `TRAINGAME_SHOTS_LLM=1` invece il Narratore è quello di `.env`: chiede la
@@ -79,6 +81,7 @@ impl Plugin for ShotPlugin {
             target: Handle::default(),
             real,
             captured: false,
+            gang_friend: None,
         })
         .init_resource::<IconGallery>()
         .add_systems(PostStartup, render_offscreen)
@@ -104,6 +107,8 @@ struct ShotScript {
     /// La scena preparata è già stata scattata: si prepara la prossima al
     /// giro dopo, così le finestre della scena restano nella foto.
     captured: bool,
+    /// L'amico del giocatore che lo invita nella sua banda (scene 13–14).
+    gang_friend: Option<sim::NpcId>,
 }
 
 /// La finestra con tutte le icone (solo per gli screenshot).
@@ -216,6 +221,9 @@ enum Spot {
     Market,
     /// Una rissa nella prima carrozza a più piani, con l'ispettore aperto.
     Fight,
+    /// Due bande attorno al giocatore: la finestra delle bande (J) e
+    /// l'ispettore su un membro; con `invite` la chat con l'amico che invita.
+    Gangs { invite: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -226,7 +234,7 @@ enum NarratorView {
 }
 
 /// Nome del file, posto del giocatore, vista allargata.
-const SCENES: [(&str, Spot, bool); 12] = [
+const SCENES: [(&str, Spot, bool); 14] = [
     ("1-piano-terra", Spot::Floor(0, Some(160.0)), false),
     ("2-piano-sopra", Spot::Floor(1, Some(160.0)), false),
     ("3-sulla-scala", Spot::Floor(0, None), false),
@@ -239,6 +247,8 @@ const SCENES: [(&str, Spot, bool); 12] = [
     ("10-icone", Spot::Narrator(NarratorView::Icons), false),
     ("11-banchi", Spot::Market, false),
     ("12-rissa", Spot::Fight, false),
+    ("13-bande", Spot::Gangs { invite: false }, false),
+    ("14-invito", Spot::Gangs { invite: true }, false),
 ];
 
 /// Una rissa attorno al giocatore nella carrozza `index`, al piano terra:
@@ -280,6 +290,51 @@ fn stage_fight(world: &mut sim::World, index: usize) -> Option<sim::NpcId> {
     world.npc_attack(ids[0], sim::Fighter::Player, sim::Motive::Grudge);
     world.npc_attack(ids[1], sim::Fighter::Npc(ids[2]), sim::Motive::Quarrel);
     Some(ids[2])
+}
+
+/// Due bande attorno al giocatore nella carrozza `index`, al piano terra:
+/// tre membri di una e due dell'altra, fermi lì; il secondo membro della
+/// prima è amico del giocatore (lo inviterà). Restituisce il primo membro,
+/// da mostrare nell'ispettore, e l'amico.
+fn stage_gangs(world: &mut sim::World, index: usize) -> Option<(sim::NpcId, sim::NpcId)> {
+    let place = sim::Place {
+        carriage: sim::CarriageId(index as u16),
+        floor: 0,
+    };
+    world.set_player_place(place);
+    world.player.health = world.player.health.max(80.0);
+    // Chi non è già nella scena della rissa.
+    let people: Vec<usize> = (0..world.npcs.len())
+        .filter(|&i| (20..=55).contains(&world.npcs[i].age))
+        .skip(4)
+        .take(5)
+        .collect();
+    if people.len() < 5 {
+        return None;
+    }
+    let now = world.clock;
+    for &i in &people {
+        let npc = &mut world.npcs[i];
+        if let Some(s) = npc.action.station() {
+            let station = &mut world.carriages[npc.carriage.index()].stations[s.index()];
+            station.occupancy = station.occupancy.saturating_sub(1);
+        }
+        let npc = &mut world.npcs[i];
+        npc.carriage = place.carriage;
+        npc.floor = 0;
+        npc.action = sim::Action::Idle;
+        npc.action_since = now;
+        npc.action_until = now + 120;
+        npc.health = npc.health.max(80.0);
+    }
+    let ids: Vec<sim::NpcId> = people.iter().map(|&i| world.npcs[i].id).collect();
+    world.found_gang(&ids[..3])?;
+    world.found_gang(&ids[3..])?;
+    world.npcs[people[1]].player = Some(sim::PlayerTie {
+        affinity: 0.9,
+        ..sim::PlayerTie::default()
+    });
+    Some((ids[0], ids[1]))
 }
 
 /// Un amico del giocatore sveglio nella cabina, e qualcosa nell'inventario
@@ -374,6 +429,7 @@ fn run_script(
         ResMut<ChatQueue>,
         ResMut<crate::market_ui::MarketWindow>,
     ),
+    mut gang_window: ResMut<crate::gang_ui::GangWindow>,
     mut body: Single<&mut Body, With<Player>>,
     mut exit: MessageWriter<AppExit>,
     mut narrator: (
@@ -499,6 +555,27 @@ fn run_script(
             narrator.2.open = false;
             narrator.3.0 = false;
             selected.0 = stage_fight(&mut sim.world, index);
+            Vec2::new(left + 150.0, floor_y(0) + half_height)
+        }
+        (Spot::Gangs { invite }, _) => {
+            ui_windows.3.open = false;
+            narrator.1.open = false;
+            narrator.2.open = false;
+            narrator.3.0 = false;
+            if script.gang_friend.is_none() {
+                let Sim { world, brain } = &mut *sim;
+                if let Some((member, friend)) = stage_gangs(world, index) {
+                    selected.0 = Some(member);
+                    script.gang_friend = Some(friend);
+                }
+                // Qualche minuto: l'amico saluta e invita (i saluti sono ogni 5 minuti).
+                world.run(brain, 6);
+            }
+            gang_window.open = !invite;
+            if invite && let Some(friend) = script.gang_friend {
+                selected.0 = None;
+                ui_windows.2.0.push(ChatCommand::Open(friend));
+            }
             Vec2::new(left + 150.0, floor_y(0) + half_height)
         }
         (Spot::Narrator(view), _) => {

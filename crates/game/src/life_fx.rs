@@ -118,6 +118,12 @@ fn toast_npc(kind: &EventKind) -> Option<Option<NpcId>> {
             ..
         } => Some(attacker.npc()),
         EventKind::Killed { .. } | EventKind::Fainted { .. } => Some(None),
+        // Bande: nascite, nuovi capi, regolamenti di conti, scioglimenti, tu.
+        EventKind::GangFounded { leader, .. } | EventKind::GangLeader { leader, .. } => {
+            Some(Some(*leader))
+        }
+        EventKind::GangHit { killer, .. } => Some(Some(*killer)),
+        EventKind::GangDisbanded { .. } | EventKind::PlayerJoinedGang { .. } => Some(None),
         _ => None,
     }
 }
