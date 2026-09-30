@@ -532,6 +532,9 @@ fn news_open(news: News, about: bool) -> Pool {
         News::PayCut => NEWS_PAY_CUT,
         News::Fight if about => NEWS_FIGHT,
         News::Killing if about => NEWS_KILLING,
+        News::GangFounded if about => NEWS_GANG_FOUNDED,
+        News::GangBeating if about => NEWS_GANG_BEATING,
+        News::GangHit if about => NEWS_GANG_HIT,
         // News about someone without their name: say it generically.
         _ => NEWS_VAGUE,
     }
@@ -578,6 +581,9 @@ fn news_specific(news: News) -> (Option<Pool>, Pool) {
         News::PayCut => (None, PAY_CUT_FOLLOW),
         News::Fight => (Some(FIGHT_REPLY), FIGHT_FOLLOW),
         News::Killing => (Some(KILLING_REPLY), KILLING_FOLLOW),
+        News::GangFounded => (Some(GANG_REPLY), GANG_FOUNDED_FOLLOW),
+        News::GangBeating => (Some(GANG_REPLY), GANG_FOLLOW),
+        News::GangHit => (Some(KILLING_REPLY), GANG_HIT_FOLLOW),
     }
 }
 
@@ -1802,6 +1808,42 @@ const FIGHT_FOLLOW: Pool = &[
     "Speriamo che {o} stia bene.",
     "Ci vorrebbero le guardie, qui.",
 ];
+/// Gang news: `{o}` is the gang after "di", short ("dei Topi").
+const NEWS_GANG_FOUNDED: Pool = &[
+    "{a} comanda una banda, ora!",
+    "Nuova banda: quelli {o}.",
+    "{a} {f} guida quelli {o}!",
+];
+const NEWS_GANG_BEATING: Pool = &[
+    "Quelli {o} hanno pestato {a}!",
+    "{a} non pagava il pizzo: botte!",
+    "Hanno menato {a} per il pizzo.",
+];
+const NEWS_GANG_HIT: Pool = &[
+    "Hanno ammazzato {a}! Quelli {o}…",
+    "{a} uccis{A:a/o} per ordine del capo.",
+    "Regolamento di conti: {a} è mort{A:a/o}.",
+];
+const GANG_REPLY: Pool = &[
+    "Che paura, quella gente.",
+    "Quelli sono pericolosi.",
+    "Meglio non immischiarsi.",
+];
+const GANG_FOUNDED_FOLLOW: Pool = &[
+    "Stai alla larga da quelli {o}.",
+    "Ci vorrebbero le guardie, qui.",
+    "Speriamo che non chiedano il pizzo.",
+];
+const GANG_FOLLOW: Pool = &[
+    "Di notte là non ci passo più.",
+    "Speriamo che {a} si riprenda.",
+    "Meglio pagare e stare zitti, forse.",
+];
+const GANG_HIT_FOLLOW: Pool = &[
+    "Nessuno è più al sicuro.",
+    "Povera la famiglia di {a}…",
+    "Prima o poi toccherà a loro.",
+];
 const KILLING_REPLY: Pool = &["Dio mio…", "No! Non è possibile!", "Che orrore."];
 const KILLING_FOLLOW: Pool = &[
     "Nessuno è più al sicuro.",
@@ -2712,6 +2754,13 @@ const ALL_POOLS: &[Pool] = &[
     FIGHT_FOLLOW,
     KILLING_REPLY,
     KILLING_FOLLOW,
+    NEWS_GANG_FOUNDED,
+    NEWS_GANG_BEATING,
+    NEWS_GANG_HIT,
+    GANG_REPLY,
+    GANG_FOUNDED_FOLLOW,
+    GANG_FOLLOW,
+    GANG_HIT_FOLLOW,
     GENEROUS_REPLY,
     HELP_GIVEN_FOLLOW,
     HELP_REFUSED_FOLLOW,

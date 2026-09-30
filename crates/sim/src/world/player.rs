@@ -389,6 +389,10 @@ impl World {
             until: now + GREET_MINUTES,
         });
         self.maybe_offer_favour(i);
+        // A friend in a gang may invite the player (see `gang.rs`).
+        if !self.gangs.list.is_empty() {
+            self.maybe_invite_player(i);
+        }
     }
 }
 

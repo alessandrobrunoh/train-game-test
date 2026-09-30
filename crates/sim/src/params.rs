@@ -455,6 +455,14 @@ pub struct SimParams {
     /// valuable things), to who knocked it down.
     pub faint_token_share: f32,
 
+    // --- Gangs (see [`crate::gang`]) ---
+    /// Scales how often gangs form, recruit and act (pizzo, fights, hits),
+    /// on top of `violence`: with `violence × gangs` at 0 no gang ever
+    /// forms. At 1 a train of 400 has a few gangs after some years.
+    pub gangs: f32,
+    /// Thresholds and chances of the gangs.
+    pub gang: crate::gang::GangParams,
+
     // --- Event log ---
     /// Most events kept in [`crate::World::events`]: beyond it the oldest are
     /// dropped, a chunk at a time (see [`crate::World::events_total`]).
@@ -669,6 +677,9 @@ impl Default for SimParams {
             violence_decay_per_day: 0.005,
             faint_health: 20.0,
             faint_token_share: 0.25,
+
+            gangs: 1.0,
+            gang: crate::gang::GangParams::default(),
 
             max_events: default_max_events(),
         }

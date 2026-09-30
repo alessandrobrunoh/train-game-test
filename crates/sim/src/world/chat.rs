@@ -199,6 +199,16 @@ impl World {
     /// returned and remembered, and the "!" goes away.
     pub fn player_chat_start(&mut self, npc: NpcId) -> Result<Option<String>, ChatError> {
         let i = self.chat_index(npc)?;
+        // A gang's invitation or its pizzo come first (see `gang.rs`).
+        if !self.gangs.list.is_empty()
+            && let Some(text) = self.gang_opening(i)
+        {
+            if let Some(t) = &mut self.npcs[i].player {
+                t.wants_to_talk = false;
+            }
+            self.remember(npc, Speaker::Npc, text.clone());
+            return Ok(Some(text));
+        }
         let Some(tie) = self.npcs[i].player else {
             return Ok(None);
         };
@@ -532,7 +542,7 @@ impl World {
 
     /// What one `item` is worth now: the cheapest Mercato price if it is
     /// sold, else its base value at the pay level.
-    fn item_value(&self, item: ItemKind) -> u32 {
+    pub(super) fn item_value(&self, item: ItemKind) -> u32 {
         self.markets()
             .into_iter()
             .filter_map(|m| self.price(m, item))
@@ -850,7 +860,7 @@ impl World {
 
     /// Remembers a line in the chat with `npc` (that log becomes the most
     /// recent; the oldest logs are forgotten beyond [`CHAT_LOGS_KEPT`]).
-    fn remember(&mut self, npc: NpcId, speaker: Speaker, text: String) {
+    pub(super) fn remember(&mut self, npc: NpcId, speaker: Speaker, text: String) {
         let now: GameTime = self.clock;
         let chats = &mut self.player.chats;
         let mut log = match chats.iter().position(|l| l.npc == npc) {

@@ -55,6 +55,10 @@ const NEW_KEYS: &[&str] = &[
     "violence_decay_per_day",
     "faint_health",
     "faint_token_share",
+    // Gangs: World (`gangs`, `gang_rng`) and SimParams (`gangs`, `gang`)
+    "gangs",
+    "gang_rng",
+    "gang",
 ];
 
 /// FNV-1a of a string.

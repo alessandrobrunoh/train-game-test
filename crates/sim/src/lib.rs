@@ -81,6 +81,12 @@
 //! ([`World::player_attack`]): the victim reacts, witnesses remember,
 //! loved ones hold grudges, and it becomes news. See [`World::fights`].
 //!
+//! Gangs ([`gang`]): clusters of friends who are poor, aggrieved and
+//! aggressive found gangs by themselves; gangs recruit, claim territory,
+//! collect the pizzo into their treasury, protect their members, fight
+//! their rivals and, rarely, order a killing. The player can be invited in.
+//! Scaled by [`SimParams::violence`] × [`SimParams::gangs`]. See [`World::gangs`].
+//!
 //! 1 tick = 1 game minute. All randomness comes from seeded ChaCha RNGs, so a
 //! world is fully deterministic given its seed and the brain's seed.
 
@@ -95,6 +101,7 @@ pub mod defs;
 pub mod deliberation;
 pub mod dialogue;
 pub mod event;
+pub mod gang;
 pub mod ids;
 pub mod item;
 pub mod job;
@@ -132,6 +139,11 @@ pub use dialogue::{
     Conversation, ConversationCounters, ConversationId, Line, News, Tone, Topic, Valence,
 };
 pub use event::{BirthDenial, DeathCause, Event, EventKind};
+pub use gang::{
+    ALLY_FROM, DisbandReason, GANG_COLOURS, Gang, GangAct, GangCounters, GangError, GangId,
+    GangParams, GangReputation, GangRole, GangState, GangTally, GangTask, GangTie, Hit, Invite,
+    LeaveReason, Member, PizzoOutcome, PlayerGang, RIVAL_BELOW, gang_name,
+};
 pub use ids::{CarriageId, NpcId, StationId};
 pub use item::{ItemInfo, ItemInfoData, ItemKind, Stock};
 pub use job::{JobInfo, JobInfoData};

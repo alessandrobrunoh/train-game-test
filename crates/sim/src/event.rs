@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::combat::{Fighter, Motive};
 use crate::deliberation::{Choice, DeliberationId, DeliberationKind, Grievance, Resolver};
 use crate::dialogue::{ConversationId, Tone, Topic};
+use crate::gang::{DisbandReason, GangId, LeaveReason};
 use crate::ids::{CarriageId, NpcId};
 use crate::item::ItemKind;
 use crate::npc::{Job, Sex};
@@ -241,6 +242,80 @@ pub enum EventKind {
         item: Option<ItemKind>,
         /// With [`crate::SimParams::permadeath`]: the player died (game over).
         dead: bool,
+    },
+    /// A gang was founded in `place` (see [`crate::gang`]), or split from
+    /// another (`split_from`) when its leader died.
+    GangFounded {
+        gang: GangId,
+        gang_name: String,
+        leader: NpcId,
+        leader_name: String,
+        members: u32,
+        place: CarriageId,
+        split_from: Option<String>,
+    },
+    /// `npc` joined a gang.
+    GangJoined {
+        gang: GangId,
+        gang_name: String,
+        npc: NpcId,
+        name: String,
+    },
+    /// `npc` (None: the player) left a gang.
+    GangLeft {
+        gang: GangId,
+        gang_name: String,
+        npc: Option<NpcId>,
+        name: String,
+        reason: LeaveReason,
+    },
+    /// A gang member asked `victim` for the pizzo in `place`: `tokens` paid
+    /// into the gang's treasury, or refused (`paid` false: a beating
+    /// follows, see [`crate::Motive::Pizzo`]).
+    GangExtortion {
+        gang: GangId,
+        gang_name: String,
+        collector: Fighter,
+        collector_name: String,
+        victim: Fighter,
+        victim_name: String,
+        tokens: u32,
+        paid: bool,
+        place: CarriageId,
+    },
+    /// A killing ordered by a gang's leader was done: `killer` killed
+    /// `victim` (after the `Killed` event).
+    GangHit {
+        gang: GangId,
+        gang_name: String,
+        killer: NpcId,
+        killer_name: String,
+        victim: Fighter,
+        victim_name: String,
+        place: CarriageId,
+    },
+    /// A gang has a new leader (its leader died); `contested`: a contender
+    /// split away with its followers.
+    GangLeader {
+        gang: GangId,
+        gang_name: String,
+        leader: NpcId,
+        leader_name: String,
+        contested: bool,
+    },
+    /// A gang disbanded (too few members, or merged into `into_name`).
+    GangDisbanded {
+        gang: GangId,
+        gang_name: String,
+        reason: DisbandReason,
+        into_name: Option<String>,
+    },
+    /// The player joined a gang, invited by `by`.
+    PlayerJoinedGang {
+        gang: GangId,
+        gang_name: String,
+        by: NpcId,
+        by_name: String,
     },
 }
 
@@ -622,6 +697,105 @@ impl fmt::Display for Event {
                     }
                 }
             }
+            EventKind::GangFounded {
+                gang_name,
+                leader_name,
+                members,
+                place,
+                split_from,
+                ..
+            } => match split_from {
+                Some(from) => write!(
+                    f,
+                    "Scissione: {leader_name} lascia «{from}» e fonda «{gang_name}» ({members} membri, carrozza {place})"
+                ),
+                None => write!(
+                    f,
+                    "Nasce una banda: «{gang_name}», {members} membri con {leader_name} a capo (carrozza {place})"
+                ),
+            },
+            EventKind::GangJoined {
+                gang_name, name, ..
+            } => write!(f, "{name} entra nella banda «{gang_name}»"),
+            EventKind::GangLeft {
+                gang_name,
+                npc,
+                name,
+                reason,
+                ..
+            } => match npc {
+                None => write!(f, "Hai lasciato la banda «{gang_name}»"),
+                Some(_) => write!(f, "{name} lascia la banda «{gang_name}» {}", reason.label()),
+            },
+            EventKind::GangExtortion {
+                gang_name,
+                collector,
+                collector_name,
+                victim,
+                victim_name,
+                tokens,
+                paid,
+                ..
+            } => match (collector, victim, paid) {
+                (Fighter::Player, _, _) => write!(
+                    f,
+                    "Hai riscosso {tokens} gettoni di pizzo da {victim_name} per «{gang_name}»"
+                ),
+                (_, Fighter::Player, true) => write!(
+                    f,
+                    "Hai pagato {tokens} gettoni di pizzo a «{gang_name}» ({collector_name})"
+                ),
+                (_, Fighter::Player, false) => {
+                    write!(f, "Ti rifiuti di pagare il pizzo a «{gang_name}»")
+                }
+                (_, _, true) => write!(
+                    f,
+                    "{collector_name} riscuote {tokens} gettoni di pizzo da {victim_name} per «{gang_name}»"
+                ),
+                (_, _, false) => write!(
+                    f,
+                    "{victim_name} si rifiuta di pagare il pizzo a {collector_name} («{gang_name}»)"
+                ),
+            },
+            EventKind::GangHit {
+                gang_name,
+                killer_name,
+                victim_name,
+                place,
+                ..
+            } => write!(
+                f,
+                "Regolamento di conti: {killer_name} ha ucciso {victim_name} per ordine del capo di «{gang_name}» (carrozza {place})"
+            ),
+            EventKind::GangLeader {
+                gang_name,
+                leader_name,
+                contested,
+                ..
+            } => {
+                write!(f, "{leader_name} è il nuovo capo di «{gang_name}»")?;
+                if *contested {
+                    f.write_str(" dopo una lotta per il comando")?;
+                }
+                Ok(())
+            }
+            EventKind::GangDisbanded {
+                gang_name,
+                reason,
+                into_name,
+                ..
+            } => match (reason, into_name) {
+                (DisbandReason::Merged(_), Some(into)) => {
+                    write!(f, "La banda «{gang_name}» si unisce a «{into}»")
+                }
+                _ => write!(f, "La banda «{gang_name}» si scioglie"),
+            },
+            EventKind::PlayerJoinedGang {
+                gang_name, by_name, ..
+            } => write!(
+                f,
+                "Sei entrato nella banda «{gang_name}» (ti ha invitato {by_name})"
+            ),
         }
     }
 }

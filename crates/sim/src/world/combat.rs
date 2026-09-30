@@ -53,6 +53,8 @@ const GRUDGE_SETTLED: f32 = 0.5;
 const LETHAL_AGGRESSION: f32 = 0.8;
 /// ...holding a grudge at least this strong.
 const LETHAL_GRUDGE: f32 = 0.5;
+/// Blows of who was sent on a hit hurt this much more.
+const HIT_DAMAGE: f32 = 1.3;
 /// A robber is desperate below this hunger.
 const DESPERATE_HUNGER: f32 = 0.1;
 
@@ -107,7 +109,8 @@ impl World {
     }
 
     /// Whether NPC `id` is hostile to the player: it is fighting it, holds a
-    /// grudge against it, or can't stand it. Attacking a hostile NPC is
+    /// grudge against it, can't stand it, or belongs to a gang hostile to
+    /// the player ([`World::is_gang_hostile`]). Attacking a hostile NPC is
     /// self-defense (no grudges, no loss of reputation).
     pub fn is_hostile_to_player(&self, id: NpcId) -> bool {
         let Some(npc) = self.npc(id) else {
@@ -119,11 +122,12 @@ impl World {
                 .grudge_against(Fighter::Player)
                 .is_some_and(|g| g.strength >= HOSTILE_GRUDGE)
             || npc.player_affinity() < HOSTILE_AFFINITY
+            || self.gang_of(id).is_some_and(|g| self.is_gang_hostile(g.id))
     }
 
     /// Where a fighter stands, if it can fight there: an NPC that is not
     /// walking between carriages, the player awake and on its feet.
-    fn stand(&self, who: Fighter) -> Option<Place> {
+    pub(super) fn stand(&self, who: Fighter) -> Option<Place> {
         match who {
             Fighter::Npc(id) => {
                 let n = self.npc(id)?;
@@ -140,7 +144,7 @@ impl World {
     }
 
     /// Whether `a` and `b` are in the same place and can fight.
-    fn together(&self, a: Fighter, b: Fighter) -> bool {
+    pub(super) fn together(&self, a: Fighter, b: Fighter) -> bool {
         match (self.stand(a), self.stand(b)) {
             (Some(x), Some(y)) => x == y,
             _ => false,
@@ -263,6 +267,8 @@ impl World {
         let by_name = by_npc.map(|id| self.fighter_name(Fighter::Npc(id)));
         self.end_fights_of(Fighter::Player);
         self.player.greetings.clear();
+        // Hits on the player: the lesson was given.
+        self.gang_player_down();
         if self.params.permadeath {
             self.player.health = 0.0;
             self.player.dead = Some(now);
@@ -371,7 +377,11 @@ impl World {
         self.fights[k].opened = true;
         // The attacker strikes (the player strikes with its key).
         if f.attacker != Fighter::Player {
-            let damage = self.blow(f.attacker, f.victim);
+            let mut damage = self.blow(f.attacker, f.victim);
+            // Sent to kill: it comes with a blade.
+            if f.motive == Motive::Hit {
+                damage *= HIT_DAMAGE;
+            }
             self.fights[k].dealt[0] += damage;
             self.log_blow(f.attacker, f.victim, damage, f.motive, first);
             if first {
@@ -526,6 +536,8 @@ impl World {
                 self.player.violence = (self.player.violence + per_kill).min(1.0);
             }
         }
+        // A gang's ordered killing, a member killed (see `gang.rs`).
+        self.gang_killing(j, killer, place);
         self.kill(j, cause);
     }
 
@@ -609,7 +621,7 @@ impl World {
     }
 
     /// NPC `i` stops what it is doing and starts `action` for `minutes`.
-    fn interrupt(&mut self, i: usize, action: Action, minutes: u64) {
+    pub(super) fn interrupt(&mut self, i: usize, action: Action, minutes: u64) {
         let now = self.clock;
         let (id, here, old) = (self.npcs[i].id, self.npcs[i].carriage, self.npcs[i].action);
         if let Some(station) = old.station() {
@@ -644,6 +656,9 @@ impl World {
         }
         if f.motive == Motive::Robbery {
             self.loot(&f);
+        }
+        if f.motive == Motive::Pizzo {
+            self.pizzo_after_beating(&f);
         }
         if f.opened {
             self.settle(&f);
@@ -721,6 +736,11 @@ impl World {
         {
             self.dislike(j, f.attacker, hit * blame);
         }
+        // Gangs: the victim's gang takes it personally, members around
+        // come to help (see `gang.rs`).
+        if !self.gangs.list.is_empty() {
+            self.gang_fight_opened(k);
+        }
     }
 
     /// Fight `f` is over: the victim holds a grudge (stronger the more it
@@ -774,7 +794,13 @@ impl World {
     }
 
     /// NPC `i` holds (or strengthens) a grudge against `against`.
-    fn add_grudge(&mut self, i: usize, against: Fighter, reason: GrudgeReason, strength: f32) {
+    pub(super) fn add_grudge(
+        &mut self,
+        i: usize,
+        against: Fighter,
+        reason: GrudgeReason,
+        strength: f32,
+    ) {
         if strength <= 0.0 || against == Fighter::Npc(self.npcs[i].id) {
             return;
         }
@@ -810,7 +836,7 @@ impl World {
 
     /// NPC `i` likes `who` less by `amount` (one-sided: a tie is created if
     /// needed, replacing the weakest friend tie when the list is full).
-    fn dislike(&mut self, i: usize, who: Fighter, amount: f32) {
+    pub(super) fn dislike(&mut self, i: usize, who: Fighter, amount: f32) {
         if amount <= 0.0 {
             return;
         }
@@ -855,7 +881,7 @@ impl World {
     // ------------------------------------------------------------------
 
     /// Whether NPC `i` can start a fight now.
-    fn can_attack(&self, i: usize) -> bool {
+    pub(super) fn can_attack(&self, i: usize) -> bool {
         let n = &self.npcs[i];
         n.age >= ATTACKER_MIN_AGE
             && n.is_awake()
@@ -867,7 +893,7 @@ impl World {
 
     /// Whether `who` can be attacked by an NPC now: someone awake of 14+
     /// not already fighting.
-    fn can_be_attacked(&self, who: Fighter) -> bool {
+    pub(super) fn can_be_attacked(&self, who: Fighter) -> bool {
         let ok = match who {
             Fighter::Npc(id) => self
                 .npc(id)
@@ -922,6 +948,48 @@ impl World {
         };
         let v = &mut self.npcs[i].violence;
         *v = (*v + gain).min(1.0);
+        true
+    }
+
+    /// NPC `i` joins a fight already going on in its place, against
+    /// `target` (who is busy with someone else): a gang member defending
+    /// another. False if it can't.
+    pub(super) fn join_fight(&mut self, i: usize, target: Fighter, motive: Motive) -> bool {
+        let me = Fighter::Npc(self.npcs[i].id);
+        let target_ok = match target {
+            Fighter::Npc(id) => self
+                .npc(id)
+                .is_some_and(|n| n.age >= VICTIM_MIN_AGE && n.is_awake()),
+            Fighter::Player => !self.player.is_down(),
+        };
+        if me == target || !target_ok || !self.can_attack(i) || !self.together(me, target) {
+            return false;
+        }
+        let now = self.clock;
+        // A few blows, to help: shorter than a fight of its own.
+        let minutes = self.params.fight_minutes.div_ceil(2).max(1);
+        let place = Place {
+            carriage: self.npcs[i].carriage,
+            floor: self.npcs[i].floor,
+        };
+        self.interrupt(i, Action::Attack(target), minutes);
+        self.fights.push(Fight {
+            attacker: me,
+            victim: target,
+            motive,
+            place,
+            since: now,
+            until: now + minutes,
+            // Busy with its first opponent: it takes the blows.
+            reaction: Some(Reaction::GiveIn),
+            lethal: false,
+            ended: None,
+            dealt: [0.0; 2],
+            opened: false,
+        });
+        self.combat.fights[motive.index()] += 1;
+        let v = &mut self.npcs[i].violence;
+        *v = (*v + self.params.violence_per_fight / 2.0).min(1.0);
         true
     }
 
@@ -1014,6 +1082,9 @@ impl World {
                 let aggr = npc.aggression();
                 let (factor, motive) = if g.is_revenge() {
                     (2.0 * aggression_factor(aggr.max(0.35), 2), Motive::Revenge)
+                } else if matches!(g.reason, GrudgeReason::GangMate(_) | GrudgeReason::Defied) {
+                    // A gang's score to settle.
+                    (aggression_factor(aggr.max(0.35), 2), Motive::Gang)
                 } else {
                     (aggression_factor(aggr, 3), Motive::Grudge)
                 };

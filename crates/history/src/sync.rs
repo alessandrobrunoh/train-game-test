@@ -368,6 +368,45 @@ pub(crate) fn columns(kind: &EventKind) -> Columns {
             c.amount = Some(tokens);
             c.item = item;
         }
+        // Gangs: the member (or leader) is `npc`, whom it concerns `other`.
+        EventKind::GangFounded {
+            leader,
+            members,
+            place,
+            ..
+        } => {
+            c.npc = Some(leader);
+            c.carriage = Some(place.0);
+            c.amount = Some(members);
+        }
+        EventKind::GangJoined { npc, .. } | EventKind::GangLeader { leader: npc, .. } => {
+            c.npc = Some(npc);
+        }
+        EventKind::GangLeft { npc, .. } => c.npc = npc,
+        EventKind::GangExtortion {
+            collector,
+            victim,
+            tokens,
+            place,
+            ..
+        } => {
+            c.npc = collector.npc();
+            c.other = victim.npc();
+            c.carriage = Some(place.0);
+            c.amount = Some(tokens);
+        }
+        EventKind::GangHit {
+            killer,
+            victim,
+            place,
+            ..
+        } => {
+            c.npc = Some(killer);
+            c.other = victim.npc();
+            c.carriage = Some(place.0);
+        }
+        EventKind::GangDisbanded { .. } => {}
+        EventKind::PlayerJoinedGang { by, .. } => c.other = Some(by),
     }
     c
 }
@@ -403,6 +442,14 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Attacked { .. } => "Attacked",
         EventKind::Killed { .. } => "Killed",
         EventKind::Fainted { .. } => "Fainted",
+        EventKind::GangFounded { .. } => "GangFounded",
+        EventKind::GangJoined { .. } => "GangJoined",
+        EventKind::GangLeft { .. } => "GangLeft",
+        EventKind::GangExtortion { .. } => "GangExtortion",
+        EventKind::GangHit { .. } => "GangHit",
+        EventKind::GangLeader { .. } => "GangLeader",
+        EventKind::GangDisbanded { .. } => "GangDisbanded",
+        EventKind::PlayerJoinedGang { .. } => "PlayerJoinedGang",
     }
 }
 

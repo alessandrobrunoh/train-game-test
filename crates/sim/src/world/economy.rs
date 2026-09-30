@@ -16,6 +16,9 @@
 //!   savings ([`crate::SimParams::savings_tax_threshold`]), so that tokens
 //!   nobody spends go back into circulation.
 //! - Between NPCs: help asked in a deliberation, inheritance.
+//! - Gangs ([`crate::gang`]): the pizzo goes from the victims to a gang's
+//!   treasury, which pays its members; a disbanded gang's treasury goes to
+//!   its last members (or the administration's treasury).
 //!
 //! The pay level is a slow feedback: when the treasury holds much more than
 //! [`crate::SimParams::treasury_reserve_days`] days of payroll the
@@ -262,11 +265,12 @@ impl Economy {
 }
 
 impl World {
-    /// All tokens in the sim: the treasury, every NPC's and the player's.
-    /// Constant: tokens only move between them.
+    /// All tokens in the sim: the treasury, every NPC's and the player's,
+    /// and the gangs' treasuries. Constant: tokens only move between them.
     pub fn money_supply(&self) -> u64 {
         self.economy.treasury
             + u64::from(self.player.tokens)
+            + self.gang_treasuries()
             + self
                 .npcs
                 .iter()

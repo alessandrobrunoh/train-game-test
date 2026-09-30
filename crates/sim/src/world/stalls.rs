@@ -1179,7 +1179,11 @@ impl World {
                     self.deposit(cost);
                 }
             }
-            Seller::Player => self.player.tokens = self.player.tokens.saturating_add(cost),
+            Seller::Player => {
+                self.player.tokens = self.player.tokens.saturating_add(cost);
+                // The gangs holding this Mercato want their share (`gang.rs`).
+                self.gang_player_sale(market, cost);
+            }
             Seller::Mercato => {
                 // Like a sale from the shelf: into the treasury, logged.
                 self.deposit(cost);

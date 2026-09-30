@@ -270,6 +270,8 @@ impl World {
         self.drop_conversation_of(npc.id);
         // Grudges against it are dropped, its fights end.
         self.forget_fighter(npc.id);
+        // Its gang loses a member (maybe its leader), hits on it are over.
+        self.gang_member_gone(npc.id);
     }
 
     // ------------------------------------------------------------------

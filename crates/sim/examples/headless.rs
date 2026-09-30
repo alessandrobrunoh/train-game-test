@@ -9,9 +9,9 @@ use std::time::Instant;
 
 use sim::{
     Action, ActionKind, CarriageKind, Choice, CombatCounters, Comfort, ConversationCounters,
-    DeathCause, DeliberationCounters, DeliberationKind, EventKind, ItemKind, LifeStage,
-    MINUTES_PER_DAY, Motive, Needs, Seller, StallEvent, Stats, Tally, Tone, Topic, TradeCounters,
-    UtilityBrain, World,
+    DeathCause, DeliberationCounters, DeliberationKind, EventKind, GangCounters, ItemKind,
+    LifeStage, MINUTES_PER_DAY, Motive, Needs, Seller, StallEvent, Stats, Tally, Tone, Topic,
+    TradeCounters, UtilityBrain, World,
 };
 
 fn main() {
@@ -353,8 +353,10 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
          età media, nati sul treno, scorte a fine anno (verdura, razioni), attrezzi e vestiti posseduti, gettoni degli NPC\n\
          Economia per anno: moneta totale e tesoreria, gettoni per adulto (media, mediana), indice di Gini, livello di paghe e prezzi, \
          spreco di verdura (marcita o persa a magazzino pieno) e giorni di austerità nell'anno\n\
-         Violenza per anno: risse per movente (lite/rancore/vendetta/ladro/rapina/giocatore/difesa), colpi andati a segno e danno, \
-         reazioni delle vittime, morti violente, pasti portati a chi è a letto, feriti e NPC con rancori a fine anno"
+         Violenza per anno: risse per movente (lite/rancore/vendetta/ladro/rapina/giocatore/difesa/pizzo/banda/regolamento di conti), colpi andati a segno e danno, \
+         reazioni delle vittime, morti violente, pasti portati a chi è a letto, feriti e NPC con rancori a fine anno\n\
+         Bande per anno: bande e membri a fine anno, nate/scissioni/fusioni/sciolte, entrati/usciti, pizzo pagato (gettoni) e rifiutato, \
+         risse tra rivali, rinforzi, colpi ordinati/riusciti, uccisi nelle risse delle bande"
     );
     println!(
         "Deliberazioni per anno: aperte per tipo (coppia/figlio/furto/protesta), proposte accettate/rifiutate/rinviate, \
@@ -370,6 +372,7 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
         let talk_before = world.conversation_counters.clone();
         let trade_before = world.trade_counters().clone();
         let combat_before = world.combat.clone();
+        let gangs_before = world.gang_state().counters.clone();
         for _ in 0..world.params.days_per_year {
             run_day(world, brain);
             let pop = world.npcs.len();
@@ -425,6 +428,7 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
             u64::from(world.params.days_per_year),
         );
         print_violence(world, &before, &combat_before);
+        print_gangs(world, &gangs_before);
         if s.population == 0 {
             break;
         }
@@ -448,6 +452,29 @@ fn run_years(world: &mut World, brain: &mut UtilityBrain, seed: u64, years: u64)
         &sim::LifeCounters::default(),
         &CombatCounters::default(),
     );
+    print_gangs(world, &GangCounters::default());
+    for g in world.gangs() {
+        let leader = world.npc(g.leader).map_or("?", |n| n.name.as_str());
+        let turf: Vec<String> = g.territory.iter().map(|c| c.to_string()).collect();
+        println!(
+            "  «{}» ({}): capo {leader}, {} membri, carrozze {}, tesoro {}, {} | pizzo {} ({} gettoni) risse {} uccisi {} colpi ordinati {}/{}",
+            g.name,
+            sim::GANG_COLOURS[usize::from(g.colour) % sim::GANG_COLOURS.len()].0,
+            g.size(),
+            turf.join(","),
+            g.treasury,
+            g.reputation().label(),
+            g.tally.pizzo_paid,
+            g.tally.pizzo_tokens,
+            g.tally.fights,
+            g.tally.kills,
+            g.tally.hits_done,
+            g.tally.hits_ordered,
+        );
+        for act in &g.acts[g.acts.len().saturating_sub(3)..] {
+            println!("      [{}] {}", act.time, act.text);
+        }
+    }
     let d = &world.deliberation_counters;
     println!(
         "Deliberazioni: {} aperte ({:.1} al giorno), {} decise dalle regole, {} dal cervello, {} annullate.",
@@ -612,6 +639,39 @@ fn print_violence(world: &World, life: &sim::LifeCounters, combat: &CombatCounte
         since(c.robberies, combat.robberies),
         hurt,
         grudges,
+    );
+}
+
+/// One line about the gangs since the snapshot `before`: gangs and members
+/// now (and the largest), founded/split/merged/disbanded, joined/left,
+/// pizzo paid (tokens), refused (beaten into paying), rival fights,
+/// backups, hits ordered/done and everyone killed in gang fights.
+fn print_gangs(world: &World, before: &GangCounters) {
+    let c = &world.gang_state().counters;
+    let members: usize = world.gangs().iter().map(|g| g.size()).sum();
+    let largest = world.gangs().iter().map(|g| g.size()).max().unwrap_or(0);
+    let treasury: u32 = world.gangs().iter().map(|g| g.treasury).sum();
+    println!(
+        "      bande: {} ({} membri, la più grande {}, tesori {}) | nate {} scissioni {} fusioni {} sciolte {} | entrati {} usciti {} | pizzo {} ({} gettoni) rifiutati {} (pagati dopo le botte {}) | risse tra rivali {} rinforzi {} | colpi ordinati {} riusciti {} | uccisi dalle bande {}",
+        world.gangs().len(),
+        members,
+        largest,
+        treasury,
+        c.founded - before.founded,
+        c.splits - before.splits,
+        c.merges - before.merges,
+        c.disbanded - before.disbanded,
+        c.joined - before.joined,
+        c.left - before.left,
+        c.pizzo_paid - before.pizzo_paid,
+        c.pizzo_tokens - before.pizzo_tokens,
+        c.pizzo_refused - before.pizzo_refused,
+        c.pizzo_beaten - before.pizzo_beaten,
+        c.rival_fights - before.rival_fights,
+        c.backups - before.backups,
+        c.hits_ordered - before.hits_ordered,
+        c.hits_done - before.hits_done,
+        c.kills - before.kills,
     );
 }
 

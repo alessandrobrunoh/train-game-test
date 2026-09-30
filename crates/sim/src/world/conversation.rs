@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use super::deliberate::relation_word;
 use super::{World, index_of};
 use crate::action::Action;
+use crate::combat::Fighter;
 use crate::dialogue::text::{self, Need, Script, Subject, Voice};
 use crate::dialogue::{Conversation, ConversationId, News, Tone, Topic};
 use crate::event::EventKind;
@@ -484,8 +485,8 @@ impl World {
                     News::BirthDenied | News::PayRaised | News::PayCut => 0.7,
                     News::HelpRefused | News::Restocked(_) | News::CameOfAge => 0.5,
                     News::HelpGiven | News::Retired => 0.4,
-                    News::Fight => 1.5,
-                    News::Killing => 2.0,
+                    News::Fight | News::GangFounded | News::GangBeating => 1.5,
+                    News::Killing | News::GangHit => 2.0,
                 };
                 let known = |n: &Npc| {
                     item.involved
@@ -748,6 +749,8 @@ impl World {
         let delta = match c.news {
             Some(News::TheftCaught | News::Fight) => -g,
             Some(News::Killing) => -2.0 * g,
+            // About the leader of a new gang.
+            Some(News::GangFounded) => -g,
             Some(News::HelpRefused) => -g / 2.0,
             Some(News::HelpGiven) => g / 2.0,
             Some(News::Couple | News::Birth | News::CameOfAge | News::Widowed) => g * 0.3,
@@ -1099,6 +1102,49 @@ fn news_item(time: GameTime, kind: &EventKind) -> Option<NewsItem> {
             [killer.npc(), victim.npc(), None],
             Where::At(*place),
             Who::Named(killer_name, None, victim_name),
+        ),
+        // Gangs: `other` is the gang after "di" ("dei Topi della Coda").
+        EventKind::GangFounded {
+            gang_name,
+            leader,
+            leader_name,
+            place,
+            ..
+        } => item(
+            News::GangFounded,
+            Some(*leader),
+            [Some(*leader), None, None],
+            Where::At(*place),
+            Who::Named(leader_name, None, &crate::gang::short_of_form(gang_name)),
+        ),
+        EventKind::GangExtortion {
+            gang_name,
+            collector,
+            victim: Fighter::Npc(v),
+            victim_name,
+            paid: false,
+            place,
+            ..
+        } => item(
+            News::GangBeating,
+            Some(*v),
+            [Some(*v), collector.npc(), None],
+            Where::At(*place),
+            Who::Named(victim_name, None, &crate::gang::short_of_form(gang_name)),
+        ),
+        EventKind::GangHit {
+            gang_name,
+            killer,
+            victim: Fighter::Npc(v),
+            victim_name,
+            place,
+            ..
+        } => item(
+            News::GangHit,
+            Some(*v),
+            [Some(*v), Some(*killer), None],
+            Where::At(*place),
+            Who::Named(victim_name, None, &crate::gang::short_of_form(gang_name)),
         ),
         EventKind::PayChanged { raised, .. } => item(
             if *raised {

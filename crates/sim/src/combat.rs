@@ -25,10 +25,11 @@
 //! less, and it becomes news. NPCs start fights rarely, scaled by
 //! [`crate::SimParams::violence`] (0: never), for a [`Motive`].
 //!
-//! **Hooks for gangs** (later): grudges with their reason ([`Grudge`]),
-//! [`crate::Npc::aggression`], a violence score with its [`Reputation`]
-//! ([`crate::Npc::violence`]), the last attacker ([`crate::Npc::last_attacker`])
-//! and whom a fight was for ([`Motive::Revenge`]).
+//! **Gangs** ([`crate::gang`]) build on these: grudges with their reason
+//! ([`Grudge`], and [`GrudgeReason::Extorted`], [`GrudgeReason::GangMate`],
+//! [`GrudgeReason::Defied`]), [`crate::Npc::aggression`], the violence score
+//! with its [`Reputation`], and their own motives ([`Motive::Pizzo`],
+//! [`Motive::Gang`], [`Motive::Hit`]: a lethal fight ordered by a leader).
 
 use std::fmt;
 
@@ -110,10 +111,17 @@ pub enum Motive {
     Player,
     /// An NPC defending itself or striking back at the player.
     Defense,
+    /// A gang member beats who refuses to pay the pizzo (see [`crate::gang`]).
+    Pizzo,
+    /// Gang business: a fight between rival gangs, a member defending
+    /// another or avenging it.
+    Gang,
+    /// A killing ordered by a gang's leader ([`crate::gang::Hit`]): lethal.
+    Hit,
 }
 
 impl Motive {
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 10;
     pub const ALL: [Motive; Self::COUNT] = [
         Motive::Quarrel,
         Motive::Grudge,
@@ -122,7 +130,15 @@ impl Motive {
         Motive::Robbery,
         Motive::Player,
         Motive::Defense,
+        Motive::Pizzo,
+        Motive::Gang,
+        Motive::Hit,
     ];
+
+    /// Whether it is gang business (pizzo, rivalry, a hit).
+    pub fn is_gang(self) -> bool {
+        matches!(self, Motive::Pizzo | Motive::Gang | Motive::Hit)
+    }
 
     pub fn index(self) -> usize {
         self as usize
@@ -138,6 +154,9 @@ impl Motive {
             Motive::Robbery => "rapina per fame",
             Motive::Player => "aggressione del giocatore",
             Motive::Defense => "difesa",
+            Motive::Pizzo => "pizzo",
+            Motive::Gang => "affari di banda",
+            Motive::Hit => "regolamento di conti",
         }
     }
 }
@@ -209,6 +228,13 @@ pub enum GrudgeReason {
     KilledLovedOne(NpcId),
     /// They caught it stealing.
     Theft,
+    /// It took the pizzo from them (see [`crate::gang`]).
+    Extorted,
+    /// It hurt (or killed) `who`, a member of their gang (the player too,
+    /// if it is one).
+    GangMate(Fighter),
+    /// It defied their gang: refused the pizzo, or left it.
+    Defied,
 }
 
 /// A grudge against someone ([`crate::Npc::grudges`]): a memory of why,

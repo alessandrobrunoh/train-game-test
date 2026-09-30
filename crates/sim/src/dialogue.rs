@@ -158,6 +158,13 @@ pub enum News {
     Fight,
     /// `about` killed someone (the subject's `other`).
     Killing,
+    /// `about` leads a new gang (the subject's `other` is the gang after
+    /// "di": "dei Topi della Coda"), see [`crate::gang`].
+    GangFounded,
+    /// A gang (`other`) beat `about`, who would not pay the pizzo.
+    GangBeating,
+    /// A gang (`other`) had `about` killed.
+    GangHit,
 }
 
 impl News {
@@ -178,12 +185,15 @@ impl News {
             | News::Shortage(_)
             | News::BirthDenied
             | News::Austerity
-            | News::PayCut => Valence::Bad,
+            | News::PayCut
+            | News::GangFounded => Valence::Bad,
             News::TheftCaught
             | News::TheftUnseen
             | News::HelpRefused
             | News::Fight
-            | News::Killing => Valence::Scandal,
+            | News::Killing
+            | News::GangBeating
+            | News::GangHit => Valence::Scandal,
         }
     }
 }

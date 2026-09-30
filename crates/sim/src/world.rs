@@ -18,6 +18,7 @@ use crate::deliberation::{
 };
 use crate::dialogue::{Conversation, ConversationCounters};
 use crate::event::{DeathCause, Event, EventKind};
+use crate::gang::GangState;
 use crate::ids::{CarriageId, NpcId, StationId};
 use crate::item::{ItemKind, Stock};
 use crate::names;
@@ -35,6 +36,7 @@ mod craft;
 mod custode;
 mod deliberate;
 mod economy;
+mod gang;
 mod health;
 mod life;
 mod market;
@@ -92,6 +94,14 @@ const COMBAT_SEED: u64 = 0xF157_C0FF_B10D;
 /// The fights' RNG stream of a world saved before it existed.
 fn default_combat_rng() -> ChaCha8Rng {
     ChaCha8Rng::seed_from_u64(COMBAT_SEED)
+}
+
+/// Seed of the gangs' own RNG stream (xored with the world seed).
+const GANG_SEED: u64 = 0x6A_4600_B0DA;
+
+/// The gangs' RNG stream of a world saved before it existed.
+fn default_gang_rng() -> ChaCha8Rng {
+    ChaCha8Rng::seed_from_u64(GANG_SEED)
 }
 
 /// Repeating carriage pattern, head to tail. 20 carriages give 6 Dormitori,
@@ -214,6 +224,13 @@ pub struct World {
     /// Fight counters since the world was generated.
     #[serde(default)]
     pub combat: CombatCounters,
+    /// Gangs, the player among them and their counters (see `gang.rs`).
+    #[serde(default)]
+    gangs: GangState,
+    /// Randomness of the gangs (see `gang.rs`), a stream of its own: never
+    /// drawn with `violence × gangs` at 0 and no gangs.
+    #[serde(default = "default_gang_rng")]
+    gang_rng: ChaCha8Rng,
     /// Scratch buffer reused every tick (see `presence_index`).
     #[serde(skip)]
     presence: Presence,
@@ -692,6 +709,8 @@ impl World {
             combat_rng: ChaCha8Rng::seed_from_u64(seed ^ COMBAT_SEED),
             fights: Vec::new(),
             combat: CombatCounters::default(),
+            gangs: GangState::default(),
+            gang_rng: ChaCha8Rng::seed_from_u64(seed ^ GANG_SEED),
             presence: Presence::default(),
             load: Vec::new(),
         };
@@ -834,6 +853,7 @@ impl World {
         };
         let mut family = self.family_context(npc);
         family.push_str(&self.health_context(npc));
+        family.push_str(&self.gang_context(npc));
         Some(format!(
             "{} ({moment}). {}, {} anni ({}), si trova in {}{}. Casa: {}. {job} {family}\
              Possiede {} gettoni, {tool} e {clothes}. \
@@ -1070,12 +1090,14 @@ impl World {
                 self.record_prices();
                 self.furnish_dorms();
                 self.combat_midnight();
+                self.gangs_midnight();
             }
             self.check_shortages();
             self.end_gatherings();
             self.temptations();
             self.stalls_hour();
             self.violence_hour();
+            self.gangs_hour();
             self.care_for_bedridden();
         }
 
@@ -1351,13 +1373,18 @@ impl World {
                 Some(ActionKind::Socialize),
             );
         }
-        // Visit the liveliest other carriage.
+        // Visit the liveliest other carriage (at night, not a feared gang's
+        // territory: see `gang.rs`).
+        let avoided = self.avoided_at_night(i);
         if let Some(to) = presence
             .by_carriage
             .iter()
             .enumerate()
             .filter(|&(c, people)| {
-                c != here.index() && !people.is_empty() && !self.is_crowded(CarriageId(c as u16))
+                c != here.index()
+                    && !people.is_empty()
+                    && !self.is_crowded(CarriageId(c as u16))
+                    && !avoided.contains(&CarriageId(c as u16))
             })
             .max_by_key(|&(c, people)| (people.len(), std::cmp::Reverse(c.abs_diff(here.index()))))
             .map(|(c, _)| CarriageId(c as u16))
