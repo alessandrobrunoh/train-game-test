@@ -57,4 +57,4 @@ pub use narrator::{
     user_prompt,
 };
 pub use proposal::{Category, Draft, Effect, Ingredient, Need, Proposal, Rationale};
-pub use summary::{Catalog, WorldSummary};
+pub use summary::{Catalog, GangLine, WorldSummary};

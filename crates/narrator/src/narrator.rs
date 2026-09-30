@@ -577,6 +577,8 @@ Tipi di novità:
 - "evento": un fatto che succede una volta e cambia le scorte o i bisogni (da 1 a {max_effects} effetti).
 - "statistica": un numero nuovo, calcolato dal treno, per una tensione che nessun numero misura.
 
+Se il treno ha delle "bande" (gruppi nati da soli che chiedono il pizzo, si fanno la guerra per le carrozze e a volte uccidono), sono una tensione come le altre: puoi rispondere per esempio con un lavoro di "servizio" come una guardia in una carrozza del loro territorio (dove una guardia lavora le bande osano meno), un evento o una statistica sulla paura.
+
 Regole:
 - Nomi in italiano, brevi (da 2 a 32 caratteri, al massimo 4 parole, solo lettere), mai uguali a un nome del catalogo o a una novità già proposta. Non copiare l'esempio.
 - Oggetti, lavori e carrozze si citano con il loro nome esatto del catalogo (o di una novità già accettata).

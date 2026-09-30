@@ -2,15 +2,16 @@
 //!
 //! Built only from `sim`'s public API, read-only. It is small on purpose
 //! (well under 1.5k tokens as JSON): totals and shares instead of lists of
-//! people, the last few notable events, the catalog by name. The JSON keys
+//! people, the last few notable events, the catalog by name, the gangs (the
+//! biggest few, only when there are any: see [`GangLine`]). The JSON keys
 //! are Italian because the prompt is.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use sim::{
-    CarriageKind, DeathCause, EventKind, ItemCategory, ItemKind, Job, LifeStage, MINUTES_PER_DAY,
-    Stats, Trend, World,
+    CarriageKind, DeathCause, EventKind, Fighter, ItemCategory, ItemKind, Job, LifeStage,
+    MINUTES_PER_DAY, Stats, Trend, World,
 };
 
 /// Fill (stock / storage capacity on the whole train) under which an item is
@@ -54,8 +55,96 @@ pub struct WorldSummary {
     /// Carriages per kind.
     #[serde(rename = "carrozze")]
     pub carriages: BTreeMap<String, u32>,
+    /// The gangs of the train, at most [`MAX_GANGS`] (none: left out).
+    #[serde(rename = "bande", default, skip_serializing_if = "Vec::is_empty")]
+    pub gangs: Vec<GangLine>,
     #[serde(rename = "catalogo")]
     pub catalog: Catalog,
+}
+
+/// Most gangs listed in the summary (the biggest).
+pub const MAX_GANGS: usize = 5;
+/// Days of gang violence counted in [`GangLine::recent_violence`].
+pub const GANG_VIOLENCE_DAYS: u64 = 3;
+
+/// A gang, in short (see `sim::gang`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GangLine {
+    #[serde(rename = "nome")]
+    pub name: String,
+    #[serde(rename = "membri")]
+    pub members: u32,
+    /// Carriage numbers (1 = head) it claims.
+    #[serde(rename = "territorio")]
+    pub territory: Vec<u16>,
+    /// Tokens in its treasury.
+    #[serde(rename = "tesoro")]
+    pub treasury: u32,
+    /// "poco conosciuta", "rispettata", "temuta", "il terrore del treno".
+    #[serde(rename = "fama")]
+    pub reputation: String,
+    /// Fights started by its members and pizzo refused, over the last
+    /// [`GANG_VIOLENCE_DAYS`] days.
+    #[serde(rename = "violenze_recenti")]
+    pub recent_violence: u32,
+    /// People its members killed since it was founded.
+    #[serde(rename = "uccisi")]
+    pub kills: u64,
+    /// Names of its rival gangs.
+    #[serde(rename = "rivali", default, skip_serializing_if = "Vec::is_empty")]
+    pub rivals: Vec<String>,
+}
+
+impl GangLine {
+    /// The gangs of `world`, biggest first (at most [`MAX_GANGS`]).
+    pub fn of(world: &World) -> Vec<GangLine> {
+        let since = world
+            .clock
+            .minutes()
+            .saturating_sub(GANG_VIOLENCE_DAYS * MINUTES_PER_DAY);
+        let mut lines: Vec<GangLine> = world
+            .gangs()
+            .iter()
+            .map(|g| {
+                let recent = world
+                    .events
+                    .iter()
+                    .filter(|e| e.time.minutes() >= since)
+                    .filter(|e| match &e.kind {
+                        EventKind::Attacked {
+                            attacker: Fighter::Npc(a),
+                            first: true,
+                            ..
+                        } => g.is_member(*a),
+                        EventKind::GangExtortion {
+                            gang, paid: false, ..
+                        }
+                        | EventKind::GangHit { gang, .. } => *gang == g.id,
+                        _ => false,
+                    })
+                    .count() as u32;
+                GangLine {
+                    name: g.name.clone(),
+                    members: g.size() as u32,
+                    territory: g.territory.iter().map(|c| c.0 + 1).collect(),
+                    treasury: g.treasury,
+                    reputation: g.reputation().label().to_string(),
+                    recent_violence: recent,
+                    kills: g.tally.kills,
+                    rivals: g
+                        .ties
+                        .iter()
+                        .filter(|t| t.stance < sim::RIVAL_BELOW)
+                        .filter_map(|t| world.gang(t.other))
+                        .map(|o| o.name.clone())
+                        .collect(),
+                }
+            })
+            .collect();
+        lines.sort_by(|a, b| b.members.cmp(&a.members).then(a.name.cmp(&b.name)));
+        lines.truncate(MAX_GANGS);
+        lines
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -360,6 +449,7 @@ impl WorldSummary {
             event_counts,
             events,
             carriages,
+            gangs: GangLine::of(world),
             catalog: Catalog::of(world.catalog()),
         }
     }
@@ -395,6 +485,10 @@ fn notable(kind: &EventKind) -> Option<&'static str> {
         EventKind::AdminConceded { .. } => "concessioni",
         EventKind::Austerity { .. } => "austerità",
         EventKind::PayChanged { .. } => "paghe cambiate",
+        EventKind::GangFounded { .. } => "bande nate",
+        EventKind::GangDisbanded { .. } => "bande sciolte",
+        EventKind::GangLeader { .. } => "nuovi capi di banda",
+        EventKind::GangHit { .. } => "regolamenti di conti",
         _ => return None,
     })
 }
@@ -437,6 +531,39 @@ mod tests {
             let tokens = s.approx_tokens();
             assert!(tokens < 1200, "{tokens} tokens: {}", s.to_json());
         }
+    }
+
+    /// Gangs are in the summary (the biggest [`MAX_GANGS`]), and it stays small.
+    #[test]
+    fn gangs_are_listed_and_the_size_stays_bounded() {
+        let mut world = World::generate(5, 40, 600);
+        assert!(WorldSummary::from_world(&world).gangs.is_empty());
+        assert!(!WorldSummary::from_world(&world).to_json().contains("bande"));
+        let adults: Vec<sim::NpcId> = world
+            .npcs
+            .iter()
+            .filter(|n| (20..=50).contains(&n.age))
+            .map(|n| n.id)
+            .collect();
+        for k in 0..7 {
+            world.found_gang(&adults[k * 6..k * 6 + 6]).expect("a gang");
+        }
+        let s = WorldSummary::from_world(&world);
+        assert_eq!(s.gangs.len(), MAX_GANGS);
+        assert!(
+            s.gangs
+                .iter()
+                .all(|g| g.members == 6 && !g.territory.is_empty())
+        );
+        assert!(
+            s.events.iter().any(|e| e.contains("banda")),
+            "{:?}",
+            s.events
+        );
+        let tokens = s.approx_tokens();
+        assert!(tokens < 1400, "{tokens} tokens: {}", s.to_json());
+        let back: WorldSummary = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(back.gangs, s.gangs);
     }
 
     #[test]
